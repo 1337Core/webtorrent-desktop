@@ -4,42 +4,39 @@
     <img src="https://webtorrent.io/img/WebTorrent.png" alt="WebTorrent" width="200">
   </a>
   <br>
-  WebTorrent Desktop
+  WebTorrent Updated
   <br>
   <br>
 </h1>
 
-<h4 align="center">The streaming torrent app. For Mac, Windows, and Linux.</h4>
+<h4 align="center">A maintained personal fork for Apple Silicon Macs.</h4>
 
-<p align="center">
-  <a href="https://discord.gg/cnXkm4Z"><img src="https://img.shields.io/discord/612575111718895616" alt="discord"></a>
-  <a href="https://github.com/webtorrent/webtorrent-desktop/actions/workflows/ci.yml"><img src="https://github.com/webtorrent/webtorrent-desktop/actions/workflows/ci.yml/badge.svg" alt="GitHub CI action"></a>
-  <a href="https://github.com/webtorrent/webtorrent-desktop/releases"><img src="https://img.shields.io/github/release/webtorrent/webtorrent-desktop.svg" alt="github release version"></a>
-  <a href="https://github.com/webtorrent/webtorrent-desktop/releases"><img src="https://img.shields.io/github/downloads/webtorrent/webtorrent-desktop/total.svg" alt="github release downloads"></a>
-  <a href="https://standardjs.com"><img src="https://img.shields.io/badge/code_style-standard-brightgreen.svg" alt="Standard - JavaScript Style Guide"></a>
-</p>
+## Fork status and differences
 
-## Install
+This repository is the **WebTorrent Updated** fork. It is a separate
+application and is not an official WebTorrent release.
 
-### Recommended Install
+- The only supported target is the owner’s M-series Mac.
+- It uses its own bundle ID and application-data directory, so it will not
+  overwrite the original WebTorrent Desktop installation.
+- The planned migration updates Electron, Node, WebTorrent, React, the build
+  system, tests, dependencies, and renderer security model.
+- Casting, telemetry, inherited update services, uTP, LSD, UPnP, and NAT-PMP
+  are intentionally excluded from the first maintained build.
+- There is no public installer, notarization, automatic updater, Windows/Linux
+  build, or Intel Mac build.
 
-Download the latest version of WebTorrent Desktop from
-[the official website](https://webtorrent.io/desktop/):
+The complete decisions and migration gates are in [plan.md](./plan.md). The
+migration has not started yet; the current application source still reflects
+the legacy WebTorrent Desktop implementation.
 
-### [✨ Download WebTorrent Desktop ✨](https://webtorrent.io/desktop/)
+## Legacy upstream documentation
 
-### Advanced Install
-
-- Download specific installer files from the [GitHub releases](https://github.com/webtorrent/webtorrent-desktop/releases) page.
-
-- Use [Homebrew-Cask](https://github.com/caskroom/homebrew-cask) to install from the command line:
-
-  ```
-  $ brew install --cask webtorrent
-  ```
-
-- Try the (unstable) development version by cloning the Git repository. See the
-  ["How to Contribute"](#how-to-contribute) instructions.
+Everything below this heading is retained from the original project for
+historical reference. Its commands, platform claims, dependencies, privacy
+description, and packaging instructions describe the legacy code and are not
+promises about WebTorrent Updated. They will be rewritten as the migration
+replaces the corresponding systems.
 
 ## Screenshots
 
