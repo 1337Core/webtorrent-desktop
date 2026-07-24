@@ -82,12 +82,54 @@ section p {
   text-align: right;
 }
 
+.status-group {
+  display: grid;
+  justify-items: end;
+  gap: 10px;
+}
+
+.status-group button {
+  padding: 8px 12px;
+  border: 1px solid #3f4b52;
+  border-radius: 8px;
+  color: #f5f7f8;
+  background: #293238;
+  font: inherit;
+  cursor: pointer;
+}
+
+.status-group button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.status-group button:focus-visible {
+  outline: 2px solid #7eebc3;
+  outline-offset: 2px;
+}
+
 .status-ready {
   color: #7eebc3;
   background: #183a31;
 }
 
+.status-restarting {
+  color: #f2d28a;
+  background: #3c3420;
+}
+
 .status-failed {
   color: #ff9e91;
   background: #432420;
+}
+
+.status-stopped {
+  color: #ff9e91;
+  background: #432420;
+}
+
+.error {
+  margin: 20px 0 0;
+  color: #ff9e91;
+  font-size: 14px;
 }

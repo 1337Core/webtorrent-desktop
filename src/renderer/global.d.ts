@@ -1,11 +1,15 @@
-import type { EngineStatus, RuntimeInfo } from '../shared/contracts'
+import type {
+  BootstrapResult,
+  EngineStatus,
+  RestartEngineResult
+} from '../shared/contracts'
 
 declare global {
   interface Window {
-    webtorrentUpdated: {
-      getRuntimeInfo: () => RuntimeInfo
+    desktop: {
+      getBootstrap: () => Promise<BootstrapResult>
       onEngineStatus: (listener: (status: EngineStatus) => void) => () => void
-      reportRendererReady: () => void
+      restartEngine: () => Promise<RestartEngineResult>
     }
   }
 }

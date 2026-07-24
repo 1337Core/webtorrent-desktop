@@ -1415,8 +1415,16 @@ accepted audit findings are recorded in `docs/dependency-audit.md`.
 - Remove remote/arbitrary IPC and privileged auxiliary windows.
 - Establish redacted diagnostics and production security assertions.
 
-Exit: an empty-shell app launches with final trust boundaries on the owner’s
-Mac.
+Exit: **passed 2026-07-24** — the empty-shell app launches on the owner’s Mac
+with a nonpersistent UI session, OS-sandboxed renderer, context-isolated typed
+preload, exact frame-scoped and schema-validated IPC, main-owned versioned
+state, redacted bounded diagnostics, and a supervised utility engine. Clean
+development and packaged tests measure the committed React bootstrap, absent
+renderer Node globals, an ephemeral UI session, OS sandboxing, denied
+permissions/popups/navigation/network/WebRTC, native engine WebRTC readiness,
+one automatic restart, second-crash containment, observed utility exit with no
+orphan, isolated smoke state with cleanup, the restricted ASAR/capability
+inventory, and the Milestone 1 arm64/fuse/signature guarantees.
 
 ### Milestone 3 — migrate the WebTorrent engine
 
@@ -1566,6 +1574,7 @@ endpoints. If not, the current assets and empty endpoint defaults remain.
 - [Electron sandboxing](https://www.electronjs.org/docs/latest/tutorial/sandbox)
 - [Electron context isolation](https://www.electronjs.org/docs/latest/tutorial/context-isolation)
 - [Electron utility process](https://www.electronjs.org/docs/latest/api/utility-process)
+- [Chromium Connection-Allowlist WebRTC enforcement](https://chromium.googlesource.com/chromium/src/+/ec5518554846b5ac1a242b423d7d3ff145b6b6ab%5E%21/)
 - [Electron fuses](https://www.electronjs.org/docs/latest/tutorial/fuses)
 - [Electron ASAR integrity platform support](https://www.electronjs.org/docs/latest/tutorial/asar-integrity)
 - [Electron packaging recommendation](https://www.electronjs.org/docs/latest/tutorial/tutorial-packaging)

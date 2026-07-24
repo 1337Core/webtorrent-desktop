@@ -3,9 +3,9 @@
 Snapshot: **2026-07-24**
 
 This record explains the audit findings accepted at the Apple Silicon
-toolchain baseline. It is not a blanket exception: every dependency update
-must repeat the review, and a fixed compatible upstream release replaces an
-exception as soon as it qualifies.
+toolchain and process-boundary baselines. It is not a blanket exception: every
+dependency update must repeat the review, and a fixed compatible upstream
+release replaces an exception as soon as it qualifies.
 
 ## Packaged production graph
 
@@ -13,6 +13,10 @@ exception as soon as it qualifies.
 same transitive advisory propagated through this chain:
 
 `webtorrent` → `torrent-discovery` → `bittorrent-tracker` → `ip@2.0.1`
+
+The Milestone 2 graph contains 191 production packages. Adding exact
+`electron-store@11.0.2` and `zod@4.4.3` introduced no additional advisory;
+the four labels below remain the complete production result.
 
 The underlying finding is
 [GHSA-2p57-rm9w-gvfp](https://github.com/advisories/GHSA-2p57-rm9w-gvfp),
@@ -76,6 +80,16 @@ The milestone package verifier proves:
 - `node-datachannel` is the only packaged `.node` file and matches its
   qualified SHA-256;
 - development and unused optional native packages are absent;
+- the ASAR contains the ESM main entry and approved runtime dependencies but
+  no legacy application source tree, remote bridge, Spectron, app-owned tests,
+  or application-build source maps (published dependencies may retain their own
+  test or source-map files);
+- every direct runtime dependency has the exact reviewed name/version in both
+  the packaged root manifest and its packaged dependency manifest;
+- the packaged renderer contains no raw IPC, Node, WebTorrent, or durable-state
+  capability marker;
+- the final macOS plist declares no camera, microphone, Bluetooth, or audio
+  capture permission, and the app has no dangerous entitlement;
 - ASAR integrity metadata and the complete Electron fuse policy match the
   plan; and
 - the local ad-hoc signature verifies strictly.

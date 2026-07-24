@@ -36,7 +36,7 @@ async function buildNodeEntry({
       rollupOptions: {
         external: [...nodeExternals, ...external]
       },
-      sourcemap: true,
+      sourcemap: false,
       target: 'node24'
     }
   })
@@ -44,8 +44,9 @@ async function buildNodeEntry({
 
 await buildNodeEntry({
   entry: 'src/main/index.ts',
-  fileName: 'index.cjs',
-  format: 'cjs',
+  external: ['electron-store'],
+  fileName: 'index.mjs',
+  format: 'es',
   outDir: 'main'
 })
 
@@ -73,7 +74,7 @@ await build({
   build: {
     emptyOutDir: false,
     outDir: resolve(outputRoot, 'renderer'),
-    sourcemap: true,
+    sourcemap: false,
     target: 'chrome142'
   }
 })
