@@ -26,9 +26,10 @@ application and is not an official WebTorrent release.
 - There is no public installer, notarization, automatic updater, Windows/Linux
   build, or Intel Mac build.
 
-The complete decisions and migration gates are in [plan.md](./plan.md). The
-migration has not started yet; the current application source still reflects
-the legacy WebTorrent Desktop implementation.
+The complete decisions and migration gates are in [plan.md](./plan.md).
+Migration is in progress on this branch; until a milestone replaces a legacy
+subsystem, its source still reflects the original WebTorrent Desktop
+implementation.
 
 ## Legacy upstream documentation
 

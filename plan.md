@@ -1,10 +1,12 @@
 # Maintained WebTorrent Desktop fork: modernization plan
 
-Status: **research complete; migration is not approved or started**
+Status: **approved; migration in progress**
 
 Research snapshot: **2026-07-24**
 
 Working branch: `feat/webtorrent-updated`
+
+Migration approved by the repository owner: **2026-07-24**
 
 ## 1. Purpose and approval boundary
 
@@ -13,21 +15,13 @@ testing, release, and maintenance decisions for turning this repository into a
 maintained WebTorrent Desktop fork. It is intentionally more specific than a
 roadmap and less granular than a file-by-file implementation checklist.
 
-The migration must not begin until the repository owner explicitly approves
-this plan. Approval means an unambiguous instruction such as “approve the
-migration” or “start the migration.” Discussion, edits to this plan, or
-approval of an individual decision do not authorize implementation.
+The repository owner explicitly approved this plan and instructed the migration
+to begin on 2026-07-24. Future amendments remain explicit decisions recorded in
+this document.
 
-Until then:
-
-- no runtime or dependency migration;
-- no install or lockfile rewrite;
-- no packaging, signing, updater, or application behavior changes;
-- no release or upstream submission; and
-- no use of signing or publishing credentials.
-
-Only this plan and the README fork notice are intended to change before
-migration approval.
+Approval authorizes the local migration, dependency installation, packaging,
+and tests on this branch. Release, merge, upstream submission, and use of
+publishing credentials remain separately controlled actions.
 
 ### Decision vocabulary
 
@@ -1375,7 +1369,7 @@ This is milestone granularity, not a file-edit plan.
   swarms.
 - Establish the intentional-removal list as acceptance-test expectations.
 
-Exit: explicit migration approval.
+Exit: **passed 2026-07-24** — explicit migration approval received.
 
 ### Milestone 1 — prove the Apple Silicon toolchain
 
@@ -1598,10 +1592,6 @@ endpoints. If not, the current assets and empty endpoint defaults remain.
 
 ## 26. Final gate
 
-This plan is ready for owner review. The next action is **not** migration. The
-next action is one of:
-
-1. amend decisions in this document;
-2. explicitly approve the migration.
-
-Without option 2, implementation remains stopped.
+The owner approved migration on 2026-07-24. Work proceeds through the milestone
+and acceptance gates above on `feat/webtorrent-updated`; merge and release still
+require their own explicit decisions.
