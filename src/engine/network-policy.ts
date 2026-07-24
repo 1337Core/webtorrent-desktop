@@ -280,13 +280,12 @@ export class EgressPolicy {
 
   validateTrackerUrl(value: string): string {
     const url = parseNetworkUrl(value)
-    if (url.protocol === 'udp:') {
+    if (url.protocol === 'udp:' || url.protocol === 'ws:') {
       throw new EgressPolicyError('TRACKER_TRANSPORT_DISABLED')
     }
     if (
       url.protocol !== 'http:' &&
       url.protocol !== 'https:' &&
-      url.protocol !== 'ws:' &&
       url.protocol !== 'wss:'
     ) {
       throw new EgressPolicyError('SCHEME_BLOCKED')

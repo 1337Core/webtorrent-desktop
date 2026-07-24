@@ -74,17 +74,23 @@ describe('IPv4 egress classification', () => {
 })
 
 describe('EgressPolicy URL validation', () => {
-  it('accepts mediated tracker transports and explicitly disables UDP', () => {
+  it('accepts mediated tracker transports and disables UDP and cleartext WS', () => {
     const candidate = new EgressPolicy()
 
     expect(
       candidate.validateTrackerUrl('https://tracker.example/announce')
     ).toBe('https://tracker.example/announce')
-    expect(() =>
-      candidate.validateTrackerUrl('udp://tracker.example:6969/announce')
-    ).toThrowError(
-      expect.objectContaining({ code: 'TRACKER_TRANSPORT_DISABLED' })
+    expect(candidate.validateTrackerUrl('wss://tracker.example/announce')).toBe(
+      'wss://tracker.example/announce'
     )
+    for (const disabled of [
+      'udp://tracker.example:6969/announce',
+      'ws://tracker.example/announce'
+    ]) {
+      expect(() => candidate.validateTrackerUrl(disabled)).toThrowError(
+        expect.objectContaining({ code: 'TRACKER_TRANSPORT_DISABLED' })
+      )
+    }
   })
 
   it('rejects credentials, fragments, oversized URLs, and insecure sources', () => {

@@ -69,6 +69,7 @@ describe('validateTorrentMetadata', () => {
         'announce-list': [
           [
             'udp://tracker.example:6969/announce',
+            'ws://cleartext.example/announce',
             'https://one.example/announce'
           ],
           ['wss://two.example/announce']
