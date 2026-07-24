@@ -344,7 +344,7 @@ describe('PreparationStore', () => {
     })
     const firstReservation = store.beginCommit(created.preparationId)
     firstReservation.metadata.torrentBytes.fill(255)
-    firstReservation.metadata.files[0]!.path = 'mutated/path'
+    Reflect.set(firstReservation.metadata.files[0]!, 'path', 'mutated/path')
 
     store.rollbackCommitBeforeMetadata(firstReservation)
     const secondReservation = store.beginCommit(created.preparationId)
