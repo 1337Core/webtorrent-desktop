@@ -35,6 +35,7 @@ type EngineProtocolControllerOptions = {
   now?: () => number
   postMessage: (message: EngineChildMessage) => void
   proveRuntime: () => Promise<EngineRuntimeInfo>
+  shutdown?: () => Promise<void>
 }
 
 type CorrelatedChildMessage = Exclude<
@@ -86,6 +87,7 @@ export class EngineProtocolController {
   readonly #now: () => number
   readonly #postMessage: (message: EngineChildMessage) => void
   readonly #proveRuntime: () => Promise<EngineRuntimeInfo>
+  readonly #shutdownRuntime: () => Promise<void>
   readonly #queue = new EngineOperationQueue()
   #generationId: string | null = null
   #inboundSequence = -1
@@ -102,6 +104,7 @@ export class EngineProtocolController {
     this.#now = options.now ?? Date.now
     this.#postMessage = options.postMessage
     this.#proveRuntime = options.proveRuntime
+    this.#shutdownRuntime = options.shutdown ?? (() => Promise.resolve())
   }
 
   receive(value: unknown): void {
@@ -347,17 +350,21 @@ export class EngineProtocolController {
     if (this.#shuttingDown) return
     this.#shuttingDown = true
     this.#queue.close()
-    void this.#queue.drain().then(() => {
-      if (this.#exited) return
-      this.#postCorrelated({
-        type: 'engine:stopped',
-        requestId: message.requestId,
-        payload: {}
+    void this.#queue
+      .drain()
+      .then(() => this.#shutdownRuntime())
+      .then(() => {
+        if (this.#exited) return
+        this.#postCorrelated({
+          type: 'engine:stopped',
+          requestId: message.requestId,
+          payload: {}
+        })
+        if (this.#exited) return
+        this.#exited = true
+        this.#exit(0)
       })
-      if (this.#exited) return
-      this.#exited = true
-      this.#exit(0)
-    })
+      .catch(() => this.#fatalExit())
   }
 
   #postResult(requestId: string, payload: EngineCommandResult): void {

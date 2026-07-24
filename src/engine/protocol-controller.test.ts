@@ -201,6 +201,7 @@ describe('EngineProtocolController', () => {
   it('aborts admitted work before completing shutdown', async () => {
     const posted: EngineChildMessage[] = []
     const exit = vi.fn()
+    const shutdown = vi.fn(() => Promise.resolve())
     const controller = new EngineProtocolController({
       execute: (_operation, signal) =>
         new Promise((_resolve, reject) => {
@@ -210,7 +211,8 @@ describe('EngineProtocolController', () => {
         }),
       exit,
       postMessage: message => posted.push(message),
-      proveRuntime: () => Promise.resolve(runtime)
+      proveRuntime: () => Promise.resolve(runtime),
+      shutdown
     })
     await initialize(controller, posted)
     controller.receive(
@@ -237,7 +239,67 @@ describe('EngineProtocolController', () => {
     expect(
       posted.filter(message => message.type === 'engine:result')
     ).toHaveLength(0)
+    expect(shutdown).toHaveBeenCalledOnce()
     expect(exit).toHaveBeenCalledWith(0)
+  })
+
+  it('waits for runtime resources before acknowledging shutdown', async () => {
+    const posted: EngineChildMessage[] = []
+    const exit = vi.fn()
+    const shutdown = Promise.withResolvers<void>()
+    const controller = new EngineProtocolController({
+      execute: () => Promise.resolve(successfulListResult()),
+      exit,
+      postMessage: message => posted.push(message),
+      proveRuntime: () => Promise.resolve(runtime),
+      shutdown: () => shutdown.promise
+    })
+    await initialize(controller, posted)
+
+    controller.receive(
+      parentMessage(1, {
+        type: 'engine:shutdown',
+        payload: { reason: 'APP_QUIT' }
+      })
+    )
+    await flushMicrotasks()
+
+    expect(posted.some(message => message.type === 'engine:stopped')).toBe(
+      false
+    )
+    expect(exit).not.toHaveBeenCalled()
+
+    shutdown.resolve()
+    await flushMicrotasks()
+
+    expect(posted.at(-1)?.type).toBe('engine:stopped')
+    expect(exit).toHaveBeenCalledWith(0)
+  })
+
+  it('fails closed when runtime shutdown rejects', async () => {
+    const posted: EngineChildMessage[] = []
+    const exit = vi.fn()
+    const controller = new EngineProtocolController({
+      execute: () => Promise.resolve(successfulListResult()),
+      exit,
+      postMessage: message => posted.push(message),
+      proveRuntime: () => Promise.resolve(runtime),
+      shutdown: () => Promise.reject(new Error('close failed'))
+    })
+    await initialize(controller, posted)
+
+    controller.receive(
+      parentMessage(1, {
+        type: 'engine:shutdown',
+        payload: { reason: 'APP_QUIT' }
+      })
+    )
+    await flushMicrotasks()
+
+    expect(posted.some(message => message.type === 'engine:stopped')).toBe(
+      false
+    )
+    expect(exit).toHaveBeenCalledWith(2)
   })
 
   it('rejects a reused request ID before executing a mutation twice', async () => {
