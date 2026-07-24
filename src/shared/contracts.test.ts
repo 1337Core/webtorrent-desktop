@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   bootstrapRequestSchema,
   bootstrapResultSchema,
+  ENGINE_MESSAGE_BUDGET,
   engineChildMessageSchema,
   engineParentMessageSchema,
   engineStatusEventSchema,
@@ -10,6 +11,7 @@ import {
   restartEngineRequestSchema,
   restartEngineResultSchema
 } from './contracts'
+import { checkPayloadBudget } from './payload-budget'
 
 const requestId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const generationId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
@@ -193,7 +195,20 @@ describe('engine control contracts', () => {
     timestampMs: 1
   }
 
-  it('validates initialize, ping, and shutdown parent messages', () => {
+  it('validates initialize, ping, execute, and shutdown parent messages', () => {
+    expect(
+      engineParentMessageSchema.safeParse({
+        ...base,
+        type: 'engine:execute',
+        payload: {
+          deadlineMs: 10_000,
+          operation: {
+            command: 'list-torrents',
+            payload: { cursor: 0, limit: 50 }
+          }
+        }
+      }).success
+    ).toBe(true)
     expect(
       engineParentMessageSchema.safeParse({
         ...base,
@@ -221,10 +236,21 @@ describe('engine control contracts', () => {
     ).toBe(true)
   })
 
-  it('validates ready, pong, stopped, and fixed failure child messages', () => {
+  it('validates correlated results and independently identified events', () => {
     for (const message of [
       { ...base, type: 'engine:ready', payload: engineRuntime },
       { ...base, type: 'engine:pong', payload: {} },
+      {
+        ...base,
+        type: 'engine:result',
+        payload: {
+          ok: true,
+          result: {
+            command: 'list-torrents',
+            value: { items: [], nextCursor: null, total: 0 }
+          }
+        }
+      },
       { ...base, type: 'engine:stopped', payload: {} },
       {
         ...base,
@@ -237,6 +263,25 @@ describe('engine control contracts', () => {
     ]) {
       expect(engineChildMessageSchema.safeParse(message).success).toBe(true)
     }
+    const eventBase = {
+      protocolVersion: base.protocolVersion,
+      generationId: base.generationId,
+      sequence: base.sequence,
+      timestampMs: base.timestampMs
+    }
+    expect(
+      engineChildMessageSchema.safeParse({
+        ...eventBase,
+        type: 'engine:event',
+        eventId: requestId,
+        payload: {
+          event: 'torrent-removed',
+          payload: {
+            infoHash: '0123456789abcdef0123456789abcdef01234567'
+          }
+        }
+      }).success
+    ).toBe(true)
     expect(
       engineChildMessageSchema.safeParse({
         ...base,
@@ -247,5 +292,87 @@ describe('engine control contracts', () => {
         }
       }).success
     ).toBe(false)
+  })
+
+  it('keeps boundary-size command envelopes inside the transport budget', () => {
+    const envelopes = [
+      {
+        ...base,
+        type: 'engine:execute',
+        payload: {
+          deadlineMs: 10_000,
+          operation: {
+            command: 'open-preparation',
+            payload: {
+              source: {
+                kind: 'magnet',
+                magnet: `magnet:?dn=${'x'.repeat(65_525)}`,
+                allowDhtExposure: false,
+                allowPrivateNetwork: false
+              }
+            }
+          }
+        }
+      },
+      {
+        ...base,
+        type: 'engine:execute',
+        payload: {
+          deadlineMs: 10_000,
+          operation: {
+            command: 'update-preparation-selection',
+            payload: {
+              preparationId: requestId,
+              changes: Array.from({ length: 250 }, (_, index) => ({
+                index,
+                selected: true
+              }))
+            }
+          }
+        }
+      }
+    ]
+
+    for (const envelope of envelopes) {
+      const parsed = engineParentMessageSchema.parse(envelope)
+      expect(checkPayloadBudget(parsed, ENGINE_MESSAGE_BUDGET)).toMatchObject({
+        ok: true
+      })
+    }
+
+    const maximumTorrentPage = Array.from({ length: 64 }, (_, index) => ({
+      infoHash: index.toString(16).padStart(40, '0'),
+      name: 'n'.repeat(255),
+      length: 1,
+      fileCount: 1,
+      selectedFileCount: 1,
+      private: false,
+      state: 'downloading',
+      progress: 1,
+      downloaded: 1,
+      uploaded: 0,
+      downloadSpeed: 0,
+      uploadSpeed: 0,
+      peerCount: 0,
+      timeRemainingMs: 0
+    }))
+    const childEnvelope = engineChildMessageSchema.parse({
+      ...base,
+      type: 'engine:result',
+      payload: {
+        ok: true,
+        result: {
+          command: 'list-torrents',
+          value: {
+            items: maximumTorrentPage,
+            nextCursor: null,
+            total: maximumTorrentPage.length
+          }
+        }
+      }
+    })
+    expect(
+      checkPayloadBudget(childEnvelope, ENGINE_MESSAGE_BUDGET)
+    ).toMatchObject({ ok: true })
   })
 })

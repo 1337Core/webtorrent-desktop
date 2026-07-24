@@ -4,6 +4,7 @@ import {
   engineChildMessageSchema,
   engineParentMessageSchema,
   PROTOCOL_VERSION,
+  type EngineEventEnvelope,
   type EngineParentMessage,
   type EngineStatus
 } from '../shared/contracts'
@@ -33,6 +34,7 @@ class FakeUtilityProcess extends EventEmitter {
 function createHarness(): {
   children: FakeUtilityProcess[]
   diagnostics: Diagnostics
+  events: EngineEventEnvelope[]
   statuses: EngineStatus[]
   supervisor: EngineSupervisor
 } {
@@ -43,6 +45,7 @@ function createHarness(): {
     return child
   })
   const statuses: EngineStatus[] = []
+  const events: EngineEventEnvelope[] = []
   const diagnostics = {
     error: vi.fn(),
     info: vi.fn(),
@@ -53,10 +56,11 @@ function createHarness(): {
     diagnostics,
     entryPath: '/app/engine/index.mjs',
     getStateRevision: () => 7,
+    onEvent: event => events.push(event),
     onStatus: status => statuses.push(status),
     workingDirectory: '/app/engine-data'
   })
-  return { children, diagnostics, statuses, supervisor }
+  return { children, diagnostics, events, statuses, supervisor }
 }
 
 function spawnAndInitialize(
@@ -145,6 +149,183 @@ describe('EngineSupervisor', () => {
       webRtcSupported: true
     })
     expect(statuses.at(-1)?.state).toBe('ready')
+  })
+
+  it('correlates bounded command results and preserves event envelopes', async () => {
+    const { children, events, supervisor } = createHarness()
+    const { child, initialize } = spawnAndInitialize(supervisor, children)
+    emitReady(child, initialize)
+
+    const resultPromise = supervisor.execute({
+      command: 'list-torrents',
+      payload: { cursor: 0, limit: 50 }
+    })
+    const execute = engineParentMessageSchema.parse(child.messages.at(-1))
+    if (execute.type !== 'engine:execute') {
+      throw new Error('Expected an execute message')
+    }
+    child.emit(
+      'message',
+      engineChildMessageSchema.parse({
+        protocolVersion: PROTOCOL_VERSION,
+        generationId: initialize.generationId,
+        requestId: execute.requestId,
+        sequence: 1,
+        timestampMs: Date.now(),
+        type: 'engine:result',
+        payload: {
+          ok: true,
+          result: {
+            command: 'list-torrents',
+            value: { items: [], nextCursor: null, total: 0 }
+          }
+        }
+      })
+    )
+    await expect(resultPromise).resolves.toMatchObject({
+      ok: true,
+      result: { command: 'list-torrents' }
+    })
+
+    child.emit(
+      'message',
+      engineChildMessageSchema.parse({
+        protocolVersion: PROTOCOL_VERSION,
+        generationId: initialize.generationId,
+        eventId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+        causeRequestId: execute.requestId,
+        sequence: 2,
+        timestampMs: Date.now(),
+        type: 'engine:event',
+        payload: {
+          event: 'torrent-removed',
+          payload: {
+            infoHash: '0123456789abcdef0123456789abcdef01234567'
+          }
+        }
+      })
+    )
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({
+      eventId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      causeRequestId: execute.requestId,
+      payload: { event: 'torrent-removed' }
+    })
+  })
+
+  it('times out an operation and safely ignores its one late result', async () => {
+    const { children, diagnostics, supervisor } = createHarness()
+    const { child, initialize } = spawnAndInitialize(supervisor, children)
+    emitReady(child, initialize)
+
+    const resultPromise = supervisor.execute(
+      {
+        command: 'list-torrents',
+        payload: { cursor: 0, limit: 50 }
+      },
+      100
+    )
+    const execute = engineParentMessageSchema.parse(child.messages.at(-1))
+    if (execute.type !== 'engine:execute') {
+      throw new Error('Expected an execute message')
+    }
+    await vi.advanceTimersByTimeAsync(100)
+    await expect(resultPromise).resolves.toMatchObject({
+      ok: false,
+      error: { command: 'list-torrents', code: 'TIMEOUT' }
+    })
+
+    child.emit(
+      'message',
+      engineChildMessageSchema.parse({
+        protocolVersion: PROTOCOL_VERSION,
+        generationId: initialize.generationId,
+        requestId: execute.requestId,
+        sequence: 1,
+        timestampMs: Date.now(),
+        type: 'engine:result',
+        payload: {
+          ok: true,
+          result: {
+            command: 'list-torrents',
+            value: { items: [], nextCursor: null, total: 0 }
+          }
+        }
+      })
+    )
+
+    expect(diagnostics.warn).toHaveBeenCalledWith(
+      'engine.late-operation-result'
+    )
+    expect(child.kill).not.toHaveBeenCalled()
+    expect(supervisor.status().state).toBe('ready')
+  })
+
+  it('stops idempotently with one shutdown request', async () => {
+    const { children, supervisor } = createHarness()
+    const { child, initialize } = spawnAndInitialize(supervisor, children)
+    emitReady(child, initialize)
+
+    const first = supervisor.stop()
+    const second = supervisor.stop()
+    expect(second).toBe(first)
+    expect(
+      child.messages.filter(
+        message =>
+          engineParentMessageSchema.parse(message).type === 'engine:shutdown'
+      )
+    ).toHaveLength(1)
+
+    child.emit('exit', 0)
+    await expect(first).resolves.toEqual({ outcome: 'exited', forced: false })
+    await expect(second).resolves.toEqual({ outcome: 'exited', forced: false })
+  })
+
+  it('fails closed when a result echoes the wrong operation identity', async () => {
+    const { children, supervisor } = createHarness()
+    const { child, initialize } = spawnAndInitialize(supervisor, children)
+    emitReady(child, initialize)
+    const expectedInfoHash = '0123456789abcdef0123456789abcdef01234567'
+
+    const resultPromise = supervisor.execute({
+      command: 'remove-torrent',
+      payload: { infoHash: expectedInfoHash, deleteData: false }
+    })
+    const execute = engineParentMessageSchema.parse(child.messages.at(-1))
+    if (execute.type !== 'engine:execute') {
+      throw new Error('Expected an execute message')
+    }
+    child.emit(
+      'message',
+      engineChildMessageSchema.parse({
+        protocolVersion: PROTOCOL_VERSION,
+        generationId: initialize.generationId,
+        requestId: execute.requestId,
+        sequence: 1,
+        timestampMs: Date.now(),
+        type: 'engine:result',
+        payload: {
+          ok: true,
+          result: {
+            command: 'remove-torrent',
+            value: {
+              infoHash: 'fedcba9876543210fedcba9876543210fedcba98',
+              removed: true
+            }
+          }
+        }
+      })
+    )
+
+    await expect(resultPromise).resolves.toMatchObject({
+      ok: false,
+      error: { command: 'remove-torrent', code: 'ABORTED' }
+    })
+    expect(child.kill).toHaveBeenCalledOnce()
+    expect(supervisor.status()).toMatchObject({
+      state: 'stopped',
+      code: 'ENGINE_PROTOCOL_ERROR'
+    })
   })
 
   it('restarts once after any unexpected exit, including code zero', async () => {

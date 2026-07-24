@@ -1,11 +1,17 @@
 import { randomUUID } from 'node:crypto'
 import { utilityProcess, type UtilityProcess } from 'electron'
 import {
+  ENGINE_MESSAGE_BUDGET,
   engineChildMessageSchema,
+  engineCommandSchema,
   engineParentMessageSchema,
+  engineResultMatchesOperation,
   engineStatusSchema,
   PROTOCOL_VERSION,
   type EngineChildMessage,
+  type EngineCommand,
+  type EngineCommandResult,
+  type EngineEventEnvelope,
   type EngineParentMessage,
   type EngineStatus
 } from '../shared/contracts'
@@ -18,11 +24,10 @@ const HEARTBEAT_TIMEOUT_MS = 3_000
 const SHUTDOWN_TIMEOUT_MS = 5_000
 const RESTART_DELAY_MS = 500
 const STABLE_RESET_MS = 5 * 60_000
-const ENGINE_MESSAGE_BUDGET = {
-  maxBytes: 64 * 1024,
-  maxDepth: 16,
-  maxNodes: 1024
-}
+const DEFAULT_OPERATION_TIMEOUT_MS = 2 * 60_000
+const MAX_OPERATION_TIMEOUT_MS = 24 * 60 * 60_000
+const MAX_PENDING_OPERATIONS = 128
+const MAX_RETIRED_REQUEST_IDS = 256
 
 type RestartReason =
   'CRASHED' | 'FATAL_ERROR' | 'HEARTBEAT_TIMEOUT' | 'STARTUP_TIMEOUT'
@@ -43,8 +48,15 @@ type EngineSupervisorOptions = {
   diagnostics: Diagnostics
   entryPath: string
   getStateRevision: () => number
+  onEvent?: (event: EngineEventEnvelope) => void
   onStatus: (status: EngineStatus) => void
   workingDirectory: string
+}
+
+type PendingOperation = {
+  operation: EngineCommand
+  resolve: (result: EngineCommandResult) => void
+  timeout: NodeJS.Timeout
 }
 
 export type EngineShutdownResult =
@@ -62,11 +74,29 @@ function engineEnvironment(): Record<string, string> {
   return environment
 }
 
+function operationFailure(
+  command: EngineCommand['command'],
+  code: Extract<EngineCommandResult, { ok: false }>['error']['code'],
+  displayMessage: string,
+  retryable: boolean
+): EngineCommandResult {
+  return {
+    ok: false,
+    error: {
+      command,
+      code,
+      displayMessage,
+      retryable
+    }
+  }
+}
+
 export class EngineSupervisor {
   readonly #appVersion: string
   readonly #diagnostics: Diagnostics
   readonly #entryPath: string
   readonly #getStateRevision: () => number
+  readonly #onEvent: (event: EngineEventEnvelope) => void
   readonly #onStatus: (status: EngineStatus) => void
   readonly #workingDirectory: string
   #process: UtilityProcess | null = null
@@ -88,12 +118,17 @@ export class EngineSupervisor {
   #heartbeatTimeout: NodeJS.Timeout | null = null
   #restartTimer: NodeJS.Timeout | null = null
   #stableTimer: NodeJS.Timeout | null = null
+  readonly #pendingOperations = new Map<string, PendingOperation>()
+  readonly #retiredRequestIds = new Set<string>()
+  #shutdownRequestId: string | null = null
+  #stopPromise: Promise<EngineShutdownResult> | null = null
 
   constructor(options: EngineSupervisorOptions) {
     this.#appVersion = options.appVersion
     this.#diagnostics = options.diagnostics
     this.#entryPath = options.entryPath
     this.#getStateRevision = options.getStateRevision
+    this.#onEvent = options.onEvent ?? (() => undefined)
     this.#onStatus = options.onStatus
     this.#workingDirectory = options.workingDirectory
   }
@@ -106,12 +141,100 @@ export class EngineSupervisor {
     return this.#process?.pid ?? null
   }
 
+  execute(
+    candidate: EngineCommand,
+    timeoutMs = DEFAULT_OPERATION_TIMEOUT_MS
+  ): Promise<EngineCommandResult> {
+    const operation = engineCommandSchema.parse(candidate)
+    if (
+      !Number.isSafeInteger(timeoutMs) ||
+      timeoutMs < 1 ||
+      timeoutMs > MAX_OPERATION_TIMEOUT_MS
+    ) {
+      throw new RangeError(
+        'Engine operation timeout is outside its fixed range'
+      )
+    }
+    if (this.#status.state !== 'ready' || !this.#process || this.#stopping) {
+      return Promise.resolve(
+        operationFailure(
+          operation.command,
+          'ENGINE_NOT_READY',
+          'The torrent engine is not ready.',
+          true
+        )
+      )
+    }
+    if (
+      this.#pendingOperations.size + this.#retiredRequestIds.size >=
+      MAX_PENDING_OPERATIONS
+    ) {
+      return Promise.resolve(
+        operationFailure(
+          operation.command,
+          'STATE_CONFLICT',
+          'The torrent engine has too many active operations.',
+          true
+        )
+      )
+    }
+
+    const requestId = randomUUID()
+    const child = this.#process
+    return new Promise<EngineCommandResult>(resolve => {
+      const timeout = setTimeout(() => {
+        const pending = this.#pendingOperations.get(requestId)
+        if (!pending) return
+        this.#pendingOperations.delete(requestId)
+        this.#rememberRetiredRequestId(requestId)
+        resolve(
+          operationFailure(
+            operation.command,
+            'TIMEOUT',
+            'The torrent operation timed out.',
+            true
+          )
+        )
+      }, timeoutMs)
+      this.#pendingOperations.set(requestId, {
+        operation,
+        resolve,
+        timeout
+      })
+
+      const posted = this.#post(
+        {
+          type: 'engine:execute',
+          requestId,
+          payload: {
+            deadlineMs: Date.now() + timeoutMs,
+            operation
+          }
+        },
+        child
+      )
+      if (posted) return
+
+      clearTimeout(timeout)
+      this.#pendingOperations.delete(requestId)
+      resolve(
+        operationFailure(
+          operation.command,
+          'ABORTED',
+          'The torrent operation could not be sent.',
+          true
+        )
+      )
+    })
+  }
+
   start(): void {
     if (this.#process || this.#restartTimer) {
       throw new Error('Torrent engine supervisor is already running')
     }
 
     this.#stopping = false
+    this.#stopPromise = null
     this.#spawn()
   }
 
@@ -127,6 +250,7 @@ export class EngineSupervisor {
     this.#restartCount = 0
     this.#restartReason = 'CRASHED'
     this.#stopping = false
+    this.#stopPromise = null
     this.#spawn()
     return true
   }
@@ -142,12 +266,23 @@ export class EngineSupervisor {
     return this.#kill(child, 'SMOKE_TEST')
   }
 
-  async stop(): Promise<EngineShutdownResult> {
+  stop(): Promise<EngineShutdownResult> {
+    this.#stopPromise ??= this.#stopOnce()
+    return this.#stopPromise
+  }
+
+  #stopOnce(): Promise<EngineShutdownResult> {
     this.#stopping = true
     this.#clearTimers()
+    this.#settlePendingOperations(
+      'ABORTED',
+      'The torrent engine is shutting down.',
+      false,
+      true
+    )
 
     const child = this.#process
-    if (!child) return { outcome: 'not-running' }
+    if (!child) return Promise.resolve({ outcome: 'not-running' })
 
     return new Promise<EngineShutdownResult>(resolve => {
       let settled = false
@@ -180,11 +315,13 @@ export class EngineSupervisor {
 
       child.once('exit', onExit)
       timeout = setTimeout(forceShutdown, SHUTDOWN_TIMEOUT_MS)
+      const requestId = randomUUID()
+      this.#shutdownRequestId = requestId
       if (
         !this.#post(
           {
             type: 'engine:shutdown',
-            requestId: randomUUID(),
+            requestId,
             payload: { reason: 'APP_QUIT' }
           },
           child
@@ -203,6 +340,8 @@ export class EngineSupervisor {
     this.#lastInboundSequence = -1
     this.#handshakeRequestId = randomUUID()
     this.#pendingPingRequestId = null
+    this.#shutdownRequestId = null
+    this.#retiredRequestIds.clear()
     this.#setStatus({
       state: 'starting',
       generationId: this.#generationId,
@@ -329,17 +468,85 @@ export class EngineSupervisor {
         if (this.#heartbeatTimeout) clearTimeout(this.#heartbeatTimeout)
         this.#heartbeatTimeout = null
         break
+      case 'engine:result':
+        this.#handleOperationResult(child, message)
+        break
+      case 'engine:event':
+        if (this.#stopping) {
+          this.#diagnostics.warn('engine.event-during-shutdown', {
+            event: message.payload.event
+          })
+          break
+        }
+        if (this.#status.state !== 'ready') {
+          this.#failProtocol(child)
+          return
+        }
+        try {
+          this.#onEvent(structuredClone(message))
+        } catch {
+          this.#diagnostics.error('engine.event-handler-failed', {
+            event: message.payload.event
+          })
+        }
+        break
       case 'engine:stopped':
+        if (!this.#stopping || message.requestId !== this.#shutdownRequestId) {
+          this.#failProtocol(child)
+          return
+        }
         break
       case 'engine:failed':
+        if (!(
+          (this.#status.state === 'starting' &&
+            message.requestId === this.#handshakeRequestId) ||
+          message.requestId === this.#pendingPingRequestId
+        )) {
+          this.#failProtocol(child)
+          return
+        }
         this.#diagnostics.error('engine.reported-failure', {
           code: message.payload.code
         })
         this.#restartReason = 'CRASHED'
         this.#clearRunTimers()
+        this.#settlePendingOperations(
+          'ABORTED',
+          'The torrent engine stopped before completing the operation.',
+          true,
+          true
+        )
         this.#kill(child, 'REPORTED_FAILURE')
         break
     }
+  }
+
+  #handleOperationResult(
+    child: UtilityProcess,
+    message: Extract<EngineChildMessage, { type: 'engine:result' }>
+  ): void {
+    const pending = this.#pendingOperations.get(message.requestId)
+    if (!pending) {
+      if (this.#retiredRequestIds.has(message.requestId)) {
+        this.#retiredRequestIds.delete(message.requestId)
+        this.#diagnostics.warn('engine.late-operation-result')
+        return
+      }
+      this.#failProtocol(child)
+      return
+    }
+
+    if (
+      this.#status.state !== 'ready' ||
+      !engineResultMatchesOperation(message.payload, pending.operation)
+    ) {
+      this.#failProtocol(child)
+      return
+    }
+
+    clearTimeout(pending.timeout)
+    this.#pendingOperations.delete(message.requestId)
+    pending.resolve(structuredClone(message.payload))
   }
 
   #handleReady(
@@ -413,6 +620,12 @@ export class EngineSupervisor {
 
     this.#process = null
     this.#clearRunTimers()
+    this.#shutdownRequestId = null
+    this.#settlePendingOperations(
+      'ABORTED',
+      'The torrent engine exited before completing the operation.',
+      true
+    )
     this.#diagnostics.warn('engine.exited', {
       code,
       expected: this.#stopping,
@@ -445,6 +658,12 @@ export class EngineSupervisor {
   #failProtocol(child: UtilityProcess): void {
     this.#stopping = true
     this.#clearTimers()
+    this.#settlePendingOperations(
+      'ABORTED',
+      'The torrent engine protocol failed.',
+      true,
+      true
+    )
     this.#kill(child, 'PROTOCOL_ERROR')
     this.#setStatus({
       state: 'stopped',
@@ -461,6 +680,10 @@ export class EngineSupervisor {
         >
       | Pick<
           Extract<EngineParentMessage, { type: 'engine:ping' }>,
+          'type' | 'requestId' | 'payload'
+        >
+      | Pick<
+          Extract<EngineParentMessage, { type: 'engine:execute' }>,
           'type' | 'requestId' | 'payload'
         >
       | Pick<
@@ -528,5 +751,33 @@ export class EngineSupervisor {
     this.#clearRunTimers()
     if (this.#restartTimer) clearTimeout(this.#restartTimer)
     this.#restartTimer = null
+  }
+
+  #settlePendingOperations(
+    code: Extract<EngineCommandResult, { ok: false }>['error']['code'],
+    displayMessage: string,
+    retryable: boolean,
+    retire = false
+  ): void {
+    for (const [requestId, pending] of this.#pendingOperations) {
+      clearTimeout(pending.timeout)
+      this.#pendingOperations.delete(requestId)
+      if (retire) this.#rememberRetiredRequestId(requestId)
+      pending.resolve(
+        operationFailure(
+          pending.operation.command,
+          code,
+          displayMessage,
+          retryable
+        )
+      )
+    }
+  }
+
+  #rememberRetiredRequestId(requestId: string): void {
+    this.#retiredRequestIds.add(requestId)
+    if (this.#retiredRequestIds.size <= MAX_RETIRED_REQUEST_IDS) return
+    const oldest = this.#retiredRequestIds.values().next().value
+    if (oldest) this.#retiredRequestIds.delete(oldest)
   }
 }

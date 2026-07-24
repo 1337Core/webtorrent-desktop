@@ -1,16 +1,28 @@
 import { z } from 'zod'
+import {
+  engineCommandResultSchema,
+  engineCommandSchema,
+  engineEventSchema
+} from './engine-api'
+
+export * from './engine-api'
 
 export const APP_NAME = 'WebTorrent Updated'
 export const PROTOCOL_VERSION = 1 as const
 export const DESKTOP_BOOTSTRAP_CHANNEL = 'desktop:bootstrap:v1'
 export const DESKTOP_ENGINE_RESTART_CHANNEL = 'desktop:engine-restart:v1'
 export const ENGINE_STATUS_CHANNEL = 'desktop:engine-status:v1'
+export const ENGINE_MESSAGE_BUDGET = {
+  maxBytes: 128 * 1024,
+  maxDepth: 16,
+  maxNodes: 1024
+} as const
 
 const protocolVersionSchema = z.literal(PROTOCOL_VERSION)
 const requestIdSchema = z.string().uuid()
 const generationIdSchema = z.string().uuid()
-const sequenceSchema = z.number().int().nonnegative()
-const timestampSchema = z.number().int().nonnegative()
+const sequenceSchema = z.number().int().nonnegative().safe()
+const timestampSchema = z.number().int().nonnegative().safe()
 const boundedMessageSchema = z.string().min(1).max(256)
 
 const windowBoundsSchema = z.strictObject({
@@ -138,6 +150,13 @@ export const engineParentMessageSchema = z.discriminatedUnion('type', [
     payload: z.strictObject({})
   }),
   engineParentBaseSchema.extend({
+    type: z.literal('engine:execute'),
+    payload: z.strictObject({
+      deadlineMs: timestampSchema,
+      operation: engineCommandSchema
+    })
+  }),
+  engineParentBaseSchema.extend({
     type: z.literal('engine:shutdown'),
     payload: z.strictObject({
       reason: z.enum(['APP_QUIT', 'SUPERVISOR_RESTART'])
@@ -150,7 +169,6 @@ export type EngineParentMessage = z.infer<typeof engineParentMessageSchema>
 const engineChildBaseSchema = z.strictObject({
   protocolVersion: protocolVersionSchema,
   generationId: generationIdSchema,
-  requestId: requestIdSchema,
   sequence: sequenceSchema,
   timestampMs: timestampSchema
 })
@@ -158,18 +176,33 @@ const engineChildBaseSchema = z.strictObject({
 export const engineChildMessageSchema = z.discriminatedUnion('type', [
   engineChildBaseSchema.extend({
     type: z.literal('engine:ready'),
+    requestId: requestIdSchema,
     payload: engineRuntimeInfoSchema
   }),
   engineChildBaseSchema.extend({
     type: z.literal('engine:pong'),
+    requestId: requestIdSchema,
     payload: z.strictObject({})
   }),
   engineChildBaseSchema.extend({
+    type: z.literal('engine:result'),
+    requestId: requestIdSchema,
+    payload: engineCommandResultSchema
+  }),
+  engineChildBaseSchema.extend({
+    type: z.literal('engine:event'),
+    eventId: requestIdSchema,
+    causeRequestId: requestIdSchema.optional(),
+    payload: engineEventSchema
+  }),
+  engineChildBaseSchema.extend({
     type: z.literal('engine:stopped'),
+    requestId: requestIdSchema,
     payload: z.strictObject({})
   }),
   engineChildBaseSchema.extend({
     type: z.literal('engine:failed'),
+    requestId: requestIdSchema,
     payload: z.strictObject({
       code: z.enum([
         'INVALID_MESSAGE',
@@ -183,6 +216,10 @@ export const engineChildMessageSchema = z.discriminatedUnion('type', [
 ])
 
 export type EngineChildMessage = z.infer<typeof engineChildMessageSchema>
+export type EngineEventEnvelope = Extract<
+  EngineChildMessage,
+  { type: 'engine:event' }
+>
 
 export const restartEngineRequestSchema = z.strictObject({
   protocolVersion: protocolVersionSchema,

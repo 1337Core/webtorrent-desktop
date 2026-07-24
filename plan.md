@@ -611,13 +611,20 @@ Private torrents:
   and `utPex: false`;
 - never silently convert to a public torrent.
 
-HTTP(S), WS(S), and UDP tracker connections plus HTTP(S) web seeds must pass an
+Keep WebTorrent's built-in tracker client disabled with `tracker: false`.
+Implement the first release's HTTP(S) and WSS tracker protocols in narrow
+app-owned engine modules instead of patching, forking, or vendoring
+`bittorrent-tracker`. The stock client cannot enforce this plan's bounded
+redirect/body/parser rules or WSS socket isolation without a broad,
+version-sensitive rewrite. UDP and cleartext WS trackers are disabled.
+
+Every enabled tracker connection plus HTTP(S) web seeds must pass the
 app-owned egress policy at actual resolution/connection and redirect time.
-Ingestion-time URL checks alone are insufficient. Use audited request/socket
-adapters or a narrow pinned upstream patch to enforce scheme, resolved address,
-redirect, port, timeout, and byte policy. A transport that cannot be mediated
-is disabled rather than bypassing the rule. Private/link-local/loopback targets
-remain unavailable unless private-network mode is explicitly enabled.
+Ingestion-time URL checks alone are insufficient. Enforce scheme, resolved
+address, redirect, port, timeout, and byte policy in each owned transport. A
+transport that cannot be mediated is disabled rather than bypassing the rule.
+Private/link-local/loopback targets remain unavailable unless private-network
+mode is explicitly enabled.
 
 ### 9.8 Filesystem containment
 
@@ -965,6 +972,8 @@ tokens. Preserve the current visual identity; this is not a redesign.
 | `webtorrent` | Latest qualified 3.x patch; exact pin. |
 | `parse-torrent` | Latest compatible 11.x patch; direct because import and validation use it. |
 | `create-torrent` | Latest compatible 6.x patch; direct for creation, but never consume its built-in announce defaults as product policy. |
+| `ws` | Exact 8.21.1 pin for the app-owned WSS tracker transport; no pooling, compression, redirects, or autonomous reconnect. |
+| `@thaunknown/simple-peer` | Exact 10.1.1 pin for bounded app-owned tracker offers and the qualified WebTorrent WebRTC chain. |
 | `react`, `react-dom` | Latest qualified 19.2 patch. |
 | `zod` | Exact 4.4.3 pin for IPC, engine messages, config, and import schemas. |
 | `electron-store` | Stable 11.x exact pin, main-only, wrapped by app schema/migrations. |
@@ -1075,7 +1084,7 @@ Exact patches are rechecked once at migration approval.
 | Dead code/deps | Knip 6.29 line |
 | Unit/component | Vitest 4.1, jsdom, `@testing-library/react`, its explicit `@testing-library/dom` peer, `@testing-library/user-event`, and `@testing-library/jest-dom` |
 | Desktop E2E | Aligned WebdriverIO 9.30 `webdriverio`, CLI, local runner, Mocha framework, spec reporter, Electron service 10.1, and visual service on one pinned runner |
-| Torrent integration | `bittorrent-tracker` and generated local fixtures as dev-only dependencies |
+| Torrent integration | A direct exact `bittorrent-tracker` dev dependency and generated local fixtures. The package remains transitively present in WebTorrent's production graph through `torrent-discovery`, but production code never constructs its tracker client or server. |
 
 Do not install deprecated/stub `@types/electron`. WebTorrent 3,
 `parse-torrent` 11, and `create-torrent` 6 do not provide reliable declarations
