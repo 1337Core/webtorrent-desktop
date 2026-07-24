@@ -1,0 +1,169 @@
+import { execFile as execFileCallback } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { access, readFile, readdir, stat } from 'node:fs/promises'
+import { resolve } from 'node:path'
+import { promisify } from 'node:util'
+import {
+  FuseState,
+  FuseV1Options,
+  FuseVersion,
+  getCurrentFuseWire
+} from '@electron/fuses'
+
+const execFile = promisify(execFileCallback)
+const root = resolve(import.meta.dirname, '..')
+const appPath = resolve(
+  root,
+  'out',
+  'WebTorrent Updated-darwin-arm64',
+  'WebTorrent Updated.app'
+)
+const resourcesPath = resolve(appPath, 'Contents', 'Resources')
+const asarPath = resolve(resourcesPath, 'app.asar')
+const nativePath = resolve(
+  resourcesPath,
+  'app.asar.unpacked',
+  'node_modules',
+  'node-datachannel',
+  'build',
+  'Release',
+  'node_datachannel.node'
+)
+const expectedNativeHash =
+  '1d4f814bede82a5412b19e8973e44eb484d504acc52f17796e90add75dc9ac80'
+
+async function collectNativeModules(directory) {
+  const found = []
+  const entries = await readdir(directory, { withFileTypes: true })
+  for (const entry of entries) {
+    const entryPath = resolve(directory, entry.name)
+    if (entry.isDirectory()) {
+      found.push(...(await collectNativeModules(entryPath)))
+    } else if (entry.name.endsWith('.node')) {
+      found.push(entryPath)
+    }
+  }
+  return found
+}
+
+async function collectExecutableFiles(directory) {
+  const found = []
+  const entries = await readdir(directory, { withFileTypes: true })
+  for (const entry of entries) {
+    const entryPath = resolve(directory, entry.name)
+    if (entry.isDirectory()) {
+      found.push(...(await collectExecutableFiles(entryPath)))
+    } else if (entry.isFile() && ((await stat(entryPath)).mode & 0o111) !== 0) {
+      found.push(entryPath)
+    }
+  }
+  return found
+}
+
+async function plistValue(key, format = 'raw') {
+  const infoPlist = resolve(appPath, 'Contents', 'Info.plist')
+  const { stdout } = await execFile('plutil', [
+    '-extract',
+    key,
+    format,
+    '-o',
+    '-',
+    infoPlist
+  ])
+  return stdout.trim()
+}
+
+await access(asarPath)
+await access(nativePath)
+
+const nativeModules = await collectNativeModules(resourcesPath)
+if (nativeModules.length !== 1 || resolve(nativeModules[0]) !== nativePath) {
+  throw new Error(
+    `Unexpected packaged native modules:\n${nativeModules.join('\n')}`
+  )
+}
+
+const nativeBuffer = await readFile(nativePath)
+const nativeHash = createHash('sha256').update(nativeBuffer).digest('hex')
+if (nativeHash !== expectedNativeHash) {
+  throw new Error(
+    `node-datachannel hash mismatch: ${nativeHash} != ${expectedNativeHash}`
+  )
+}
+
+const executableFiles = await collectExecutableFiles(appPath)
+let machOBinaryCount = 0
+for (const binaryPath of executableFiles) {
+  const { stdout } = await execFile('file', [binaryPath])
+  if (!stdout.includes('Mach-O')) continue
+
+  machOBinaryCount += 1
+  if (!stdout.includes('arm64') || stdout.includes('x86_64')) {
+    throw new Error(`Unexpected binary architecture: ${stdout.trim()}`)
+  }
+}
+if (machOBinaryCount === 0) {
+  throw new Error('No Mach-O binaries found in packaged application')
+}
+
+await execFile('codesign', [
+  '--verify',
+  '--deep',
+  '--strict',
+  '--verbose=4',
+  appPath
+])
+
+if (
+  (await plistValue('CFBundleIdentifier')) !==
+  'local.webtorrent-updated.desktop'
+) {
+  throw new Error('Unexpected bundle identifier')
+}
+if ((await plistValue('CFBundleVersion')) !== '1.0.0') {
+  throw new Error('CFBundleVersion must remain numeric')
+}
+if (
+  (await plistValue('NSAppTransportSecurity.NSAllowsArbitraryLoads')) !==
+  'false'
+) {
+  throw new Error('Arbitrary network loads must remain disabled')
+}
+
+const integrity = JSON.parse(await plistValue('ElectronAsarIntegrity', 'json'))
+if (!integrity['Resources/app.asar']?.hash) {
+  throw new Error('ASAR integrity metadata is missing')
+}
+
+const fuses = await getCurrentFuseWire(appPath)
+const expectedFuses = new Map([
+  [FuseV1Options.RunAsNode, FuseState.DISABLE],
+  [FuseV1Options.EnableCookieEncryption, FuseState.ENABLE],
+  [FuseV1Options.EnableNodeOptionsEnvironmentVariable, FuseState.DISABLE],
+  [FuseV1Options.EnableNodeCliInspectArguments, FuseState.DISABLE],
+  [FuseV1Options.EnableEmbeddedAsarIntegrityValidation, FuseState.ENABLE],
+  [FuseV1Options.OnlyLoadAppFromAsar, FuseState.ENABLE],
+  [FuseV1Options.LoadBrowserProcessSpecificV8Snapshot, FuseState.DISABLE],
+  [FuseV1Options.GrantFileProtocolExtraPrivileges, FuseState.DISABLE],
+  [FuseV1Options.WasmTrapHandlers, FuseState.ENABLE]
+])
+
+if (fuses.version !== FuseVersion.V1) {
+  throw new Error(`Unexpected fuse wire version: ${fuses.version}`)
+}
+for (const [fuse, expected] of expectedFuses) {
+  if (fuses[fuse] !== expected) {
+    throw new Error(`Unexpected ${FuseV1Options[fuse]} fuse state`)
+  }
+}
+
+console.log(
+  JSON.stringify({
+    app: appPath,
+    architecture: 'arm64',
+    bundleId: 'local.webtorrent-updated.desktop',
+    machOBinaryCount,
+    nativeHash,
+    result: 'pass'
+  })
+)

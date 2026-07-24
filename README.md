@@ -31,6 +31,32 @@ Migration is in progress on this branch; until a milestone replaces a legacy
 subsystem, its source still reflects the original WebTorrent Desktop
 implementation.
 
+## Current development workflow
+
+Every project command requires the exact Node/npm pair pinned in `.nvmrc`,
+`.node-version`, and `package.json`; commands fail before doing work if the
+active toolchain differs.
+
+On this Mac, the supported Homebrew toolchain is keg-only:
+
+```sh
+export PATH="/opt/homebrew/opt/node@24/bin:$PATH"
+node --version # v24.18.0
+npm --version  # 11.16.0
+```
+
+Then use the locked local workflow:
+
+```sh
+npm ci
+npm test
+npm run smoke:dev
+npm run package:check
+```
+
+`package:check` produces and launches the ad-hoc-signed arm64 app under `out/`.
+It does not publish, notarize, or install anything.
+
 ## Legacy upstream documentation
 
 Everything below this heading is retained from the original project for

@@ -196,7 +196,7 @@ releases, recorded in the lockfile, and then exact-pinned.
 | --- | --- | --- |
 | Electron | 43.2.x; current supported line | Start on the latest stable patch available at migration kickoff and qualify it on the owner’s Mac. |
 | Development Node | 24.18.0 LTS | Pin Node 24 LTS in developer metadata and local tooling. Reassess Node 26 only after it becomes LTS and the toolchain supports it. |
-| Package manager | npm 11.15.0 bundled with Node 24.18 | Keep bundled npm 11.15.0 and lockfile v3. Use `npm ci`; do not introduce Bun, pnpm, Yarn, Corepack, a separately installed npm, or newly released npm 12 during migration. |
+| Package manager | npm 11.16.0 bundled with Node 24.18 | Keep bundled npm 11.16.0 and lockfile v3. Use `npm ci`; do not introduce Bun, pnpm, Yarn, Corepack, a separately installed npm, or newly released npm 12 during migration. |
 | WebTorrent | 3.0.16 | Migrate to the latest qualified WebTorrent 3 patch, exact-pinned. |
 | Electron Forge | 7.11.2 stable; Forge 8 alpha | Use Forge 7 stable for the local arm64 app, native unpacking, and fuses. |
 | Build | Vite 8.1.x | Bundle renderer and Electron entries with Vite. |
@@ -942,6 +942,9 @@ tokens. Preserve the current visual identity; this is not a redesign.
 
 - Exact-pin every direct runtime and build dependency.
 - Keep one npm lockfile v3 and use `npm ci`.
+- Require Node 24.18.0, npm 11.16.0, Darwin, and arm64 through npm
+  `devEngines`, strict engine checks, and a fail-fast command guard. Do not
+  bootstrap a second toolchain from project scripts.
 - No Git branches, floating Git tags, wildcard ranges, blanket overrides, or
   unexplained transitive pins.
 - An override requires a linked upstream issue, rationale, owner, and removal
@@ -963,7 +966,7 @@ tokens. Preserve the current visual identity; this is not a redesign.
 | `parse-torrent` | Latest compatible 11.x patch; direct because import and validation use it. |
 | `create-torrent` | Latest compatible 6.x patch; direct for creation, but never consume its built-in announce defaults as product policy. |
 | `react`, `react-dom` | Latest qualified 19.2 patch. |
-| `zod` | Stable 4.x exact pin for IPC, engine messages, config, and import schemas. |
+| `zod` | Exact 4.4.3 pin for IPC, engine messages, config, and import schemas. |
 | `electron-store` | Stable 11.x exact pin, main-only, wrapped by app schema/migrations. |
 | `chokidar` | Stable 5.x exact pin for the explicit folder-watcher feature. |
 | `music-metadata` | Stable 11.x exact pin in engine for bounded metadata extraction. |
@@ -1063,10 +1066,10 @@ Exact patches are rechecked once at migration approval.
 | Area | Selected packages |
 | --- | --- |
 | Packaging | `@electron-forge/cli` 7.11 line for a local macOS arm64 `.app`; no installer maker initially |
-| Forge controls | Auto-unpack-natives and fuses plugins on the same Forge version; exact direct `@electron/fuses` 2.1 line to satisfy the peer contract |
+| Forge controls | Forge auto-unpack-natives plus exact direct `@electron/fuses` 2.1.3 in an owned `packageAfterCopy` hook; do not use Forge 7’s fuses plugin because its `^1.0.0` peer cannot configure Electron 43’s complete fuse wire |
 | Compilation | Standalone Vite 8.1 line invoked by owned Forge hooks, plus `@vitejs/plugin-react`; no Forge Vite plugin |
 | Language/types | TypeScript 6.0; exact `@types/node`, `@types/react`, `@types/react-dom`, and `@types/semver`; Electron’s bundled declarations |
-| Runtime schemas | Zod 4.4 line |
+| Runtime schemas | Zod 4.4.3 exact pin |
 | Lint | ESLint 10 flat config, `@eslint/js`, `typescript-eslint`, React Hooks rules |
 | Formatting | Prettier 3.9 line |
 | Dead code/deps | Knip 6.29 line |
@@ -1083,6 +1086,25 @@ that surface against each exact package update before it lands.
 Do not add `eslint-plugin-react` until its stable peer range includes the
 selected ESLint major. TypeScript covers props, the hooks plugin covers hook
 correctness, and ESLint 10 handles JSX reference tracking.
+
+### 14.7 Initial audit disposition
+
+The migration baseline's exact audit results, reachability analysis, accepted
+build-tool debt, and mitigations are recorded in
+[`docs/dependency-audit.md`](docs/dependency-audit.md).
+
+The `ip.isPublic` advisory inherited through WebTorrent is not reachable: the
+application is a tracker client, the sole transitive `ip` use is inside the
+tracker-server UDP parser, and that parser uses `ip.toString`, not the
+vulnerable function. npm's proposed downgrade to WebTorrent 0.7.3 is rejected.
+
+Forge 7's `tar`, `tmp`, and exact-commit `@electron/node-gyp` Git paths are
+accepted temporarily as local, development-only toolchain debt because no
+fixed stable Forge line exists. They are pruned from the application, receive
+no untrusted application input or credentials, and must be removed when a
+compatible stable Forge release fixes the paths. This is an explicit
+exception, not permission to ignore new audit findings, switch to a major
+prerelease solely to reduce an audit count, or run blind overrides.
 
 ## 15. Build, package, and platform support
 
@@ -1379,7 +1401,11 @@ Exit: **passed 2026-07-24** — explicit migration approval received.
 - Prove fuses and native-unpack behavior.
 - Prove the standalone Vite/Forge integration and local `.app` packaging.
 
-Exit: no unknown build-system or native-addon blocker.
+Exit: **passed 2026-07-24** — development and packaged arm64 shells launch;
+Electron 43, Node 24, WebTorrent 3, and native WebRTC load in the utility
+process; the sole native addon is verified arm64; and packaging, ASAR
+integrity, fuses, ad-hoc signing, and the clean locked install pass. The
+accepted audit findings are recorded in `docs/dependency-audit.md`.
 
 ### Milestone 2 — establish security/process boundaries
 

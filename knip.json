@@ -1,0 +1,13 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": [
+    "forge.config.cjs",
+    "scripts/*.mjs",
+    "src/engine/index.ts",
+    "src/main/index.ts",
+    "src/preload/index.ts",
+    "src/renderer/index.tsx",
+    "src/shared/**/*.test.ts"
+  ],
+  "project": ["scripts/**/*.mjs", "src/**/*.ts", "src/**/*.tsx"]
+}

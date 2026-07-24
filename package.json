@@ -1,132 +1,104 @@
 {
-  "name": "webtorrent-desktop",
-  "description": "WebTorrent, the streaming torrent client. For Mac, Windows, and Linux.",
-  "version": "0.24.0",
+  "name": "webtorrent-updated",
+  "productName": "WebTorrent Updated",
+  "version": "1.0.0-dev",
+  "description": "A maintained personal WebTorrent desktop client for Apple Silicon Macs.",
   "author": {
-    "name": "WebTorrent, LLC",
-    "email": "feross@webtorrent.io",
-    "url": "https://webtorrent.io"
+    "name": "WebTorrent contributors",
+    "url": "https://github.com/webtorrent/webtorrent-desktop"
   },
-  "babel": {
-    "plugins": [
-      [
-        "@babel/plugin-transform-react-jsx",
-        {
-          "useBuiltIns": true
-        }
-      ]
-    ]
-  },
-  "bugs": {
-    "url": "https://github.com/webtorrent/webtorrent-desktop/issues"
-  },
-  "dependencies": {
-    "@electron/remote": "2.1.3",
-    "airplayer": "github:webtorrent/airplayer#fix-security",
-    "application-config": "2.0.0",
-    "arch": "2.2.0",
-    "auto-launch": "5.0.5",
-    "bitfield": "4.1.0",
-    "capture-frame": "4.0.0",
-    "chokidar": "3.5.3",
-    "chromecasts": "1.10.2",
-    "create-torrent": "5.0.9",
-    "debounce": "1.2.1",
-    "dlnacasts": "0.1.0",
-    "drag-drop": "7.2.0",
-    "es6-error": "4.1.1",
-    "fn-getter": "1.0.0",
-    "iso-639-1": "2.1.15",
-    "languagedetect": "2.0.0",
-    "location-history": "1.1.2",
-    "material-ui": "0.20.2",
-    "music-metadata": "7.14.0",
-    "network-address": "1.1.2",
-    "parse-torrent": "9.1.5",
-    "prettier-bytes": "1.0.4",
-    "prop-types": "15.8.1",
-    "react": "17.0.2",
-    "react-dom": "17.0.2",
-    "rimraf": "4.4.0",
-    "run-parallel": "1.2.0",
-    "semver": "7.3.8",
-    "simple-concat": "1.0.1",
-    "simple-get": "4.0.1",
-    "srt-to-vtt": "1.1.3",
-    "vlc-command": "1.2.0",
-    "webtorrent": "1.9.7",
-    "winreg": "1.2.4"
-  },
-  "devDependencies": {
-    "@babel/cli": "7.29.7",
-    "@babel/core": "7.29.7",
-    "@babel/eslint-parser": "7.29.7",
-    "@babel/plugin-transform-react-jsx": "7.29.7",
-    "cross-zip": "4.0.0",
-    "depcheck": "1.4.7",
-    "electron": "27.3.11",
-    "electron-notarize": "1.2.2",
-    "electron-osx-sign": "0.6.0",
-    "electron-packager": "17.1.2",
-    "electron-winstaller": "5.4.4",
-    "gh-release": "7.0.2",
-    "minimist": "1.2.8",
-    "nodemon": "2.0.22",
-    "open": "8.4.2",
-    "plist": "3.1.1",
-    "pngjs": "7.0.0",
-    "run-series": "1.1.9",
-    "spectron": "19.0.0",
-    "standard": "17.0.0",
-    "tape": "5.10.2"
-  },
-  "engines": {
-    "node": "^16.0.0 || ^18.0.0",
-    "npm": "^7.10.0 || ^8.0.0 || ^9.0.0 || ^10.0.0"
-  },
-  "homepage": "https://webtorrent.io",
-  "keywords": [
-    "desktop",
-    "electron",
-    "electron-app",
-    "hybrid webtorrent client",
-    "mad science",
-    "torrent",
-    "torrent client",
-    "webtorrent"
-  ],
   "license": "MIT",
-  "main": "index.js",
-  "optionalDependencies": {
-    "appdmg": "^0.6.0",
-    "electron-installer-debian": "^3.2.0",
-    "electron-installer-redhat": "^3.4.0"
-  },
   "private": true,
-  "productName": "WebTorrent",
+  "main": "build/main/index.cjs",
+  "homepage": "https://github.com/1337Core/webtorrent-desktop",
   "repository": {
     "type": "git",
-    "url": "git://github.com/webtorrent/webtorrent-desktop.git"
+    "url": "https://github.com/1337Core/webtorrent-desktop.git"
+  },
+  "bugs": {
+    "url": "https://github.com/1337Core/webtorrent-desktop/issues"
+  },
+  "packageManager": "npm@11.16.0",
+  "engines": {
+    "node": "24.18.0",
+    "npm": "11.16.0"
+  },
+  "devEngines": {
+    "cpu": {
+      "name": "arm64",
+      "onFail": "error"
+    },
+    "os": {
+      "name": "darwin",
+      "onFail": "error"
+    },
+    "runtime": {
+      "name": "node",
+      "version": "24.18.0",
+      "onFail": "error"
+    },
+    "packageManager": {
+      "name": "npm",
+      "version": "11.16.0",
+      "onFail": "error"
+    }
   },
   "scripts": {
-    "build": "babel src --out-dir build",
-    "clean": "node ./bin/clean.js",
-    "gh-release": "gh-release",
-    "install-system-deps": "brew install fakeroot dpkg rpm",
-    "open-config": "node ./bin/open-config.js",
-    "package": "node ./bin/package.js",
-    "start": "npm run build && electron --no-sandbox .",
-    "test": "standard && depcheck --ignores=standard,@babel/eslint-parser --ignore-dirs=build,dist",
-    "test-integration": "npm run build && node ./test",
-    "update-authors": "./bin/update-authors.sh",
-    "watch": "nodemon --exec \"npm run start\" --ext js,css --ignore build/ --ignore dist/"
+    "build": "node scripts/assert-toolchain.mjs && node scripts/build.mjs",
+    "check:deps": "node scripts/assert-toolchain.mjs && knip",
+    "clean": "node scripts/assert-toolchain.mjs && node scripts/clean.mjs",
+    "dev": "node scripts/assert-toolchain.mjs && electron-forge start",
+    "format": "node scripts/assert-toolchain.mjs && prettier --check .",
+    "format:write": "node scripts/assert-toolchain.mjs && prettier --write .",
+    "lint": "node scripts/assert-toolchain.mjs && eslint .",
+    "package": "node scripts/assert-toolchain.mjs && electron-forge package --platform=darwin --arch=arm64",
+    "package:check": "node scripts/assert-toolchain.mjs && npm run package && npm run verify:package && npm run smoke:package",
+    "smoke:dev": "node scripts/assert-toolchain.mjs && npm run build && electron . --m1-smoke",
+    "smoke:package": "node scripts/assert-toolchain.mjs && node scripts/smoke-package.mjs",
+    "start": "npm run dev",
+    "test": "node scripts/assert-toolchain.mjs && npm run format && npm run lint && npm run typecheck && npm run check:deps && npm run test:unit",
+    "test:unit": "node scripts/assert-toolchain.mjs && vitest run",
+    "typecheck": "node scripts/assert-toolchain.mjs && tsc --noEmit",
+    "verify:package": "node scripts/assert-toolchain.mjs && node scripts/verify-package.mjs"
   },
-  "standard": {
-    "parser": "@babel/eslint-parser"
+  "dependencies": {
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "webtorrent": "3.0.16"
   },
-  "renovate": {
-    "extends": [
-      "github>webtorrent/renovate-config"
-    ]
+  "devDependencies": {
+    "@electron-forge/cli": "7.11.2",
+    "@electron-forge/plugin-auto-unpack-natives": "7.11.2",
+    "@electron/fuses": "2.1.3",
+    "@eslint/js": "10.0.1",
+    "@types/node": "24.13.3",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.4",
+    "electron": "43.2.0",
+    "eslint": "10.7.0",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "globals": "17.7.0",
+    "jsdom": "29.1.1",
+    "knip": "6.29.0",
+    "prettier": "3.9.6",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.65.0",
+    "vite": "8.1.5",
+    "vitest": "4.1.10"
+  },
+  "overrides": {
+    "@thaunknown/simple-peer": "10.1.1",
+    "webrtc-polyfill": "1.2.2",
+    "node-datachannel": "0.32.3"
+  },
+  "allowScripts": {
+    "bufferutil": false,
+    "fsevents": false,
+    "ip-set": false,
+    "node@24.18.0": true,
+    "node-datachannel@0.32.3": true,
+    "utf-8-validate": false,
+    "utp-native": false
   }
 }
