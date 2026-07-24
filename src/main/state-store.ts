@@ -112,12 +112,15 @@ export class AppStateStore {
 
     // electron-store installs this renderer compatibility channel even when
     // instantiated in main. This fork deliberately supports main-only access.
-    ipcMain.removeAllListeners(ELECTRON_STORE_RENDERER_CHANNEL)
-    if (ipcMain.listenerCount(ELECTRON_STORE_RENDERER_CHANNEL) !== 0) {
+    const rendererListenerCount = ipcMain.listenerCount(
+      ELECTRON_STORE_RENDERER_CHANNEL
+    )
+    if (rendererListenerCount > 1) {
       throw new Error(
-        'electron-store renderer compatibility IPC is still active'
+        'electron-store installed unexpected renderer compatibility IPC'
       )
     }
+    ipcMain.removeAllListeners(ELECTRON_STORE_RENDERER_CHANNEL)
 
     this.#state = existingState ?? cloneState(DEFAULT_APP_STATE)
     this.#persist(this.#state)

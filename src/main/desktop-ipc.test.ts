@@ -17,7 +17,7 @@ const generationId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
 
 type Handler = (event: unknown, value: unknown) => unknown
 
-function createHarness(): {
+function createHarness(options: { stateRevision?: number } = {}): {
   cleanup: () => void
   diagnostics: Diagnostics
   engineSupervisor: EngineSupervisor
@@ -91,7 +91,7 @@ function createHarness(): {
   const stateStore = {
     snapshot: () => ({
       schemaVersion: 1,
-      revision: 4,
+      revision: options.stateRevision ?? 4,
       preferences: {},
       window: { main: { normalBounds: null } }
     })
@@ -172,6 +172,20 @@ describe('registerDesktopIpc', () => {
       isMainFrame: true,
       sandboxed: true
     })
+  })
+
+  it('does not trust the renderer when bootstrap result validation fails', async () => {
+    const { event, handlers, onBootstrap } = createHarness({
+      stateRevision: -1
+    })
+    const handler = handlers.get(DESKTOP_BOOTSTRAP_CHANNEL)
+
+    expect(await handler?.(event, request('bootstrap'))).toMatchObject({
+      ok: false,
+      requestId,
+      error: { code: 'INTERNAL', retryable: true }
+    })
+    expect(onBootstrap).not.toHaveBeenCalled()
   })
 
   it('rejects untrusted frames before parsing their payload', async () => {

@@ -273,7 +273,7 @@ export class EngineSupervisor {
 
   #stopOnce(): Promise<EngineShutdownResult> {
     this.#stopping = true
-    this.#clearTimers()
+    this.#clearTimers(true)
     this.#settlePendingOperations(
       'ABORTED',
       'The torrent engine is shutting down.',
@@ -735,7 +735,7 @@ export class EngineSupervisor {
     this.#onStatus(structuredClone(this.#status))
   }
 
-  #clearRunTimers(): void {
+  #clearRunTimers(preservePendingPing = false): void {
     if (this.#startupTimer) clearTimeout(this.#startupTimer)
     if (this.#heartbeatTimer) clearInterval(this.#heartbeatTimer)
     if (this.#heartbeatTimeout) clearTimeout(this.#heartbeatTimeout)
@@ -744,11 +744,11 @@ export class EngineSupervisor {
     this.#heartbeatTimer = null
     this.#heartbeatTimeout = null
     this.#stableTimer = null
-    this.#pendingPingRequestId = null
+    if (!preservePendingPing) this.#pendingPingRequestId = null
   }
 
-  #clearTimers(): void {
-    this.#clearRunTimers()
+  #clearTimers(preservePendingPing = false): void {
+    this.#clearRunTimers(preservePendingPing)
     if (this.#restartTimer) clearTimeout(this.#restartTimer)
     this.#restartTimer = null
   }

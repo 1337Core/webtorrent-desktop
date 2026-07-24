@@ -15,10 +15,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_APP_STATE } from '../shared/contracts'
 import type { Diagnostics } from './diagnostics'
 
-const electronMock = vi.hoisted(() => ({
-  listenerCount: vi.fn(() => 0),
-  removeAllListeners: vi.fn()
-}))
+const electronMock = vi.hoisted(() => {
+  const state = { rendererListenerCount: 1 }
+  return {
+    listenerCount: vi.fn((channel: string) =>
+      channel === 'electron-store-get-data' ? state.rendererListenerCount : 0
+    ),
+    removeAllListeners: vi.fn((channel: string) => {
+      if (channel === 'electron-store-get-data') {
+        state.rendererListenerCount = 0
+      }
+    }),
+    state
+  }
+})
 const storeMock = vi.hoisted(() => ({
   configFileMode: undefined as number | undefined,
   failWrites: false
@@ -105,7 +115,8 @@ async function writeRawState(
 beforeEach(() => {
   storeMock.configFileMode = undefined
   storeMock.failWrites = false
-  electronMock.listenerCount.mockReturnValue(0)
+  electronMock.state.rendererListenerCount = 1
+  electronMock.listenerCount.mockClear()
   electronMock.removeAllListeners.mockClear()
 })
 
@@ -126,6 +137,7 @@ describe('AppStateStore', () => {
     expect(electronMock.removeAllListeners).toHaveBeenCalledWith(
       'electron-store-get-data'
     )
+    expect(electronMock.state.rendererListenerCount).toBe(0)
     expect((await lstat(path.join(userDataPath, 'state'))).mode & 0o777).toBe(
       0o700
     )
@@ -134,6 +146,16 @@ describe('AppStateStore', () => {
         0o777
     ).toBe(0o600)
     expect(storeMock.configFileMode).toBe(0o600)
+  })
+
+  it('rejects unexpected renderer compatibility listener fan-out', async () => {
+    const userDataPath = await createUserData()
+    electronMock.state.rendererListenerCount = 2
+
+    expect(() => new AppStateStore(userDataPath, diagnostics())).toThrow(
+      'unexpected renderer compatibility IPC'
+    )
+    expect(electronMock.removeAllListeners).not.toHaveBeenCalled()
   })
 
   it('loads valid state and persists revised window bounds', async () => {

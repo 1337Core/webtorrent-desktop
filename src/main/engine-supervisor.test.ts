@@ -281,6 +281,38 @@ describe('EngineSupervisor', () => {
     await expect(second).resolves.toEqual({ outcome: 'exited', forced: false })
   })
 
+  it('accepts an in-flight heartbeat response during graceful shutdown', async () => {
+    const { children, supervisor } = createHarness()
+    const { child, initialize } = spawnAndInitialize(supervisor, children)
+    emitReady(child, initialize)
+    await vi.advanceTimersByTimeAsync(15_000)
+    const ping = engineParentMessageSchema.parse(child.messages.at(-1))
+    if (ping.type !== 'engine:ping') {
+      throw new Error('Expected a heartbeat message')
+    }
+
+    const stopPromise = supervisor.stop()
+    child.emit(
+      'message',
+      engineChildMessageSchema.parse({
+        protocolVersion: PROTOCOL_VERSION,
+        generationId: initialize.generationId,
+        requestId: ping.requestId,
+        sequence: 1,
+        timestampMs: Date.now(),
+        type: 'engine:pong',
+        payload: {}
+      })
+    )
+
+    expect(child.kill).not.toHaveBeenCalled()
+    child.emit('exit', 0)
+    await expect(stopPromise).resolves.toEqual({
+      outcome: 'exited',
+      forced: false
+    })
+  })
+
   it('fails closed when a result echoes the wrong operation identity', async () => {
     const { children, supervisor } = createHarness()
     const { child, initialize } = spawnAndInitialize(supervisor, children)

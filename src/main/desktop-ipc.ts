@@ -180,8 +180,9 @@ export function registerDesktopIpc(options: DesktopIpcOptions): () => void {
       if (!checkPayloadBudget(result, RESULT_BUDGET).ok) {
         throw new Error('Bootstrap result exceeded its fixed payload budget')
       }
+      const parsedResult = bootstrapResultSchema.parse(result)
       onBootstrap(request.data.payload.preloadTrustProof)
-      return bootstrapResultSchema.parse(result)
+      return parsedResult
     } catch {
       diagnostics.error('ipc.bootstrap-failed')
       return bootstrapResultSchema.parse(
