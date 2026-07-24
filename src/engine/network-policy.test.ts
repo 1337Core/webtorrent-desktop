@@ -5,6 +5,7 @@ import {
   isPrivateNetworkIpv4,
   isPublicIpv4
 } from './network-policy'
+import { TRACKER_HTTP_EGRESS_PROFILE } from './tracker-http-profile'
 
 const servers: Server[] = []
 
@@ -128,6 +129,13 @@ describe('EgressPolicy URL validation', () => {
         candidate.validateRemoteTorrentRedirect(
           'https://example.com/file.torrent',
           'http://other.example/file.torrent',
+          { allowHttp }
+        )
+      ).toThrowError(expect.objectContaining({ code: 'REDIRECT_BLOCKED' }))
+      expect(() =>
+        candidate.validateTrackerHttpRedirect(
+          'https://tracker.example/announce',
+          'http://other.example/announce',
           { allowHttp }
         )
       ).toThrowError(expect.objectContaining({ code: 'REDIRECT_BLOCKED' }))
@@ -302,5 +310,185 @@ describe('EgressPolicy remote torrent fetch', () => {
     firstController.abort()
     secondController.abort()
     await Promise.allSettled([first, second])
+  })
+})
+
+describe('EgressPolicy tracker HTTP fetch', () => {
+  it('pins DNS, supplies fixed tracker headers, and omits ambient credentials', async () => {
+    const { port } = await listen((request, response) => {
+      expect(request.headers.host).toBe(`tracker.example:${port}`)
+      expect(request.headers.accept).toBe(
+        TRACKER_HTTP_EGRESS_PROFILE.headers.accept
+      )
+      expect(request.headers['accept-encoding']).toBe('identity')
+      expect(request.headers['cache-control']).toBe('no-store')
+      expect(request.headers['user-agent']).toBe(
+        TRACKER_HTTP_EGRESS_PROFILE.headers['user-agent']
+      )
+      expect(request.headers.authorization).toBeUndefined()
+      expect(request.headers.cookie).toBeUndefined()
+      expect(request.headers.referer).toBeUndefined()
+      response.writeHead(200, { 'content-type': 'text/plain' })
+      response.end('tracker response')
+    })
+    const candidate = new EgressPolicy({
+      dnsLookup: async hostname => {
+        expect(hostname).toBe('tracker.example')
+        return [{ address: '127.0.0.1', family: 4 }]
+      },
+      testOnlyAllowLoopback: true
+    })
+
+    const result = await candidate.fetchTrackerResponse(
+      `http://tracker.example:${port}/announce`,
+      { allowHttp: true, signal: new AbortController().signal }
+    )
+
+    expect(new TextDecoder().decode(result.bytes)).toBe('tracker response')
+  })
+
+  it('allows exactly three revalidated redirects and rejects a fourth', async () => {
+    const visited: string[] = []
+    const resolvedHosts: string[] = []
+    const { port } = await listen((request, response) => {
+      const path = request.url ?? ''
+      visited.push(path)
+      const count = Number(path.split('/').at(-1))
+      if (path.startsWith('/allowed/') && count === 3) {
+        response.writeHead(200)
+        response.end('ok')
+        return
+      }
+      response.writeHead(302, {
+        location:
+          count === 0
+            ? `http://redirected.example:${port}${path.slice(0, path.lastIndexOf('/') + 1)}1`
+            : `${path.slice(0, path.lastIndexOf('/') + 1)}${count + 1}`
+      })
+      response.end()
+    })
+    const candidate = new EgressPolicy({
+      dnsLookup: async hostname => {
+        resolvedHosts.push(hostname)
+        return [{ address: '127.0.0.1', family: 4 }]
+      },
+      testOnlyAllowLoopback: true
+    })
+
+    await expect(
+      candidate.fetchTrackerResponse(
+        `http://initial.example:${port}/allowed/0`,
+        {
+          allowHttp: true,
+          signal: new AbortController().signal
+        }
+      )
+    ).resolves.toMatchObject({ bytes: new TextEncoder().encode('ok') })
+    expect(visited).toEqual([
+      '/allowed/0',
+      '/allowed/1',
+      '/allowed/2',
+      '/allowed/3'
+    ])
+    expect(resolvedHosts).toEqual([
+      'initial.example',
+      'redirected.example',
+      'redirected.example',
+      'redirected.example'
+    ])
+
+    visited.length = 0
+    resolvedHosts.length = 0
+    await expect(
+      candidate.fetchTrackerResponse(
+        `http://initial.example:${port}/blocked/0`,
+        {
+          allowHttp: true,
+          signal: new AbortController().signal
+        }
+      )
+    ).rejects.toMatchObject({ code: 'REDIRECT_BLOCKED' })
+    expect(visited).toEqual([
+      '/blocked/0',
+      '/blocked/1',
+      '/blocked/2',
+      '/blocked/3'
+    ])
+    expect(resolvedHosts).toEqual([
+      'initial.example',
+      'redirected.example',
+      'redirected.example',
+      'redirected.example'
+    ])
+  })
+
+  it('enforces explicit HTTP consent and the one-MiB streamed body cap', async () => {
+    const { origin } = await listen((request, response) => {
+      if (request.url === '/encoded') {
+        response.writeHead(200, { 'content-encoding': 'gzip' })
+        response.end('not actually compressed')
+        return
+      }
+      response.writeHead(200)
+      response.write(
+        new Uint8Array(TRACKER_HTTP_EGRESS_PROFILE.maxResponseBytes)
+      )
+      response.end(Uint8Array.of(1))
+    })
+    const candidate = new EgressPolicy({ testOnlyAllowLoopback: true })
+
+    await expect(
+      candidate.fetchTrackerResponse(`${origin}/announce`, {
+        allowHttp: false,
+        signal: new AbortController().signal
+      })
+    ).rejects.toMatchObject({ code: 'HTTP_DISABLED' })
+    await expect(
+      candidate.fetchTrackerResponse(`${origin}/announce`, {
+        allowHttp: true,
+        signal: new AbortController().signal
+      })
+    ).rejects.toMatchObject({ code: 'BODY_TOO_LARGE' })
+    await expect(
+      candidate.fetchTrackerResponse(`${origin}/encoded`, {
+        allowHttp: true,
+        signal: new AbortController().signal
+      })
+    ).rejects.toMatchObject({ code: 'RESPONSE_ENCODING_BLOCKED' })
+  })
+
+  it('propagates caller abort while DNS is still pending', async () => {
+    const candidate = new EgressPolicy({
+      dnsLookup: async () => await new Promise(() => undefined)
+    })
+    const controller = new AbortController()
+    const fetch = candidate.fetchTrackerResponse(
+      'https://pending.example/announce',
+      { allowHttp: false, signal: controller.signal }
+    )
+
+    controller.abort()
+
+    await expect(fetch).rejects.toMatchObject({ code: 'ABORTED' })
+  })
+
+  it('rejects a body completion observed after the absolute deadline', async () => {
+    let now = 1_000
+    const { origin } = await listen((_request, response) => {
+      now += TRACKER_HTTP_EGRESS_PROFILE.absoluteDeadlineMs
+      response.writeHead(200)
+      response.end('late')
+    })
+    const candidate = new EgressPolicy({
+      now: () => now,
+      testOnlyAllowLoopback: true
+    })
+
+    await expect(
+      candidate.fetchTrackerResponse(`${origin}/announce`, {
+        allowHttp: true,
+        signal: new AbortController().signal
+      })
+    ).rejects.toMatchObject({ code: 'REQUEST_TIMEOUT' })
   })
 })

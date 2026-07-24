@@ -1,10 +1,12 @@
 import { lookup as systemLookup } from 'node:dns/promises'
 import { isIP, type LookupFunction } from 'node:net'
+import { performance } from 'node:perf_hooks'
 import {
   Agent as UndiciAgent,
   buildConnector,
   fetch as undiciFetch
 } from 'undici'
+import { TRACKER_HTTP_EGRESS_PROFILE } from './tracker-http-profile'
 
 const DEFAULT_DNS_TIMEOUT_MS = 5_000
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
@@ -14,6 +16,11 @@ const MAX_DNS_ANSWERS = 16
 const MAX_RESPONSE_CHUNKS = 4_096
 const MAX_URL_BYTES = 2_048
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
+const REMOTE_TORRENT_HEADERS = Object.freeze({
+  accept: 'application/x-bittorrent, application/octet-stream;q=0.9',
+  'accept-encoding': 'identity',
+  'cache-control': 'no-store'
+})
 
 type DnsRecord = Readonly<{
   address: string
@@ -27,6 +34,7 @@ export type EgressPolicyOptions = Readonly<{
   dnsLookup?: DnsLookup
   dnsTimeoutMs?: number
   maxRedirects?: number
+  now?: () => number
   requestTimeoutMs?: number
   testOnlyAllowLoopback?: boolean
 }>
@@ -41,32 +49,42 @@ export type RemoteTorrentFetchResult = Readonly<{
   finalUrl: string
 }>
 
-type RemoteTorrentHop =
+type NetworkFetchProfile = Readonly<{
+  allowHttp: boolean
+  callerAbortCode: Extract<EgressPolicyErrorCode, 'ABORTED' | 'REQUEST_FAILED'>
+  headers: Readonly<Record<string, string>>
+  kind: 'remote-torrent' | 'tracker-http'
+  maxRedirects: number
+  maxResponseBytes: number
+  requestTimeoutMs: number
+}>
+
+type NetworkFetchHop =
   | Readonly<{ kind: 'redirect'; location: string }>
   | Readonly<{ bytes: Uint8Array; kind: 'success' }>
 
-class EgressPolicyError extends Error {
-  readonly code:
-    | 'ADDRESS_BLOCKED'
-    | 'BODY_TOO_LARGE'
-    | 'CONCURRENCY_LIMIT'
-    | 'DNS_FAILED'
-    | 'DNS_TIMEOUT'
-    | 'HTTP_DISABLED'
-    | 'HTTP_STATUS'
-    | 'INVALID_URL'
-    | 'REDIRECT_BLOCKED'
-    | 'REQUEST_FAILED'
-    | 'REQUEST_TIMEOUT'
-    | 'RESPONSE_ENCODING_BLOCKED'
-    | 'SCHEME_BLOCKED'
-    | 'TRACKER_TRANSPORT_DISABLED'
+type EgressPolicyErrorCode =
+  | 'ABORTED'
+  | 'ADDRESS_BLOCKED'
+  | 'BODY_TOO_LARGE'
+  | 'CONCURRENCY_LIMIT'
+  | 'DNS_FAILED'
+  | 'DNS_TIMEOUT'
+  | 'HTTP_DISABLED'
+  | 'HTTP_STATUS'
+  | 'INVALID_URL'
+  | 'REDIRECT_BLOCKED'
+  | 'REQUEST_FAILED'
+  | 'REQUEST_TIMEOUT'
+  | 'RESPONSE_ENCODING_BLOCKED'
+  | 'SCHEME_BLOCKED'
+  | 'TRACKER_TRANSPORT_DISABLED'
 
-  constructor(
-    code: EgressPolicyError['code'],
-    message = 'Network request was blocked by policy.'
-  ) {
-    super(message)
+export class EgressPolicyError extends Error {
+  readonly code: EgressPolicyErrorCode
+
+  constructor(code: EgressPolicyErrorCode) {
+    super(`Network request failed: ${code}.`)
     this.name = 'EgressPolicyError'
     this.code = code
   }
@@ -257,6 +275,7 @@ export class EgressPolicy {
   readonly #dnsLookup: DnsLookup
   readonly #dnsTimeoutMs: number
   readonly #maxRedirects: number
+  readonly #now: () => number
   readonly #requestTimeoutMs: number
   readonly #testOnlyAllowLoopback: boolean
   #activeRemoteTorrentFetches = 0
@@ -273,6 +292,7 @@ export class EgressPolicy {
         }))
     this.#dnsTimeoutMs = options.dnsTimeoutMs ?? DEFAULT_DNS_TIMEOUT_MS
     this.#maxRedirects = options.maxRedirects ?? DEFAULT_MAX_REDIRECTS
+    this.#now = options.now ?? (() => performance.now())
     this.#requestTimeoutMs =
       options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS
     this.#testOnlyAllowLoopback = options.testOnlyAllowLoopback ?? false
@@ -291,6 +311,32 @@ export class EgressPolicy {
       throw new EgressPolicyError('SCHEME_BLOCKED')
     }
     return url.href
+  }
+
+  validateTrackerHttpUrl(
+    value: string,
+    options: Readonly<{ allowHttp: boolean }>
+  ): string {
+    const url = parseNetworkUrl(value)
+    if (url.protocol === 'http:' && !options.allowHttp) {
+      throw new EgressPolicyError('HTTP_DISABLED')
+    }
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+      throw new EgressPolicyError('TRACKER_TRANSPORT_DISABLED')
+    }
+    return url.href
+  }
+
+  validateTrackerHttpRedirect(
+    from: string,
+    location: string,
+    options: Readonly<{ allowHttp: boolean }>
+  ): string {
+    return this.#validateRedirect(
+      new URL(this.validateTrackerHttpUrl(from, options)),
+      location,
+      this.#fetchProfile('tracker-http', options.allowHttp)
+    ).href
   }
 
   validateWebSeedUrl(value: string): string {
@@ -320,18 +366,11 @@ export class EgressPolicy {
     location: string,
     options: RemoteTorrentUrlOptions
   ): string {
-    const current = new URL(this.validateRemoteTorrentUrl(from, options))
-    let redirected: URL
-    try {
-      redirected = new URL(location, current)
-    } catch {
-      throw new EgressPolicyError('REDIRECT_BLOCKED')
-    }
-    const parsedRedirect = parseNetworkUrl(redirected)
-    if (current.protocol === 'https:' && parsedRedirect.protocol === 'http:') {
-      throw new EgressPolicyError('REDIRECT_BLOCKED')
-    }
-    return this.validateRemoteTorrentUrl(parsedRedirect.href, options)
+    return this.#validateRedirect(
+      new URL(this.validateRemoteTorrentUrl(from, options)),
+      location,
+      this.#fetchProfile('remote-torrent', options.allowHttp)
+    ).href
   }
 
   async fetchRemoteTorrentBytes(
@@ -342,48 +381,103 @@ export class EgressPolicy {
       throw new EgressPolicyError('CONCURRENCY_LIMIT')
     }
     this.#activeRemoteTorrentFetches += 1
-    const deadline = Date.now() + this.#requestTimeoutMs
 
     try {
-      let current = new URL(this.validateRemoteTorrentUrl(value, options))
-      let redirectCount = 0
-      while (true) {
-        const hop = await this.#fetchRemoteTorrentHop(
-          current,
-          deadline,
-          options.signal
-        )
-        if (hop.kind === 'success') {
-          return { bytes: hop.bytes, finalUrl: current.href }
-        }
-        if (redirectCount >= this.#maxRedirects) {
-          throw new EgressPolicyError('REDIRECT_BLOCKED')
-        }
-
-        try {
-          current = new URL(
-            this.validateRemoteTorrentRedirect(
-              current.href,
-              hop.location,
-              options
-            )
-          )
-        } catch {
-          throw new EgressPolicyError('REDIRECT_BLOCKED')
-        }
-        redirectCount += 1
-      }
+      return await this.#fetchBoundedResponse(
+        value,
+        this.#fetchProfile('remote-torrent', options.allowHttp),
+        options.signal
+      )
     } finally {
       this.#activeRemoteTorrentFetches -= 1
     }
   }
 
-  async #fetchRemoteTorrentHop(
+  async fetchTrackerResponse(
+    value: string,
+    options: Readonly<{ allowHttp: boolean; signal: AbortSignal }>
+  ): Promise<Readonly<{ bytes: Uint8Array }>> {
+    const result = await this.#fetchBoundedResponse(
+      value,
+      this.#fetchProfile('tracker-http', options.allowHttp),
+      options.signal
+    )
+    return { bytes: result.bytes }
+  }
+
+  #fetchProfile(
+    kind: NetworkFetchProfile['kind'],
+    allowHttp: boolean
+  ): NetworkFetchProfile {
+    if (kind === 'tracker-http') {
+      return {
+        allowHttp,
+        callerAbortCode: 'ABORTED',
+        headers: TRACKER_HTTP_EGRESS_PROFILE.headers,
+        kind,
+        maxRedirects: TRACKER_HTTP_EGRESS_PROFILE.maxRedirects,
+        maxResponseBytes: TRACKER_HTTP_EGRESS_PROFILE.maxResponseBytes,
+        requestTimeoutMs: TRACKER_HTTP_EGRESS_PROFILE.absoluteDeadlineMs
+      }
+    }
+    return {
+      allowHttp,
+      callerAbortCode: 'REQUEST_FAILED',
+      headers: REMOTE_TORRENT_HEADERS,
+      kind,
+      maxRedirects: this.#maxRedirects,
+      maxResponseBytes: REMOTE_TORRENT_MAX_BYTES,
+      requestTimeoutMs: this.#requestTimeoutMs
+    }
+  }
+
+  async #fetchBoundedResponse(
+    value: string,
+    profile: NetworkFetchProfile,
+    callerSignal: AbortSignal | undefined
+  ): Promise<RemoteTorrentFetchResult> {
+    if (callerSignal?.aborted) {
+      throw new EgressPolicyError(profile.callerAbortCode)
+    }
+
+    const deadline = this.#now() + profile.requestTimeoutMs
+    let current = new URL(this.#validateFetchUrl(value, profile))
+    let redirectCount = 0
+    while (true) {
+      const hop = await this.#fetchBoundedHop(
+        current,
+        deadline,
+        callerSignal,
+        profile
+      )
+      if (hop.kind === 'success') {
+        if (callerSignal?.aborted) {
+          throw new EgressPolicyError(profile.callerAbortCode)
+        }
+        this.#remainingMilliseconds(deadline)
+        return { bytes: hop.bytes, finalUrl: current.href }
+      }
+      if (redirectCount >= profile.maxRedirects) {
+        throw new EgressPolicyError('REDIRECT_BLOCKED')
+      }
+
+      current = this.#validateRedirect(current, hop.location, profile)
+      redirectCount += 1
+    }
+  }
+
+  async #fetchBoundedHop(
     url: URL,
     deadline: number,
-    callerSignal: AbortSignal | undefined
-  ): Promise<RemoteTorrentHop> {
-    const approvedAddress = await this.#approvedAddress(url.hostname, deadline)
+    callerSignal: AbortSignal | undefined,
+    profile: NetworkFetchProfile
+  ): Promise<NetworkFetchHop> {
+    const approvedAddress = await this.#approvedAddress(
+      url.hostname,
+      deadline,
+      callerSignal,
+      profile.callerAbortCode
+    )
     const dispatcher = new UndiciAgent({
       connect: createPinnedConnector(
         approvedAddress,
@@ -391,10 +485,11 @@ export class EgressPolicy {
       )
     })
     const controller = new AbortController()
-    const timeout = setTimeout(
-      () => controller.abort(),
-      this.#remainingMilliseconds(deadline)
-    )
+    let deadlineExpired = false
+    const timeout = setTimeout(() => {
+      deadlineExpired = true
+      controller.abort()
+    }, this.#remainingMilliseconds(deadline))
     const abortFromCaller = (): void => controller.abort()
     if (callerSignal) {
       if (callerSignal.aborted) controller.abort()
@@ -405,11 +500,7 @@ export class EgressPolicy {
     try {
       const response = await undiciFetch(url, {
         dispatcher,
-        headers: {
-          accept: 'application/x-bittorrent, application/octet-stream;q=0.9',
-          'accept-encoding': 'identity',
-          'cache-control': 'no-store'
-        },
+        headers: profile.headers,
         method: 'GET',
         redirect: 'manual',
         signal: controller.signal
@@ -443,13 +534,13 @@ export class EgressPolicy {
           await response.body?.cancel()
           throw new EgressPolicyError('REQUEST_FAILED')
         }
-        if (Number(contentLength) > REMOTE_TORRENT_MAX_BYTES) {
+        if (Number(contentLength) > profile.maxResponseBytes) {
           await response.body?.cancel()
           throw new EgressPolicyError('BODY_TOO_LARGE')
         }
       }
 
-      const storage = new Uint8Array(REMOTE_TORRENT_MAX_BYTES)
+      const storage = new Uint8Array(profile.maxResponseBytes)
       let chunkCount = 0
       let totalBytes = 0
       if (response.body) {
@@ -459,7 +550,7 @@ export class EgressPolicy {
           totalBytes += chunk.byteLength
           if (
             chunkCount > MAX_RESPONSE_CHUNKS ||
-            totalBytes > REMOTE_TORRENT_MAX_BYTES
+            totalBytes > profile.maxResponseBytes
           ) {
             controller.abort()
             throw new EgressPolicyError('BODY_TOO_LARGE')
@@ -474,17 +565,13 @@ export class EgressPolicy {
     } catch (error) {
       const policyError = findPolicyError(error)
       if (policyError) throw policyError
-      if (controller.signal.aborted) {
-        throw new EgressPolicyError(
-          callerSignal?.aborted ? 'REQUEST_FAILED' : 'REQUEST_TIMEOUT'
-        )
+      if (callerSignal?.aborted) {
+        throw new EgressPolicyError(profile.callerAbortCode)
       }
-      throw new EgressPolicyError(
-        'REQUEST_FAILED',
-        error instanceof Error
-          ? `Network request failed: ${error.name}.`
-          : undefined
-      )
+      if (deadlineExpired || controller.signal.aborted) {
+        throw new EgressPolicyError('REQUEST_TIMEOUT')
+      }
+      throw new EgressPolicyError('REQUEST_FAILED')
     } finally {
       clearTimeout(timeout)
       callerSignal?.removeEventListener('abort', abortFromCaller)
@@ -492,7 +579,50 @@ export class EgressPolicy {
     }
   }
 
-  async #approvedAddress(hostname: string, deadline: number): Promise<string> {
+  #validateFetchUrl(value: string, profile: NetworkFetchProfile): string {
+    return profile.kind === 'tracker-http'
+      ? this.validateTrackerHttpUrl(value, { allowHttp: profile.allowHttp })
+      : this.validateRemoteTorrentUrl(value, {
+          allowHttp: profile.allowHttp
+        })
+  }
+
+  #validateRedirect(
+    current: URL,
+    location: string,
+    profile: NetworkFetchProfile
+  ): URL {
+    let redirected: URL
+    try {
+      redirected = new URL(location, current)
+    } catch {
+      throw new EgressPolicyError('REDIRECT_BLOCKED')
+    }
+
+    let parsedRedirect: URL
+    try {
+      parsedRedirect = parseNetworkUrl(redirected)
+      if (
+        current.protocol === 'https:' &&
+        parsedRedirect.protocol === 'http:'
+      ) {
+        throw new EgressPolicyError('REDIRECT_BLOCKED')
+      }
+      return new URL(this.#validateFetchUrl(parsedRedirect.href, profile))
+    } catch {
+      throw new EgressPolicyError('REDIRECT_BLOCKED')
+    }
+  }
+
+  async #approvedAddress(
+    hostname: string,
+    deadline: number,
+    callerSignal: AbortSignal | undefined,
+    callerAbortCode: Extract<
+      EgressPolicyErrorCode,
+      'ABORTED' | 'REQUEST_FAILED'
+    >
+  ): Promise<string> {
     const unwrappedHostname =
       hostname.startsWith('[') && hostname.endsWith(']')
         ? hostname.slice(1, -1)
@@ -519,16 +649,32 @@ export class EgressPolicy {
     const timeoutCode =
       remaining <= this.#dnsTimeoutMs ? 'REQUEST_TIMEOUT' : 'DNS_TIMEOUT'
     let timeout: NodeJS.Timeout | null = null
+    let abortFromCaller: (() => void) | null = null
     try {
-      const records = await Promise.race([
+      if (callerSignal?.aborted) {
+        throw new EgressPolicyError(callerAbortCode)
+      }
+      const attempts: Array<Promise<ReadonlyArray<DnsRecord>>> = [
         this.#dnsLookup(unwrappedHostname),
-        new Promise<never>((_resolve, reject) => {
+        new Promise<ReadonlyArray<DnsRecord>>((_resolve, reject) => {
           timeout = setTimeout(
             () => reject(new EgressPolicyError(timeoutCode)),
             dnsTimeout
           )
         })
-      ])
+      ]
+      if (callerSignal) {
+        attempts.push(
+          new Promise<ReadonlyArray<DnsRecord>>((_resolve, reject) => {
+            abortFromCaller = () =>
+              reject(new EgressPolicyError(callerAbortCode))
+            callerSignal.addEventListener('abort', abortFromCaller, {
+              once: true
+            })
+          })
+        )
+      }
+      const records = await Promise.race(attempts)
       if (records.length === 0 || records.length > MAX_DNS_ANSWERS) {
         throw new EgressPolicyError('DNS_FAILED')
       }
@@ -550,6 +696,9 @@ export class EgressPolicy {
       throw new EgressPolicyError('DNS_FAILED')
     } finally {
       if (timeout) clearTimeout(timeout)
+      if (abortFromCaller) {
+        callerSignal?.removeEventListener('abort', abortFromCaller)
+      }
     }
   }
 
@@ -562,7 +711,7 @@ export class EgressPolicy {
   }
 
   #remainingMilliseconds(deadline: number): number {
-    const remaining = deadline - Date.now()
+    const remaining = deadline - this.#now()
     if (remaining <= 0) throw new EgressPolicyError('REQUEST_TIMEOUT')
     return remaining
   }
