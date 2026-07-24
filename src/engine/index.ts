@@ -1,12 +1,9 @@
 import process from 'node:process'
 import WebTorrent from 'webtorrent'
-import type {
-  EngineCommand,
-  EngineCommandResult,
-  EngineRuntimeInfo
-} from '../shared/contracts'
+import type { EngineEvent, EngineRuntimeInfo } from '../shared/contracts'
 import { createClientOptions } from './client-config'
 import { EngineProtocolController } from './protocol-controller'
+import { EngineRuntime } from './runtime'
 
 const parentPort = process.parentPort
 if (!parentPort) {
@@ -49,45 +46,25 @@ async function proveNativeWebRtc(): Promise<EngineRuntimeInfo> {
   }
 }
 
-function executeOperation(
-  operation: EngineCommand,
-  _signal: AbortSignal
-): Promise<EngineCommandResult> {
-  if (operation.command === 'list-torrents') {
-    return Promise.resolve({
-      ok: true,
-      result: {
-        command: 'list-torrents',
-        value: {
-          items: [],
-          nextCursor: null,
-          total: 0
-        }
-      }
-    })
-  }
-
-  return Promise.resolve({
-    ok: false,
-    error: {
-      command: operation.command,
-      code: 'UNSUPPORTED',
-      displayMessage: 'This torrent operation is not available yet.',
-      retryable: false
-    }
-  })
-}
+let emitRuntimeEvent = (_event: EngineEvent): void => undefined
+const runtime = new EngineRuntime({
+  emitEvent: event => emitRuntimeEvent(event)
+})
 
 const controller = new EngineProtocolController({
-  execute: executeOperation,
+  execute: (operation, signal) => runtime.execute(operation, signal),
   exit: code => {
     setImmediate(() => process.exit(code))
   },
   postMessage: message => {
     parentPort.postMessage(message)
   },
-  proveRuntime: proveNativeWebRtc
+  proveRuntime: proveNativeWebRtc,
+  shutdown: () => runtime.close()
 })
+emitRuntimeEvent = event => {
+  controller.emit(event)
+}
 
 parentPort.on('message', event => {
   controller.receive(event.data)
