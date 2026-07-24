@@ -63,6 +63,7 @@
     "verify:package": "node scripts/assert-toolchain.mjs && node scripts/verify-package.mjs"
   },
   "dependencies": {
+    "@thaunknown/simple-peer": "10.1.1",
     "bencode": "4.0.1",
     "electron-store": "11.0.2",
     "parse-torrent": "11.0.23",
@@ -70,6 +71,7 @@
     "react-dom": "19.2.8",
     "undici": "7.29.0",
     "webtorrent": "3.0.16",
+    "ws": "8.21.1",
     "zod": "4.4.3"
   },
   "devDependencies": {
@@ -82,6 +84,7 @@
     "@types/react": "19.2.17",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "6.0.4",
+    "bittorrent-tracker": "11.2.3",
     "electron": "43.2.0",
     "eslint": "10.7.0",
     "eslint-plugin-react-hooks": "7.1.1",

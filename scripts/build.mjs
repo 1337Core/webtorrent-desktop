@@ -59,7 +59,7 @@ await buildNodeEntry({
 
 await buildNodeEntry({
   entry: 'src/engine/index.ts',
-  external: ['webtorrent'],
+  external: ['@thaunknown/simple-peer', 'webtorrent', 'ws'],
   fileName: 'index.mjs',
   format: 'es',
   outDir: 'engine'

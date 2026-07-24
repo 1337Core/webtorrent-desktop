@@ -32,13 +32,30 @@ const nativePath = resolve(
 )
 const expectedNativeHash =
   '1d4f814bede82a5412b19e8973e44eb484d504acc52f17796e90add75dc9ac80'
-const requiredRuntimeDependencies = new Map([
-  ['electron-store', '11.0.2'],
-  ['react', '19.2.8'],
-  ['react-dom', '19.2.8'],
-  ['webtorrent', '3.0.16'],
-  ['zod', '4.4.3']
-])
+const exactVersionPattern =
+  /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u
+const sourceManifest = JSON.parse(
+  await readFile(resolve(root, 'package.json'), 'utf8')
+)
+const requiredRuntimeDependencies = new Map(
+  Object.entries(sourceManifest.dependencies ?? {}).sort(([left], [right]) =>
+    left.localeCompare(right)
+  )
+)
+
+if (requiredRuntimeDependencies.size === 0) {
+  throw new Error('Source manifest must declare runtime dependencies')
+}
+for (const [dependency, expectedVersion] of requiredRuntimeDependencies) {
+  if (
+    typeof expectedVersion !== 'string' ||
+    !exactVersionPattern.test(expectedVersion)
+  ) {
+    throw new Error(
+      `Runtime dependency ${dependency} must use an exact semantic version`
+    )
+  }
+}
 
 async function collectNativeModules(directory) {
   const found = []
@@ -163,8 +180,21 @@ if (
     'Packaged manifest does not match the pinned runtime contract'
   )
 }
+const packagedRuntimeDependencies = packagedManifest.dependencies ?? {}
+const packagedDependencyNames = Object.keys(packagedRuntimeDependencies).sort()
+const expectedDependencyNames = [...requiredRuntimeDependencies.keys()]
+if (
+  packagedDependencyNames.length !== expectedDependencyNames.length ||
+  packagedDependencyNames.some(
+    (dependency, index) => dependency !== expectedDependencyNames[index]
+  )
+) {
+  throw new Error(
+    `Packaged runtime dependency manifest differs from source:\nexpected ${expectedDependencyNames.join(', ')}\nreceived ${packagedDependencyNames.join(', ')}`
+  )
+}
 for (const [dependency, expectedVersion] of requiredRuntimeDependencies) {
-  if (packagedManifest.dependencies?.[dependency] !== expectedVersion) {
+  if (packagedRuntimeDependencies[dependency] !== expectedVersion) {
     throw new Error(
       `Packaged manifest must pin ${dependency} to ${expectedVersion}`
     )

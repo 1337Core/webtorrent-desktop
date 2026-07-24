@@ -9,5 +9,6 @@
     "src/renderer/index.tsx",
     "src/shared/**/*.test.ts"
   ],
+  "ignoreDependencies": ["@thaunknown/simple-peer", "bittorrent-tracker", "ws"],
   "project": ["scripts/**/*.mjs", "src/**/*.ts", "src/**/*.tsx"]
 }
