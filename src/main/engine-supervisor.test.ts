@@ -407,6 +407,84 @@ describe('EngineSupervisor', () => {
     })
   })
 
+  it('reports one protocol failure however many invalid messages arrive', () => {
+    const { children, statuses, supervisor } = createHarness()
+    const { child } = spawnAndInitialize(supervisor, children)
+
+    child.emit('message', { arbitrary: true })
+    child.emit('message', { arbitrary: true })
+    child.emit('message', { alsoArbitrary: true })
+
+    expect(child.kill).toHaveBeenCalledOnce()
+    expect(statuses.filter(status => status.state === 'stopped')).toHaveLength(
+      1
+    )
+  })
+
+  it('does not report a protocol failure after graceful shutdown begins', async () => {
+    const { children, statuses, supervisor } = createHarness()
+    const { child, initialize } = spawnAndInitialize(supervisor, children)
+    emitReady(child, initialize)
+
+    const stopPromise = supervisor.stop()
+    child.emit('message', { arbitrary: true })
+
+    expect(
+      statuses.some(
+        status =>
+          status.state === 'stopped' && status.code === 'ENGINE_PROTOCOL_ERROR'
+      )
+    ).toBe(false)
+
+    child.emit('exit', 0)
+    await expect(stopPromise).resolves.toMatchObject({ outcome: 'exited' })
+  })
+
+  it('keeps admitting operations after a full generation of timeouts', async () => {
+    const { children, supervisor } = createHarness()
+    const { child, initialize } = spawnAndInitialize(supervisor, children)
+    emitReady(child, initialize)
+
+    const timedOut = Array.from({ length: 128 }, () =>
+      supervisor.execute(
+        { command: 'list-torrents', payload: { cursor: 0, limit: 50 } },
+        100
+      )
+    )
+    await vi.advanceTimersByTimeAsync(100)
+    for (const settled of await Promise.all(timedOut)) {
+      expect(settled).toMatchObject({ ok: false, error: { code: 'TIMEOUT' } })
+    }
+
+    const admitted = supervisor.execute({
+      command: 'list-torrents',
+      payload: { cursor: 0, limit: 50 }
+    })
+    const execute = engineParentMessageSchema.parse(child.messages.at(-1))
+    if (execute.type !== 'engine:execute') {
+      throw new Error('Expected the operation to reach the engine')
+    }
+    child.emit(
+      'message',
+      engineChildMessageSchema.parse({
+        protocolVersion: PROTOCOL_VERSION,
+        generationId: initialize.generationId,
+        requestId: execute.requestId,
+        sequence: 1,
+        timestampMs: Date.now(),
+        type: 'engine:result',
+        payload: {
+          ok: true,
+          result: {
+            command: 'list-torrents',
+            value: { items: [], nextCursor: null, total: 0 }
+          }
+        }
+      })
+    )
+    await expect(admitted).resolves.toMatchObject({ ok: true })
+  })
+
   it('waits for the child exit after requesting graceful shutdown', async () => {
     const { children, supervisor } = createHarness()
     const { child, initialize } = spawnAndInitialize(supervisor, children)

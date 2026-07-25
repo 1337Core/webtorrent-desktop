@@ -112,6 +112,7 @@ export class EngineSupervisor {
   #handshakeRequestId: string | null = null
   #pendingPingRequestId: string | null = null
   #stopping = false
+  #protocolFailed = false
   #restartReason: RestartReason = 'CRASHED'
   #startupTimer: NodeJS.Timeout | null = null
   #heartbeatTimer: NodeJS.Timeout | null = null
@@ -165,10 +166,7 @@ export class EngineSupervisor {
         )
       )
     }
-    if (
-      this.#pendingOperations.size + this.#retiredRequestIds.size >=
-      MAX_PENDING_OPERATIONS
-    ) {
+    if (this.#pendingOperations.size >= MAX_PENDING_OPERATIONS) {
       return Promise.resolve(
         operationFailure(
           operation.command,
@@ -341,6 +339,7 @@ export class EngineSupervisor {
     this.#handshakeRequestId = randomUUID()
     this.#pendingPingRequestId = null
     this.#shutdownRequestId = null
+    this.#protocolFailed = false
     this.#retiredRequestIds.clear()
     this.#setStatus({
       state: 'starting',
@@ -656,6 +655,9 @@ export class EngineSupervisor {
   }
 
   #failProtocol(child: UtilityProcess): void {
+    if (this.#protocolFailed) return
+    this.#protocolFailed = true
+    const shuttingDown = this.#stopping
     this.#stopping = true
     this.#clearTimers()
     this.#settlePendingOperations(
@@ -665,6 +667,10 @@ export class EngineSupervisor {
       true
     )
     this.#kill(child, 'PROTOCOL_ERROR')
+    if (shuttingDown) {
+      this.#diagnostics.error('engine.protocol-error-during-shutdown')
+      return
+    }
     this.#setStatus({
       state: 'stopped',
       code: 'ENGINE_PROTOCOL_ERROR',
