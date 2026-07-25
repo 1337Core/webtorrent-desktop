@@ -339,6 +339,39 @@ export class EgressPolicy {
     ).href
   }
 
+  /**
+   * Resolves one `wss:` tracker to a single approved IPv4 literal while
+   * keeping its original identity for TLS. The caller connects to the address
+   * and presents the hostname, so DNS cannot be rebound between the check and
+   * the connection.
+   */
+  async approveWssEndpoint(
+    value: string,
+    options: Readonly<{ signal?: AbortSignal }> = {}
+  ): Promise<
+    Readonly<{ address: string; hostname: string; href: string; port: number }>
+  > {
+    const url = parseNetworkUrl(value)
+    if (url.protocol === 'ws:') {
+      throw new EgressPolicyError('TRACKER_TRANSPORT_DISABLED')
+    }
+    if (url.protocol !== 'wss:') throw new EgressPolicyError('SCHEME_BLOCKED')
+
+    const deadline = this.#now() + this.#requestTimeoutMs
+    const address = await this.#approvedAddress(
+      url.hostname,
+      deadline,
+      options.signal,
+      'ABORTED'
+    )
+    return {
+      address,
+      hostname: url.hostname,
+      href: url.href,
+      port: url.port === '' ? 443 : Number(url.port)
+    }
+  }
+
   validateWebSeedUrl(value: string): string {
     const url = parseNetworkUrl(value)
     if (url.protocol !== 'http:' && url.protocol !== 'https:') {
