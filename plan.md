@@ -2290,9 +2290,15 @@ a public tracker, which stays an owner-machine check.
 The engine-wide peer-admission budget the section 7.4 caps require is now
 implemented and enforced at every handoff, including the peers WebTorrent
 discovers for itself through PEX, which previously bypassed the session gate
-entirely. The remaining section 18.2 work is the DHT, tracker, staging, and
-hostile-race coverage, and the churn and boundary suites that need many live
-peers.
+entirely. The DHT wire and boundary, filesystem containment, and the
+`fs-chunk-store` characterization required by section 9.9 are covered, and the
+egress policy is proven to resolve once and stay pinned to the address it
+approved.
+
+The remaining section 18.2 work is: the real local-TLS tracker fixtures, which
+need a fixture certificate authority trusted by the test process only; the
+staging and hostile-race suites; and the churn and boundary suites that need
+many live peers.
 
 ### Milestone 4 — storage, resume, and legacy import
 

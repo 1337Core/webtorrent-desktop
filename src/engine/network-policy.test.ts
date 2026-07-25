@@ -250,6 +250,33 @@ describe('EgressPolicy remote torrent fetch', () => {
     ).rejects.toMatchObject({ code: 'REDIRECT_BLOCKED' })
   })
 
+  it('keeps the socket on the address it approved', async () => {
+    const wanted = await listen((_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/x-bittorrent' })
+      response.end('approved')
+    })
+    let resolutions = 0
+    const candidate = new EgressPolicy({
+      dnsLookup: async () => {
+        resolutions += 1
+        // A resolver that changes its answer after approval must not be able
+        // to move a connection that is already pinned.
+        return resolutions === 1
+          ? [{ address: '127.0.0.1', family: 4 }]
+          : [{ address: '203.0.113.9', family: 4 }]
+      },
+      testOnlyAllowLoopback: true
+    })
+
+    const result = await candidate.fetchRemoteTorrentBytes(
+      `http://approved.example:${wanted.port}/torrent`,
+      { allowHttp: true }
+    )
+
+    expect(new TextDecoder().decode(result.bytes)).toBe('approved')
+    expect(resolutions).toBe(1)
+  })
+
   it('rejects oversized declarations and non-200 response bodies', async () => {
     const oversized = await listen((_request, response) => {
       response.writeHead(200, { 'content-length': '10000001' })
