@@ -161,6 +161,29 @@ export class AppStateStore {
   }
 
   /**
+   * Records the user's download root. Main resolves the default once and the
+   * renderer never supplies a path of its own.
+   */
+  setDownloadRoot(root: string): AppState {
+    if (
+      typeof root !== 'string' ||
+      !path.isAbsolute(root) ||
+      root.includes('\0') ||
+      path.normalize(root) !== root
+    ) {
+      throw new Error('Download root must be an absolute, normalized path')
+    }
+    if (this.#state.preferences.downloadRoot === root) return this.snapshot()
+
+    this.#persist({
+      ...this.#state,
+      preferences: { ...this.#state.preferences, downloadRoot: root },
+      revision: this.#state.revision + 1
+    })
+    return this.snapshot()
+  }
+
+  /**
    * Records a torrent in the durable library. Selection, resume state, and
    * torrent bytes stay in fork-owned files so this document stays bounded.
    */

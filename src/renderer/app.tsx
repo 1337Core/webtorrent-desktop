@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { BootstrapSnapshot, EngineStatus } from '../shared/contracts'
+import { AddTorrent } from './components/add-torrent'
 import { TorrentList } from './components/torrent-list'
 
 function engineLabel(status: EngineStatus): string {
@@ -35,6 +36,7 @@ export function App(): React.JSX.Element {
       : null
   )
   const [restartPending, setRestartPending] = useState(false)
+  const [listRevision, setListRevision] = useState(0)
 
   useEffect(() => {
     let active = true
@@ -126,7 +128,13 @@ export function App(): React.JSX.Element {
         </div>
       </section>
 
-      <TorrentList active={engineStatus.state === 'ready'} />
+      <AddTorrent
+        downloadRoot={bootstrap?.state.preferences.downloadRoot ?? null}
+        onAdded={() => setListRevision(revision => revision + 1)}
+        ready={engineStatus.state === 'ready'}
+      />
+
+      <TorrentList active={engineStatus.state === 'ready'} key={listRevision} />
 
       {startupError ? (
         <p className="error" role="alert">

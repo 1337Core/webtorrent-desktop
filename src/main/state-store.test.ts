@@ -157,6 +157,21 @@ function torrentRecord(
 }
 
 describe('AppStateStore', () => {
+  it('records only an absolute normalized download root', async () => {
+    const store = new AppStateStore(await createUserData(), diagnostics())
+
+    expect(store.snapshot().preferences.downloadRoot).toBeNull()
+    const updated = store.setDownloadRoot('/Users/owner/Downloads')
+    expect(updated.preferences.downloadRoot).toBe('/Users/owner/Downloads')
+    expect(updated.revision).toBe(1)
+
+    // Writing the same root again is not a revision.
+    expect(store.setDownloadRoot('/Users/owner/Downloads').revision).toBe(1)
+    for (const invalid of ['relative/path', '/Users/owner/./Downloads', '']) {
+      expect(() => store.setDownloadRoot(invalid)).toThrow()
+    }
+  })
+
   it('keeps a durable torrent library ordered by info hash', async () => {
     const store = new AppStateStore(await createUserData(), diagnostics())
     const first = 'f'.repeat(40)

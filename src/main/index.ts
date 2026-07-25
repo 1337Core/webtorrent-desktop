@@ -714,6 +714,9 @@ async function initializeApplication(): Promise<void> {
   })
 
   stateStore = new AppStateStore(app.getPath('userData'), diagnostics)
+  if (stateStore.snapshot().preferences.downloadRoot === null) {
+    stateStore.setDownloadRoot(app.getPath('downloads'))
+  }
   uiSession = createUiSession(diagnostics)
   unregisterApplicationProtocol = registerApplicationProtocol(
     uiSession,

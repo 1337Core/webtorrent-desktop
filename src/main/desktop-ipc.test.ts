@@ -101,7 +101,7 @@ function createHarness(options: { stateRevision?: number } = {}): {
       schemaVersion: 1,
       revision: options.stateRevision ?? 4,
       library: { torrents: [] },
-      preferences: {},
+      preferences: { downloadRoot: null },
       window: { main: { normalBounds: null } }
     })
   } as unknown as AppStateStore

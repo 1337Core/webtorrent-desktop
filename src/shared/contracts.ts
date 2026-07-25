@@ -33,7 +33,10 @@ const windowBoundsSchema = z.strictObject({
   height: z.number().int().min(560).max(16_384)
 })
 
-const preferencesSchema = z.strictObject({})
+const preferencesSchema = z.strictObject({
+  /** The user's chosen download root; absent until main resolves one. */
+  downloadRoot: z.string().min(1).max(4_096).nullable().default(null)
+})
 
 /**
  * One durable library row. Large per-torrent data (selection, resume
@@ -80,7 +83,7 @@ export const DEFAULT_APP_STATE: AppState = {
   schemaVersion: 1,
   revision: 0,
   library: { torrents: [] },
-  preferences: {},
+  preferences: { downloadRoot: null },
   window: {
     main: {
       normalBounds: null

@@ -124,7 +124,7 @@ function bootstrapSuccess(requestId: string, sequence = 0): BootstrapResult {
       state: {
         schemaVersion: 1,
         revision: 0,
-        preferences: {}
+        preferences: { downloadRoot: null }
       },
       runtime: {
         appName: 'WebTorrent Updated',
