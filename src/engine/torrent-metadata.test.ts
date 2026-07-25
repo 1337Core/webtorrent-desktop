@@ -248,9 +248,25 @@ describe('validateTorrentMetadata', () => {
       validateTorrentMetadata(
         singleFileTorrent({
           topLevel: {
-            'announce-list': Array.from({ length: 65 }, (_, index) => [
+            'announce-list': Array.from({ length: 9 }, (_, index) => [
               `udp://tracker-${index}.example:6969/announce`
             ])
+          }
+        }),
+        policy
+      )
+    ).rejects.toMatchObject({ code: 'LIMIT_EXCEEDED' })
+
+    await expect(
+      validateTorrentMetadata(
+        singleFileTorrent({
+          topLevel: {
+            'announce-list': [
+              Array.from(
+                { length: 5 },
+                (_, index) => `udp://tracker.example:696${index}/announce`
+              )
+            ]
           }
         }),
         policy

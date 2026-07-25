@@ -17,7 +17,9 @@ const TORRENT_METADATA_LIMITS = Object.freeze({
   selectionIndexes: 100_000,
   selectionTerms: 1_024,
   segmentBytes: 255,
-  trackerCount: 64,
+  trackerCount: 32,
+  trackerTiers: 8,
+  trackersPerTier: 4,
   urlBytes: 2_048,
   webSeedCount: 32
 })
@@ -315,7 +317,7 @@ function rawTrackerTiers(root: Dictionary): string[][] {
     if (!Array.isArray(announceList)) {
       throw new TorrentInputError('INVALID_METADATA')
     }
-    if (announceList.length > TORRENT_METADATA_LIMITS.trackerCount) {
+    if (announceList.length > TORRENT_METADATA_LIMITS.trackerTiers) {
       throw new TorrentInputError('LIMIT_EXCEEDED')
     }
     if (announceList.length === 0) {
@@ -327,6 +329,9 @@ function rawTrackerTiers(root: Dictionary): string[][] {
     for (const rawTier of announceList) {
       if (!Array.isArray(rawTier) || rawTier.length === 0) {
         throw new TorrentInputError('INVALID_METADATA')
+      }
+      if (rawTier.length > TORRENT_METADATA_LIMITS.trackersPerTier) {
+        throw new TorrentInputError('LIMIT_EXCEEDED')
       }
       trackerCount += rawTier.length
       if (trackerCount > TORRENT_METADATA_LIMITS.trackerCount) {
