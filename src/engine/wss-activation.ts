@@ -8,6 +8,8 @@ import {
 export const WSS_ACTIVATION_LIMITS = Object.freeze({
   /** Successful tiers kept live for one torrent; the rest stay dormant. */
   maxLiveEndpoints: 4,
+  /** An active tier holds one socket; its other URLs are its failovers. */
+  maxLivePerTier: 1,
   /** Endpoints considered for one torrent, live and dormant together. */
   maxEndpoints: 16,
   maxOffersPerAnnounce: WSS_TRACKER_LIMITS.maxOffersPerAnnounce
@@ -43,12 +45,15 @@ export type WssActivationSnapshot = Readonly<{
   live: ReadonlyArray<string>
 }>
 
+type Candidate = Readonly<{ tier: number; url: string }>
+
 type LiveEndpoint = {
   /** Set once a `started` announce reached the endpoint. */
   contacted: boolean
   endpoint: WssTrackerEndpoint
   /** Activation-scoped bit: the one `stopped` attempt is never repeated. */
   stoppedAttempted: boolean
+  tier: number
   timer: ReturnType<typeof setTimeout> | null
   url: string
 }
@@ -60,18 +65,18 @@ type LiveEndpoint = {
  */
 function scheduleOrder(
   tiers: ReadonlyArray<ReadonlyArray<string>>
-): ReadonlyArray<string> {
-  const ordered: string[] = []
+): ReadonlyArray<Candidate> {
+  const ordered: Candidate[] = []
   const seen = new Set<string>()
   const depth = Math.max(0, ...tiers.map(tier => tier.length))
 
   for (let position = 0; position < depth; position += 1) {
-    for (const tier of tiers) {
-      const url = tier[position]
+    for (const [tier, urls] of tiers.entries()) {
+      const url = urls[position]
       if (url === undefined || seen.has(url)) continue
       if (!url.startsWith('wss://')) continue
       seen.add(url)
-      ordered.push(url)
+      ordered.push({ tier, url })
       if (ordered.length >= WSS_ACTIVATION_LIMITS.maxEndpoints) return ordered
     }
   }
@@ -81,16 +86,18 @@ function scheduleOrder(
 /**
  * One torrent's WSS tracker activation.
  *
- * At most four endpoints stay live; the rest remain dormant failovers that are
- * promoted only when a live one fails. Nothing reconnects on its own: a closed
- * endpoint stays closed until the activation is started again.
+ * At most four endpoints stay live and an active tier holds only one of them;
+ * the rest remain dormant failovers that are promoted only when a live one
+ * fails. Nothing reconnects on its own: a closed endpoint stays closed until
+ * the activation is started again, and no URL is opened twice.
  */
 export class WssActivation {
   readonly #options: WssActivationOptions
-  readonly #candidates: ReadonlyArray<string>
+  readonly #candidates: ReadonlyArray<Candidate>
   readonly #live = new Map<string, LiveEndpoint>()
   readonly #closing = new Set<Promise<void>>()
-  #nextCandidate = 0
+  /** Every URL the activation has already opened once. Nothing is retried. */
+  readonly #attempted = new Set<string>()
   #started = false
 
   constructor(options: WssActivationOptions) {
@@ -103,10 +110,11 @@ export class WssActivation {
   }
 
   snapshot(): WssActivationSnapshot {
-    const live = [...this.#live.keys()]
     return {
-      dormant: this.#candidates.filter(url => !this.#live.has(url)),
-      live
+      dormant: this.#candidates
+        .filter(candidate => !this.#live.has(candidate.url))
+        .map(candidate => candidate.url),
+      live: [...this.#live.keys()]
     }
   }
 
@@ -137,19 +145,40 @@ export class WssActivation {
 
   /** Opens dormant endpoints until the live budget is met or none remain. */
   async #fill(): Promise<void> {
-    while (
-      this.#started &&
-      this.#live.size < WSS_ACTIVATION_LIMITS.maxLiveEndpoints &&
-      this.#nextCandidate < this.#candidates.length
-    ) {
-      const url = this.#candidates[this.#nextCandidate]
-      this.#nextCandidate += 1
-      if (url === undefined) break
-      await this.#open(url)
+    for (;;) {
+      const candidate = this.#nextCandidate()
+      if (!candidate) return
+      this.#attempted.add(candidate.url)
+      await this.#open(candidate)
     }
   }
 
-  async #open(url: string): Promise<void> {
+  /**
+   * The next untried endpoint whose tier holds no live socket. A tier's other
+   * URLs are its failovers, so an active tier is never opened twice.
+   */
+  #nextCandidate(): Candidate | null {
+    if (
+      !this.#started ||
+      this.#live.size >= WSS_ACTIVATION_LIMITS.maxLiveEndpoints
+    ) {
+      return null
+    }
+    const perTier = new Map<number, number>()
+    for (const entry of this.#live.values()) {
+      perTier.set(entry.tier, (perTier.get(entry.tier) ?? 0) + 1)
+    }
+    return (
+      this.#candidates.find(
+        candidate =>
+          !this.#attempted.has(candidate.url) &&
+          (perTier.get(candidate.tier) ?? 0) <
+            WSS_ACTIVATION_LIMITS.maxLivePerTier
+      ) ?? null
+    )
+  }
+
+  async #open({ tier, url }: Candidate): Promise<void> {
     let socket: WssSocket
     try {
       socket = await this.#options.connectSocket({
@@ -176,6 +205,7 @@ export class WssActivation {
       contacted: false,
       endpoint,
       stoppedAttempted: false,
+      tier,
       timer: null,
       url
     }

@@ -123,6 +123,12 @@ describe('WssActivation', () => {
 
   it('tries one endpoint from every tier before any tier’s second', async () => {
     const context = harness({
+      refuse: new Set([
+        'wss://a1.example',
+        'wss://a2.example',
+        'wss://b1.example',
+        'wss://b2.example'
+      ]),
       tiers: [
         ['wss://a1.example', 'wss://a2.example'],
         ['wss://b1.example', 'wss://b2.example']
@@ -141,14 +147,28 @@ describe('WssActivation', () => {
     ])
   })
 
-  it('keeps at most four endpoints live and the rest dormant', async () => {
+  it('keeps one live socket per tier and the tier’s rest dormant', async () => {
     const context = harness({
       tiers: [
-        Array.from(
-          { length: 6 },
-          (_value, index) => `wss://tracker-${index}.example`
-        )
+        ['wss://a1.example', 'wss://a2.example'],
+        ['wss://b1.example', 'wss://b2.example']
       ]
+    })
+
+    const started = context.activation.start()
+    await settle()
+    await started
+
+    const snapshot = context.activation.snapshot()
+    expect(snapshot.live).toEqual(['wss://a1.example', 'wss://b1.example'])
+    expect(snapshot.dormant).toEqual(['wss://a2.example', 'wss://b2.example'])
+  })
+
+  it('keeps at most four endpoints live and the rest dormant', async () => {
+    const context = harness({
+      tiers: Array.from({ length: 6 }, (_value, index) => [
+        `wss://tracker-${index}.example`
+      ])
     })
 
     const started = context.activation.start()
@@ -252,7 +272,7 @@ describe('WssActivation', () => {
     )
     const context = harness({
       acceptLimits: new Map([[urls[0] as string, 1]]),
-      tiers: [urls]
+      tiers: urls.map(url => [url])
     })
 
     const started = context.activation.start()
