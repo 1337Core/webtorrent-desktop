@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import createTorrent from 'create-torrent'
 import WebTorrent from 'webtorrent'
 import { createClientOptions } from './client-config'
+import { MediaProxy } from './media-proxy'
 import { EgressPolicy } from './network-policy'
 import { TorrentManager } from './torrent-manager'
 import { validateTorrentMetadata } from './torrent-metadata'
@@ -354,6 +355,61 @@ describe('engine transfer', () => {
       ).rejects.toMatchObject({ code: 'NOT_FOUND' })
 
       await downloader.manager.closeAll()
+    },
+    TRANSFER_TIMEOUT_MS
+  )
+
+  it(
+    'streams the transferred payload through the loopback proxy',
+    async () => {
+      const fixture = await seedLocally()
+      const metadata = await validateTorrentMetadata(
+        fixture.torrentBytes,
+        new EgressPolicy()
+      )
+      const downloader = await downloaderFor(fixture, metadata, [0])
+      expect(downloader.session().admitPeer(fixture.allowedPeer)).toBe(true)
+      await waitFor(
+        () => downloader.manager.summary(metadata.infoHash).progress >= 1,
+        'The transfer never completed'
+      )
+
+      const proxy = new MediaProxy()
+      const port = await proxy.start()
+      const file = downloader.manager.mediaFile(metadata.infoHash, 0)
+      if (!file) throw new Error('The media file was unavailable')
+      const lease = proxy.open({
+        fileIndex: 0,
+        infoHash: metadata.infoHash,
+        source: {
+          contentType: 'application/octet-stream',
+          createReadStream: range => file.createReadStream(range),
+          length: file.length
+        }
+      })
+
+      try {
+        expect(lease.url.startsWith(`http://127.0.0.1:${port}/`)).toBe(true)
+
+        const ranged = await fetch(lease.url, {
+          headers: { range: 'bytes=1024-2047' }
+        })
+        expect(ranged.status).toBe(206)
+        const chunk = new Uint8Array(await ranged.arrayBuffer())
+        expect(chunk.byteLength).toBe(1_024)
+        expect(
+          Buffer.from(chunk).equals(
+            Buffer.from((fixture.payloads[0] as Uint8Array).slice(1_024, 2_048))
+          )
+        ).toBe(true)
+
+        // The lease token is the only route: the index is not served.
+        const index = await fetch(`http://127.0.0.1:${port}/`)
+        expect(index.status).toBe(404)
+      } finally {
+        await proxy.shutdown()
+        await downloader.manager.closeAll()
+      }
     },
     TRANSFER_TIMEOUT_MS
   )
