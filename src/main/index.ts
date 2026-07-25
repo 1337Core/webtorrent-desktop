@@ -67,6 +67,11 @@ const DEFAULT_WINDOW_BOUNDS = {
 const MINIMUM_VISIBLE_WINDOW_EDGE = 80
 const WINDOW_BOUNDS_SAVE_DELAY_MS = 500
 const SMOKE_TIMEOUT_MS = 40_000
+const RESTART_SOAK_COUNT = 25
+const RESTART_SOAK_SHUTDOWN_LIMIT_MS = 5_000
+const RESTART_SOAK_PERCENTILE_LIMIT_MS = 2_000
+const RESTART_SOAK_READY_TIMEOUT_MS = 30_000
+const RESTART_SOAK_TIMEOUT_MS = 300_000
 const SMOKE_COMPLETION_DELAY_MS = 100
 const SMOKE_RUN_ID_ENVIRONMENT_KEY = 'WEBTORRENT_UPDATED_SMOKE_RUN_ID'
 const suppliedSmokeRunId = process.env[SMOKE_RUN_ID_ENVIRONMENT_KEY]
@@ -92,7 +97,14 @@ const smokeScenario = process.argv.includes('--m2-smoke-crash-loop')
       ? 'baseline'
       : null
 const isMilestoneSmoke = smokeScenario !== null
-const smokeDataRoot = isMilestoneSmoke ? mkdtempSync(SMOKE_DATA_PREFIX) : null
+/**
+ * The section 18.5 supervised-restart soak. It shares the smoke build's
+ * isolated data root but not its trust-evidence machinery: the workload is the
+ * supervisor itself, repeated far past the single restart the smoke proves.
+ */
+const isRestartSoak = process.argv.includes('--soak-restarts')
+const smokeDataRoot =
+  isMilestoneSmoke || isRestartSoak ? mkdtempSync(SMOKE_DATA_PREFIX) : null
 const rendererSmokeEvidenceSchema = z.strictObject({
   bootstrapCommitted: z.literal(true),
   bufferPresent: z.literal(false),
@@ -264,6 +276,7 @@ let smokeCompletionTimer: NodeJS.Timeout | null = null
 let smokeInterventionTimer: NodeJS.Timeout | null = null
 let smokeForcedCrashes = 0
 let smokeFinalizationStarted = false
+let restartSoakStarted = false
 let lastReadyEngineStatus: Extract<EngineStatus, { state: 'ready' }> | null =
   null
 let rendererBootstrapped = false
@@ -426,6 +439,7 @@ function publishEngineStatus(status: EngineStatus): void {
     )
   }
   scheduleSmokeCompletion()
+  scheduleRestartSoak()
 }
 
 async function collectSmokeTrustEvidence(): Promise<SmokeTrustEvidence> {
@@ -644,6 +658,116 @@ function scheduleSmokeIntervention(): void {
     }
     smokeForcedCrashes += 1
   }, SMOKE_COMPLETION_DELAY_MS)
+}
+
+/**
+ * One engine while the supervisor is running, none once it has stopped. The
+ * supervisor's own process id is the authority; liveness is read from the
+ * operating system rather than from the status the supervisor reports.
+ */
+function liveEngineProcessCount(): number {
+  const processId = engineSupervisor?.processId() ?? null
+  if (processId === null) return 0
+  try {
+    process.kill(processId, 0)
+    return 1
+  } catch {
+    return 0
+  }
+}
+
+async function waitForEngineReady(deadlineMs: number): Promise<void> {
+  const deadline = Date.now() + deadlineMs
+  while (latestEngineStatusEvent.status.state !== 'ready') {
+    if (Date.now() > deadline) {
+      throw new Error('The engine never returned to ready after a restart')
+    }
+    await new Promise(resolve => setTimeout(resolve, 25))
+  }
+}
+
+/**
+ * Section 18.5's twenty-five supervised restarts. Each cycle stops the engine
+ * the way application shutdown does, proves the process is gone, starts a
+ * fresh generation, and records how long the graceful stop took.
+ */
+async function runRestartSoak(): Promise<void> {
+  const supervisor = engineSupervisor
+  if (!supervisor) throw new Error('The supervisor was never created')
+
+  const shutdownDurationsMs: number[] = []
+  for (let restart = 1; restart <= RESTART_SOAK_COUNT; restart += 1) {
+    if (liveEngineProcessCount() !== 1) {
+      throw new Error(`Restart ${restart} did not begin with one live engine`)
+    }
+
+    const startedAt = Date.now()
+    const result = await supervisor.stop()
+    const durationMs = Date.now() - startedAt
+    shutdownDurationsMs.push(durationMs)
+
+    if (result.outcome !== 'exited' || result.forced) {
+      throw new Error(`Restart ${restart} did not shut down gracefully`)
+    }
+    if (liveEngineProcessCount() !== 0) {
+      throw new Error(`Restart ${restart} left an engine process behind`)
+    }
+    if (durationMs > RESTART_SOAK_SHUTDOWN_LIMIT_MS) {
+      throw new Error(`Restart ${restart} exceeded the shutdown deadline`)
+    }
+
+    if (!supervisor.restart()) {
+      throw new Error(`Restart ${restart} was refused by the supervisor`)
+    }
+    await waitForEngineReady(RESTART_SOAK_READY_TIMEOUT_MS)
+  }
+
+  const ordered = [...shutdownDurationsMs].sort((left, right) => left - right)
+  const percentile95 =
+    ordered[
+      Math.min(Math.ceil(0.95 * ordered.length) - 1, ordered.length - 1)
+    ] ?? 0
+  if (percentile95 > RESTART_SOAK_PERCENTILE_LIMIT_MS) {
+    throw new Error('The 95th percentile shutdown exceeded two seconds')
+  }
+
+  if (smokeTimeout) clearTimeout(smokeTimeout)
+  smokeTimeout = null
+  console.log(
+    JSON.stringify({
+      engineProcessesAfterEachStop: 0,
+      maximumShutdownMs: ordered.at(-1) ?? 0,
+      percentile95ShutdownMs: percentile95,
+      restarts: RESTART_SOAK_COUNT,
+      result: 'pass',
+      scenario: 'restart-soak'
+    })
+  )
+  requestQuit(0)
+}
+
+function scheduleRestartSoak(): void {
+  if (
+    !isRestartSoak ||
+    restartSoakStarted ||
+    latestEngineStatusEvent.status.state !== 'ready'
+  ) {
+    return
+  }
+  restartSoakStarted = true
+  void runRestartSoak().catch(error => {
+    console.error(
+      JSON.stringify({
+        error:
+          error instanceof Error
+            ? error.message.slice(0, 256)
+            : 'unknown restart-soak failure',
+        result: 'fail',
+        scenario: 'restart-soak'
+      })
+    )
+    requestQuit(1)
+  })
 }
 
 function isRendererOsSandboxed(): boolean {
@@ -935,7 +1059,7 @@ function createMainWindow(runtime: RuntimeInfo): BrowserWindow {
     preloadTrustProof = null
   })
   window.once('ready-to-show', () => {
-    if (!isMilestoneSmoke && !shutdownStarted) window.show()
+    if (!isMilestoneSmoke && !isRestartSoak && !shutdownStarted) window.show()
   })
 
   void window.loadURL(TRUSTED_RENDERER_URL).catch(() => {
@@ -1025,17 +1149,20 @@ async function initializeApplication(): Promise<void> {
   createMainWindow(runtime)
   engineSupervisor.start()
 
-  if (isMilestoneSmoke) {
-    smokeTimeout = setTimeout(() => {
-      console.error(
-        JSON.stringify({
-          engine: latestEngineStatusEvent.status,
-          rendererBootstrapped,
-          result: 'timeout'
-        })
-      )
-      requestQuit(1)
-    }, SMOKE_TIMEOUT_MS)
+  if (isMilestoneSmoke || isRestartSoak) {
+    smokeTimeout = setTimeout(
+      () => {
+        console.error(
+          JSON.stringify({
+            engine: latestEngineStatusEvent.status,
+            rendererBootstrapped,
+            result: 'timeout'
+          })
+        )
+        requestQuit(1)
+      },
+      isRestartSoak ? RESTART_SOAK_TIMEOUT_MS : SMOKE_TIMEOUT_MS
+    )
   }
 
   diagnostics.info('app.ready')
