@@ -257,6 +257,7 @@ export function App(): React.JSX.Element {
         .filter(name => name !== '')
         .join(' ')}
       data-bootstrap-ready={bootstrap !== null}
+      data-engine-state={engineStatus.state}
       data-renderer-boundary={rendererBoundaryFailed ? 'failed' : 'passed'}
       onDragOver={event => {
         event.preventDefault()

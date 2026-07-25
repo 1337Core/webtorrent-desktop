@@ -22,9 +22,10 @@ export const config: WebdriverIO.Config = {
   capabilities: [
     {
       browserName: 'electron',
-      // Electron 43 embeds Chromium 142; the driver must match it rather than
-      // the newest published Chrome.
-      browserVersion: '142.0.7444.175',
+      // The driver must match the Chromium the packaged app actually reports,
+      // not the newest published Chrome: `Chrome/150.0.7871.129` in this
+      // Electron 43.2.0 build.
+      browserVersion: '150.0.7871.129',
       'wdio:electronServiceOptions': {
         appBinaryPath: PACKAGED_APP,
         appArgs: ['--e2e']

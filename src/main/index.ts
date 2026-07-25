@@ -203,7 +203,17 @@ async function isUntrustedNavigationDenied(
 
 app.setName(APP_NAME)
 if (smokeDataRoot) app.setPath('appData', smokeDataRoot)
-const userDataPath = path.join(app.getPath('appData'), APP_NAME)
+/**
+ * Desktop automation supplies its own throwaway profile and then waits for the
+ * DevTools port file inside it. Only the automation build honors it, so the
+ * release app always owns its own application-data directory and an E2E run
+ * never touches the owner's real profile.
+ */
+const automationUserDataPath = __WEBTORRENT_UPDATED_E2E_BUILD__
+  ? app.commandLine.getSwitchValue('user-data-dir') || null
+  : null
+const userDataPath =
+  automationUserDataPath ?? path.join(app.getPath('appData'), APP_NAME)
 mkdirSync(userDataPath, { mode: 0o700, recursive: true })
 chmodSync(userDataPath, 0o700)
 const logsPath = path.join(userDataPath, 'logs')

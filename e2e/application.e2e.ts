@@ -6,24 +6,51 @@ import { browser, expect } from '@wdio/globals'
  * installs, not a development checkout.
  */
 describe('WebTorrent Updated', () => {
+  /**
+   * The runtime is read through the app's own validated bridge rather than a
+   * privileged automation channel: the packaged app exposes no CDP bridge, and
+   * granting one to prove these facts would measure a different application.
+   */
   it('runs an arm64 Electron 43 main process', async () => {
-    const versions = await browser.electron.execute(electron => ({
-      arch: process.arch,
-      electron: process.versions.electron,
-      name: electron.app.getName(),
-      node: process.versions.node,
-      packaged: electron.app.isPackaged
-    }))
+    const bootstrap = (await browser.execute(async () => {
+      const desktop = (
+        globalThis as unknown as {
+          desktop: { getBootstrap: () => Promise<unknown> }
+        }
+      ).desktop
+      return desktop.getBootstrap()
+    })) as unknown as {
+      ok?: boolean
+      value?: {
+        runtime?: {
+          appName?: string
+          architecture?: string
+          electronVersion?: string
+          nodeVersion?: string
+          platform?: string
+        }
+      }
+    }
 
-    expect(versions.arch).toBe('arm64')
-    expect(versions.electron).toBe('43.2.0')
-    expect(versions.node).toBe('24.18.0')
-    expect(versions.name).toBe('WebTorrent Updated')
-    expect(versions.packaged).toBe(true)
+    expect(bootstrap.ok).toBe(true)
+    expect(bootstrap.value?.runtime?.architecture).toBe('arm64')
+    expect(bootstrap.value?.runtime?.electronVersion).toBe('43.2.0')
+    expect(bootstrap.value?.runtime?.nodeVersion).toBe('24.18.0')
+    expect(bootstrap.value?.runtime?.appName).toBe('WebTorrent Updated')
+    expect(bootstrap.value?.runtime?.platform).toBe('darwin')
+  })
+
+  it('serves the shell from its own locked application protocol', async () => {
+    const pageUrl = await browser.execute(
+      () =>
+        (globalThis as unknown as { location: { href: string } }).location.href
+    )
+
+    expect(pageUrl).toBe('app://bundle/index.html')
   })
 
   it('renders the sandboxed application shell', async () => {
-    await expect(browser.$('header .title')).toHaveText('WebTorrent Updated')
+    await expect(browser.$('.header .title')).toHaveText('WebTorrent Updated')
     await expect(browser.$('[data-renderer-boundary]')).toHaveAttribute(
       'data-renderer-boundary',
       'passed'
@@ -55,6 +82,8 @@ describe('WebTorrent Updated', () => {
       'onMenuAction',
       'onOpenIntent',
       'openExternalPlayer',
+      'openTorrentMenu',
+      'resolveDroppedTorrents',
       'restartEngine',
       'runTorrentCommand',
       'setPreferences'
@@ -63,15 +92,34 @@ describe('WebTorrent Updated', () => {
 
   it('reaches a ready engine with native WebRTC', async () => {
     await browser.waitUntil(
-      async () => {
-        const label = await browser.$('[role="status"]').getText()
-        return label.includes('native WebRTC ready')
-      },
+      async () =>
+        (await browser
+          .$('[data-engine-state]')
+          .getAttribute('data-engine-state')) === 'ready',
       {
         timeout: 60_000,
         timeoutMsg: 'The engine did not become ready'
       }
     )
+
+    const runtime = (await browser.execute(async () => {
+      const desktop = (
+        globalThis as unknown as {
+          desktop: { getBootstrap: () => Promise<unknown> }
+        }
+      ).desktop
+      return desktop.getBootstrap()
+    })) as unknown as {
+      value?: {
+        engineStatusEvent?: {
+          status?: { utpEnabled?: boolean; webRtcSupported?: boolean }
+        }
+      }
+    }
+    const status = runtime.value?.engineStatusEvent?.status
+
+    expect(status?.webRtcSupported).toBe(true)
+    expect(status?.utpEnabled).toBe(false)
 
     const torrents = await browser.execute(async () => {
       const desktop = (
