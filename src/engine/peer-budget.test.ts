@@ -169,6 +169,25 @@ describe('PeerBudget', () => {
     expect(admitted).toBe(PEER_BUDGET_LIMITS.maxPexRecords)
   })
 
+  it('leaves no ghost record after ten thousand admit and drop cycles', () => {
+    const { budget: target } = budget()
+
+    for (let cycle = 0; cycle < 10_000; cycle += 1) {
+      const key = `torrent-${cycle % 8}`
+      const peer = `203.0.113.${cycle % 250}:${6_000 + (cycle % 900)}`
+      target.admit({ key, peer })
+      target.forget(key, peer)
+    }
+
+    // Every admitted peer was dropped again, so nothing may remain held.
+    expect(target.recordCount).toBe(0)
+    for (let torrent = 0; torrent < 8; torrent += 1) {
+      expect(target.recordsFor(`torrent-${torrent}`)).toBe(0)
+    }
+    // Capacity is genuinely back, not merely reported as zero.
+    expect(target.admit({ key: 'fresh', peer: '198.51.100.4:6881' })).toBe(true)
+  })
+
   it('returns capacity when a torrent or a peer goes away', () => {
     const { budget: target } = budget()
     fill(target, 'a', 10)
