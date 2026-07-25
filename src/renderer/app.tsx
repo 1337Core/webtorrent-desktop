@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { BootstrapSnapshot, EngineStatus } from '../shared/contracts'
 import { AddTorrent } from './components/add-torrent'
+import { CreateTorrent } from './components/create-torrent'
 import { MediaPlayer } from './components/media-player'
 import { TorrentList } from './components/torrent-list'
 
@@ -137,6 +138,11 @@ export function App(): React.JSX.Element {
       <AddTorrent
         downloadRoot={bootstrap?.state.preferences.downloadRoot ?? null}
         onAdded={() => setListRevision(revision => revision + 1)}
+        ready={engineStatus.state === 'ready'}
+      />
+
+      <CreateTorrent
+        onCreated={() => setListRevision(revision => revision + 1)}
         ready={engineStatus.state === 'ready'}
       />
 

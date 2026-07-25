@@ -191,6 +191,7 @@ describe('preload desktop bridge', () => {
 
     expect(result).toMatchObject({ ok: true })
     expect(Object.keys(api).sort()).toEqual([
+      'choosePath',
       'getBootstrap',
       'onEngineStatus',
       'restartEngine',

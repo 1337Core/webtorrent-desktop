@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   DESKTOP_BOOTSTRAP_CHANNEL,
+  DESKTOP_CHOOSE_PATH_CHANNEL,
   DESKTOP_ENGINE_RESTART_CHANNEL,
   DESKTOP_TORRENT_COMMAND_CHANNEL,
   PROTOCOL_VERSION,
@@ -18,7 +19,10 @@ const generationId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
 
 type Handler = (event: unknown, value: unknown) => unknown
 
-function createHarness(options: { stateRevision?: number } = {}): {
+function createHarness(
+  options: { chosenPath?: string; stateRevision?: number } = {}
+): {
+  choosePath: ReturnType<typeof vi.fn>
   cleanup: () => void
   diagnostics: Diagnostics
   engineSupervisor: EngineSupervisor
@@ -107,7 +111,9 @@ function createHarness(options: { stateRevision?: number } = {}): {
     })
   } as unknown as AppStateStore
   const onBootstrap = vi.fn()
+  const choosePath = vi.fn(async () => options.chosenPath ?? null)
   const cleanup = registerDesktopIpc({
+    choosePath,
     diagnostics,
     engineSupervisor,
     getEngineStatusEvent: () => statusEvent,
@@ -118,6 +124,7 @@ function createHarness(options: { stateRevision?: number } = {}): {
   })
 
   return {
+    choosePath,
     cleanup,
     diagnostics,
     engineSupervisor,
@@ -314,6 +321,44 @@ describe('registerDesktopIpc', () => {
       error: { code: 'INVALID_REQUEST', retryable: false }
     })
     expect(engineSupervisor.execute).not.toHaveBeenCalled()
+  })
+
+  it('returns only the path the user chose', async () => {
+    const { choosePath, event, handlers } = createHarness({
+      chosenPath: '/Users/owner/Movies'
+    })
+    const handler = handlers.get(DESKTOP_CHOOSE_PATH_CHANNEL)
+
+    const chosen = await handler?.(event, {
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: '11111111-1111-4111-8111-111111111111',
+      command: 'choosePath',
+      payload: { kind: 'directory' }
+    })
+
+    expect(chosen).toMatchObject({
+      ok: true,
+      value: { path: '/Users/owner/Movies' }
+    })
+    expect(choosePath).toHaveBeenCalledWith('directory')
+  })
+
+  it('refuses a chooser request with an unknown kind', async () => {
+    const { choosePath, event, handlers } = createHarness()
+    const handler = handlers.get(DESKTOP_CHOOSE_PATH_CHANNEL)
+
+    const rejected = await handler?.(event, {
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: '22222222-2222-4222-8222-222222222222',
+      command: 'choosePath',
+      payload: { kind: 'everything' }
+    })
+
+    expect(rejected).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_REQUEST' }
+    })
+    expect(choosePath).not.toHaveBeenCalled()
   })
 
   it('removes both private frame handlers during cleanup', () => {

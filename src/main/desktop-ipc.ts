@@ -4,6 +4,9 @@ import {
   bootstrapRequestSchema,
   bootstrapResultSchema,
   DESKTOP_BOOTSTRAP_CHANNEL,
+  choosePathRequestSchema,
+  choosePathResultSchema,
+  DESKTOP_CHOOSE_PATH_CHANNEL,
   DESKTOP_ENGINE_RESTART_CHANNEL,
   DESKTOP_TORRENT_COMMAND_CHANNEL,
   PROTOCOL_VERSION,
@@ -36,6 +39,10 @@ const RESULT_BUDGET = {
 const MAX_RECENT_REQUESTS = 256
 
 type DesktopIpcOptions = {
+  /** Main owns the dialog; the renderer only receives the chosen path. */
+  choosePath?: (
+    kind: 'directory' | 'source' | 'torrent-file'
+  ) => Promise<string | null>
   diagnostics: Diagnostics
   engineSupervisor: EngineSupervisor
   getEngineStatusEvent: () => EngineStatusEvent
@@ -84,6 +91,7 @@ function errorResult(
 
 export function registerDesktopIpc(options: DesktopIpcOptions): () => void {
   const {
+    choosePath,
     diagnostics,
     engineSupervisor,
     getEngineStatusEvent,
@@ -279,8 +287,42 @@ export function registerDesktopIpc(options: DesktopIpcOptions): () => void {
     }
   )
 
+  frameIpc.handle(
+    DESKTOP_CHOOSE_PATH_CHANNEL,
+    async (event, value: unknown) => {
+      const rejected = authorize(event, value)
+      if (rejected) return choosePathResultSchema.parse(rejected)
+
+      const request = choosePathRequestSchema.safeParse(value)
+      if (!request.success) {
+        return choosePathResultSchema.parse(
+          errorResult(
+            candidateRequestId(value),
+            'INVALID_REQUEST',
+            'The application received an invalid path request.',
+            false
+          )
+        )
+      }
+
+      const duplicate = rememberRequest(request.data.requestId)
+      if (duplicate) return choosePathResultSchema.parse(duplicate)
+
+      const chosen = choosePath
+        ? await choosePath(request.data.payload.kind)
+        : null
+      return choosePathResultSchema.parse({
+        protocolVersion: PROTOCOL_VERSION,
+        requestId: request.data.requestId,
+        ok: true,
+        value: { path: chosen }
+      })
+    }
+  )
+
   return () => {
     frameIpc.removeHandler(DESKTOP_BOOTSTRAP_CHANNEL)
+    frameIpc.removeHandler(DESKTOP_CHOOSE_PATH_CHANNEL)
     frameIpc.removeHandler(DESKTOP_ENGINE_RESTART_CHANNEL)
     frameIpc.removeHandler(DESKTOP_TORRENT_COMMAND_CHANNEL)
   }

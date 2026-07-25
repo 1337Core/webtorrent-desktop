@@ -12,6 +12,7 @@ import path from 'node:path'
 import {
   app,
   BrowserWindow,
+  dialog,
   protocol,
   screen,
   type BrowserWindowConstructorOptions,
@@ -666,7 +667,33 @@ function createMainWindow(runtime: RuntimeInfo): BrowserWindow {
   assertWindowSecurity(window, uiSession)
 
   unregisterDesktopIpc?.()
+  /**
+   * The only filesystem chooser in the application. Main opens it modally on
+   * the owning window and returns exactly one user-selected path; the renderer
+   * never enumerates the filesystem.
+   */
+  const chooseUserPath = async (
+    owner: BrowserWindow,
+    kind: 'directory' | 'source' | 'torrent-file'
+  ): Promise<string | null> => {
+    const properties: Array<'openDirectory' | 'openFile'> =
+      kind === 'directory' ? ['openDirectory'] : ['openFile']
+    if (kind === 'source') properties.push('openDirectory')
+
+    const result = await dialog.showOpenDialog(owner, {
+      filters:
+        kind === 'torrent-file'
+          ? [{ extensions: ['torrent'], name: 'Torrent' }]
+          : [],
+      properties,
+      securityScopedBookmarks: false
+    })
+    if (result.canceled) return null
+    return result.filePaths[0] ?? null
+  }
+
   unregisterDesktopIpc = registerDesktopIpc({
+    choosePath: kind => chooseUserPath(window, kind),
     diagnostics,
     engineSupervisor,
     getEngineStatusEvent: () => structuredClone(latestEngineStatusEvent),

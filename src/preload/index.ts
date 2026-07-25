@@ -2,6 +2,8 @@ import { contextBridge, ipcRenderer } from 'electron'
 import {
   bootstrapResultSchema,
   DESKTOP_BOOTSTRAP_CHANNEL,
+  choosePathResultSchema,
+  DESKTOP_CHOOSE_PATH_CHANNEL,
   DESKTOP_ENGINE_RESTART_CHANNEL,
   DESKTOP_TORRENT_COMMAND_CHANNEL,
   ENGINE_STATUS_CHANNEL,
@@ -11,6 +13,7 @@ import {
   restartEngineResultSchema,
   torrentCommandResultSchema,
   type BootstrapResult,
+  type ChoosePathResult,
   type EngineCommand,
   type TorrentCommandResult,
   type EngineStatusEvent,
@@ -242,9 +245,38 @@ async function runTorrentCommand(
   }
 }
 
+/** Opens a main-owned chooser and returns only the path the user picked. */
+async function choosePath(
+  kind: 'directory' | 'source' | 'torrent-file'
+): Promise<ChoosePathResult> {
+  const requestId = crypto.randomUUID()
+  try {
+    const value = await invokeBounded(DESKTOP_CHOOSE_PATH_CHANNEL, {
+      protocolVersion: PROTOCOL_VERSION,
+      requestId,
+      command: 'choosePath',
+      payload: { kind }
+    })
+    const result = choosePathResultSchema.safeParse(value)
+    if (!result.success || result.data.requestId !== requestId) {
+      return protocolError(
+        requestId,
+        'The application returned an invalid path response.'
+      ) as ChoosePathResult
+    }
+    return result.data
+  } catch {
+    return protocolError(
+      requestId,
+      'The chooser could not be opened.'
+    ) as ChoosePathResult
+  }
+}
+
 contextBridge.exposeInMainWorld(
   'desktop',
   Object.freeze({
+    choosePath,
     getBootstrap,
     restartEngine,
     runTorrentCommand,
