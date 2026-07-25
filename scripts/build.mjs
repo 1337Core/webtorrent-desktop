@@ -44,7 +44,7 @@ async function buildNodeEntry({
 
 await buildNodeEntry({
   entry: 'src/main/index.ts',
-  external: ['electron-store'],
+  external: ['chokidar', 'electron-store'],
   fileName: 'index.mjs',
   format: 'es',
   outDir: 'main'
