@@ -5,18 +5,21 @@ import {
   choosePathResultSchema,
   DESKTOP_CHOOSE_PATH_CHANNEL,
   DESKTOP_ENGINE_RESTART_CHANNEL,
+  DESKTOP_MENU_ACTION_CHANNEL,
   DESKTOP_PREFERENCES_CHANNEL,
   DESKTOP_TORRENT_COMMAND_CHANNEL,
   ENGINE_STATUS_CHANNEL,
   engineStatusEventSchema,
   preloadTrustProofSchema,
   PROTOCOL_VERSION,
+  menuActionEventSchema,
   restartEngineResultSchema,
   setPreferencesResultSchema,
   torrentCommandResultSchema,
   type BootstrapResult,
   type ChoosePathResult,
   type EngineCommand,
+  type MenuActionEvent,
   type SetPreferencesResult,
   type TorrentCommandResult,
   type EngineStatusEvent,
@@ -304,6 +307,21 @@ async function setDownloadRoot(
   }
 }
 
+/** Menu actions are pushed by main; the renderer only surfaces a section. */
+function onMenuAction(
+  listener: (action: MenuActionEvent['action']) => void
+): () => void {
+  const handler = (_event: unknown, value: unknown): void => {
+    const parsed = menuActionEventSchema.safeParse(value)
+    if (!parsed.success) return
+    listener(parsed.data.action)
+  }
+  ipcRenderer.on(DESKTOP_MENU_ACTION_CHANNEL, handler)
+  return () => {
+    ipcRenderer.removeListener(DESKTOP_MENU_ACTION_CHANNEL, handler)
+  }
+}
+
 contextBridge.exposeInMainWorld(
   'desktop',
   Object.freeze({
@@ -312,6 +330,7 @@ contextBridge.exposeInMainWorld(
     restartEngine,
     runTorrentCommand,
     setDownloadRoot,
-    onEngineStatus
+    onEngineStatus,
+    onMenuAction
   })
 )

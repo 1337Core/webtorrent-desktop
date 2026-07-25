@@ -41,11 +41,26 @@ export function App(): React.JSX.Element {
   const [restartPending, setRestartPending] = useState(false)
   const [listRevision, setListRevision] = useState(0)
   const [downloadRoot, setDownloadRoot] = useState<string | null>(null)
+  const [focused, setFocused] = useState<
+    'add-torrent' | 'create-torrent' | 'preferences' | null
+  >(null)
   const [playing, setPlaying] = useState<{
     fileIndex: number
     fileName: string
     infoHash: string
   } | null>(null)
+
+  // A menu action only asks the renderer to surface a section; it never
+  // performs the action itself.
+  useEffect(() => {
+    if (rendererBoundaryFailed) return undefined
+    return window.desktop.onMenuAction(action => {
+      setFocused(action)
+      document.getElementById(`${action}-heading`)?.scrollIntoView({
+        behavior: 'smooth'
+      })
+    })
+  }, [rendererBoundaryFailed])
 
   useEffect(() => {
     let active = true
@@ -138,7 +153,9 @@ export function App(): React.JSX.Element {
         </div>
       </section>
 
-      <Preferences downloadRoot={downloadRoot} onChanged={setDownloadRoot} />
+      <div data-focused-section={focused ?? undefined}>
+        <Preferences downloadRoot={downloadRoot} onChanged={setDownloadRoot} />
+      </div>
 
       <AddTorrent
         downloadRoot={downloadRoot}

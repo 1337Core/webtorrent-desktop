@@ -15,6 +15,15 @@ export const ENGINE_STATUS_CHANNEL = 'desktop:engine-status:v1'
 export const DESKTOP_TORRENT_COMMAND_CHANNEL = 'desktop:torrent-command:v1'
 export const DESKTOP_CHOOSE_PATH_CHANNEL = 'desktop:choose-path:v1'
 export const DESKTOP_PREFERENCES_CHANNEL = 'desktop:preferences:v1'
+export const DESKTOP_MENU_ACTION_CHANNEL = 'desktop:menu-action:v1'
+
+/** The bounded set of menu actions main may ask the renderer to surface. */
+export const menuActionEventSchema = z.strictObject({
+  protocolVersion: z.literal(PROTOCOL_VERSION),
+  action: z.enum(['add-torrent', 'create-torrent', 'preferences'])
+})
+
+export type MenuActionEvent = z.infer<typeof menuActionEventSchema>
 export const ENGINE_MESSAGE_BUDGET = {
   maxBytes: 128 * 1024,
   maxDepth: 16,

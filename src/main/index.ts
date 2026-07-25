@@ -22,6 +22,7 @@ import {
 import { z } from 'zod'
 import {
   APP_NAME,
+  DESKTOP_MENU_ACTION_CHANNEL,
   ENGINE_STATUS_CHANNEL,
   PROTOCOL_VERSION,
   engineStatusEventSchema,
@@ -43,6 +44,7 @@ import {
 } from './electron-security'
 import { EngineSupervisor } from './engine-supervisor'
 import { findDangerousLaunchSwitch } from './launch-policy'
+import { installAppMenu } from './app-menu'
 import { AppStateStore } from './state-store'
 import { TRUSTED_RENDERER_URL } from './trusted-renderer'
 
@@ -364,6 +366,7 @@ function publishEngineStatus(status: EngineStatus): void {
 
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.mainFrame.send(
+      DESKTOP_MENU_ACTION_CHANNEL,
       ENGINE_STATUS_CHANNEL,
       latestEngineStatusEvent
     )
@@ -691,6 +694,25 @@ function createMainWindow(runtime: RuntimeInfo): BrowserWindow {
     if (result.canceled) return null
     return result.filePaths[0] ?? null
   }
+
+  const sendMenuAction = (
+    action: 'add-torrent' | 'create-torrent' | 'preferences'
+  ): void => {
+    window.webContents.mainFrame.send(DESKTOP_MENU_ACTION_CHANNEL, {
+      protocolVersion: PROTOCOL_VERSION,
+      action
+    })
+  }
+  installAppMenu({
+    actions: {
+      addTorrent: () => sendMenuAction('add-torrent'),
+      createTorrent: () => sendMenuAction('create-torrent'),
+      openPreferences: () => sendMenuAction('preferences'),
+      quit: () => app.quit(),
+      toggleFullScreen: () => window.setFullScreen(!window.isFullScreen())
+    },
+    developer: !app.isPackaged
+  })
 
   unregisterDesktopIpc = registerDesktopIpc({
     choosePath: kind => chooseUserPath(window, kind),

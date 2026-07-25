@@ -3,6 +3,7 @@ import type {
   ChoosePathResult,
   EngineCommand,
   EngineStatus,
+  MenuActionEvent,
   RestartEngineResult,
   SetPreferencesResult,
   TorrentCommandResult
@@ -16,6 +17,9 @@ declare global {
       ) => Promise<ChoosePathResult>
       getBootstrap: () => Promise<BootstrapResult>
       onEngineStatus: (listener: (status: EngineStatus) => void) => () => void
+      onMenuAction: (
+        listener: (action: MenuActionEvent['action']) => void
+      ) => () => void
       restartEngine: () => Promise<RestartEngineResult>
       runTorrentCommand: (
         operation: EngineCommand

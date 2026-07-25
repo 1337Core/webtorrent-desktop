@@ -194,6 +194,7 @@ describe('preload desktop bridge', () => {
       'choosePath',
       'getBootstrap',
       'onEngineStatus',
+      'onMenuAction',
       'restartEngine',
       'runTorrentCommand',
       'setDownloadRoot'
