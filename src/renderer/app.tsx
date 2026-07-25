@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { BootstrapSnapshot, EngineStatus } from '../shared/contracts'
+import { TorrentList } from './components/torrent-list'
 
 function engineLabel(status: EngineStatus): string {
   switch (status.state) {
@@ -96,8 +97,8 @@ export function App(): React.JSX.Element {
       <p className="eyebrow">Apple Silicon modernization</p>
       <h1>WebTorrent Updated</h1>
       <p className="summary">
-        The secure Electron shell is running. Torrent controls will return as
-        each migration milestone clears its tests.
+        Apple Silicon build with a sandboxed renderer and a supervised torrent
+        engine.
       </p>
 
       <section aria-labelledby="runtime-heading">
@@ -124,6 +125,8 @@ export function App(): React.JSX.Element {
           ) : null}
         </div>
       </section>
+
+      <TorrentList active={engineStatus.state === 'ready'} />
 
       {startupError ? (
         <p className="error" role="alert">
