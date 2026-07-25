@@ -89,6 +89,14 @@ beforeEach(() => {
     configurable: true,
     value: {
       getBootstrap: vi.fn(),
+      openExternalPlayer: vi.fn(() =>
+        Promise.resolve({
+          protocolVersion: 1,
+          requestId: '00000000-0000-4000-8000-000000000004',
+          ok: true,
+          value: { launched: true }
+        })
+      ),
       onEngineStatus: vi.fn(() => () => undefined),
       restartEngine: vi.fn(),
       runTorrentCommand: vi.fn((operation: EngineCommand) => {
@@ -180,5 +188,40 @@ describe('MediaPlayer', () => {
 
     await user.click(screen.getByRole('button', { name: 'Close player' }))
     expect(onClose).toHaveBeenCalledOnce()
+  })
+
+  it('hands the minted URL to the configured external player', async () => {
+    const user = userEvent.setup()
+    render(
+      <MediaPlayer
+        externalPlayerConfigured
+        fileIndex={1}
+        fileName="payload/second.bin"
+        infoHash={INFO_HASH}
+        onClose={vi.fn()}
+      />
+    )
+    await screen.findByTestId('media-element')
+
+    await user.click(
+      screen.getByRole('button', { name: 'Open in external player' })
+    )
+    expect(window.desktop.openExternalPlayer).toHaveBeenCalledWith(MEDIA_URL)
+  })
+
+  it('offers no external player until one is configured', async () => {
+    render(
+      <MediaPlayer
+        fileIndex={1}
+        fileName="payload/second.bin"
+        infoHash={INFO_HASH}
+        onClose={vi.fn()}
+      />
+    )
+    await screen.findByTestId('media-element')
+
+    expect(
+      screen.queryByRole('button', { name: 'Open in external player' })
+    ).toBeNull()
   })
 })

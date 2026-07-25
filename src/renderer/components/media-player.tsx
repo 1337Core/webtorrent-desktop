@@ -5,6 +5,8 @@ import { runCommand, type EngineFailure } from '../lib/engine-client'
 const HEARTBEAT_MS = 20_000
 
 export type MediaPlayerProps = Readonly<{
+  /** True once the owner has configured a player in preferences. */
+  externalPlayerConfigured?: boolean
   fileIndex: number
   fileName: string
   infoHash: string
@@ -19,6 +21,7 @@ export type MediaPlayerProps = Readonly<{
  * is mounted and closed as soon as it unmounts.
  */
 export function MediaPlayer({
+  externalPlayerConfigured = false,
   fileIndex,
   fileName,
   infoHash,
@@ -73,6 +76,18 @@ export function MediaPlayer({
     }
   }, [url])
 
+  const openExternally = useCallback(async () => {
+    if (url === null) return
+    const result = await window.desktop.openExternalPlayer(url)
+    if (!result.ok) {
+      setFailure({
+        code: result.error.code,
+        displayMessage: result.error.displayMessage,
+        retryable: result.error.retryable
+      })
+    }
+  }, [url])
+
   const close = useCallback(() => {
     setUrl(null)
     onClose()
@@ -93,9 +108,16 @@ export function MediaPlayer({
           {failure.displayMessage}
         </p>
       ) : null}
-      <button onClick={close} type="button">
-        Close player
-      </button>
+      <div className="torrent-actions">
+        {externalPlayerConfigured && url !== null ? (
+          <button onClick={() => void openExternally()} type="button">
+            Open in external player
+          </button>
+        ) : null}
+        <button onClick={close} type="button">
+          Close player
+        </button>
+      </div>
     </section>
   )
 }

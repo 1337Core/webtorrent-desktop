@@ -194,6 +194,7 @@ export function App(): React.JSX.Element {
 
       {playing ? (
         <MediaPlayer
+          externalPlayerConfigured={preferences.externalPlayer !== null}
           fileIndex={playing.fileIndex}
           fileName={playing.fileName}
           infoHash={playing.infoHash}
