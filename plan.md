@@ -2340,9 +2340,15 @@ Exit: macOS behavior passes native E2E on the owner’s machine.
 
 Progress 2026-07-25: the macOS handlers, startup and login policy, watched
 folder, external player, application menu, notifications, dock badge,
-power-save guard, and Trash-backed deletion are landed with unit coverage. The
-native end-to-end coverage in section 18.3 is still limited to launch,
-protocol, boundary, capability, and engine-readiness specs.
+power-save guard, and Trash-backed deletion are landed with unit coverage.
+
+The native end-to-end suite now covers launch, protocol, boundary, capability
+inventory, engine readiness, the two-phase add through review and removal,
+torrent creation, media leases including their revocation and their refusal to
+serve page script, preferences, and legacy import proven byte-identical
+afterwards. The remaining section 18.3 flows are the watched folder, external
+player, menus, notifications, and dock behavior, which need OS-level
+interaction rather than the application bridge.
 
 ### Milestone 7 — qualify the personal app
 
@@ -2352,6 +2358,13 @@ protocol, boundary, capability, and engine-readiness specs.
   and manual replacement with preserved state.
 
 Exit: `WebTorrent Updated.app` is ready for the owner’s normal use.
+
+Progress 2026-07-25: the arm64 `.app` builds, carries its ad-hoc signature and
+production fuses, and `npm run package:check` now also copies it outside the
+checkout, launches it there, replaces the bundle the way the owner would, and
+launches it again. What that cannot cover, and what remains owner-verified, is
+real use of the installed application: the macOS handlers, playback, and a
+personal profile preserved across the swap.
 
 ### Milestone 8 — personal stabilization
 
