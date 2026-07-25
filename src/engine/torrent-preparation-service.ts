@@ -12,7 +12,9 @@ import {
   type PreparationWarning
 } from './preparation-store'
 import {
+  prepareMagnet,
   TorrentInputError,
+  type PreparedMagnet,
   type ValidatedTorrentMetadata,
   validateTorrentMetadata
 } from './torrent-metadata'
@@ -44,6 +46,7 @@ export type TorrentPreparationServiceErrorCode =
   | 'INPUT_INVALID'
   | 'INTERNAL'
   | 'LOCAL_TORRENT_UNAVAILABLE'
+  | 'METADATA_UNAVAILABLE'
   | 'REMOTE_CONCURRENCY_LIMIT'
   | 'REMOTE_TORRENT_UNAVAILABLE'
   | 'UNSUPPORTED'
@@ -71,12 +74,23 @@ type MetadataValidator = (
 type RemotePolicyFactory = (consent: RemoteTorrentConsent) => EgressPolicy
 
 export type TorrentPreparationServiceOptions = Readonly<{
+  /**
+   * Acquires metadata for a magnet or info hash. Without one the engine has
+   * no staging capability and both flows stay unsupported rather than
+   * silently reaching the network by some other route.
+   */
+  acquireMetadata?: MetadataAcquirer
   createRemotePolicy?: RemotePolicyFactory
   localMetadataPolicy?: EgressPolicy
   readLocalTorrent?: LocalTorrentReader
   store?: PreparationStore
   validateMetadata?: MetadataValidator
 }>
+
+export type MetadataAcquirer = (
+  prepared: PreparedMagnet,
+  signal: AbortSignal
+) => Promise<Uint8Array>
 
 function consentKey(consent: RemoteTorrentConsent): string {
   return `${consent.allowHttp ? 'http' : 'https'}:${
@@ -85,16 +99,21 @@ function consentKey(consent: RemoteTorrentConsent): string {
 }
 
 function sourcePolicy(
-  source: Extract<
-    TorrentPreparationSource,
-    { kind: 'local-torrent' | 'remote-torrent' }
-  >
+  source: TorrentPreparationSource
 ): PreparationSourcePolicy {
   if (source.kind === 'local-torrent') return { kind: 'local-torrent' }
+  if (source.kind === 'remote-torrent') {
+    return {
+      allowHttp: source.allowHttp,
+      allowPrivateNetwork: source.allowPrivateNetwork,
+      kind: 'remote-torrent'
+    }
+  }
+  // The consent a staged acquisition ran under is recorded with it.
   return {
-    allowHttp: source.allowHttp,
+    allowDhtExposure: source.allowDhtExposure,
     allowPrivateNetwork: source.allowPrivateNetwork,
-    kind: 'remote-torrent'
+    kind: source.kind
   }
 }
 
@@ -147,10 +166,12 @@ export class TorrentPreparationService {
   readonly #readLocalTorrent: LocalTorrentReader
   readonly #remotePolicies = new Map<string, EgressPolicy>()
   readonly #store: PreparationStore
+  readonly #acquireMetadata: MetadataAcquirer | null
   readonly #validateMetadata: MetadataValidator
   #activeRemoteFetches = 0
 
   constructor(options: TorrentPreparationServiceOptions = {}) {
+    this.#acquireMetadata = options.acquireMetadata ?? null
     this.#createRemotePolicy =
       options.createRemotePolicy ??
       (consent =>
@@ -176,7 +197,7 @@ export class TorrentPreparationService {
         return await this.#openRemote(source, signal)
       case 'info-hash':
       case 'magnet':
-        throw new TorrentPreparationServiceError('UNSUPPORTED')
+        return await this.#openStaged(source, signal)
     }
   }
 
@@ -194,6 +215,58 @@ export class TorrentPreparationService {
     return await this.#validateAndStore(
       bytes,
       this.#localMetadataPolicy,
+      sourcePolicy(source),
+      signal
+    )
+  }
+
+  /**
+   * A magnet or info hash carries no metadata, so the engine must acquire it
+   * before anything can be reviewed. The magnet is parsed and its consent
+   * settled first; only then is a staging acquisition allowed to run, and its
+   * bytes go through exactly the same validation as a local file.
+   */
+  async #openStaged(
+    source: Extract<
+      TorrentPreparationSource,
+      { kind: 'info-hash' } | { kind: 'magnet' }
+    >,
+    signal: AbortSignal
+  ): Promise<PreparationSnapshot> {
+    const acquire = this.#acquireMetadata
+    if (!acquire) throw new TorrentPreparationServiceError('UNSUPPORTED')
+    throwIfAborted(signal)
+
+    const policy = this.#policyFor({
+      allowHttp: false,
+      allowPrivateNetwork: source.allowPrivateNetwork
+    })
+    let prepared: PreparedMagnet
+    try {
+      prepared = await prepareMagnet(
+        source.kind === 'magnet' ? source.magnet : source.infoHash,
+        policy,
+        { allowDht: source.allowDhtExposure }
+      )
+    } catch {
+      throw new TorrentPreparationServiceError('INPUT_INVALID')
+    }
+
+    let bytes: Uint8Array
+    try {
+      bytes = await acquire(prepared, signal)
+    } catch (error) {
+      throwIfAborted(signal)
+      throw new TorrentPreparationServiceError(
+        error instanceof Error && error.message.includes('CAPACITY')
+          ? 'CAPACITY_EXCEEDED'
+          : 'METADATA_UNAVAILABLE'
+      )
+    }
+
+    return await this.#validateAndStore(
+      bytes,
+      policy,
       sourcePolicy(source),
       signal
     )

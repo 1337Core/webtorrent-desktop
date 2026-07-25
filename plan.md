@@ -2302,8 +2302,23 @@ address, and rejects both a certificate issued for another host and one the
 fixture authority never signed. No key material lives in the repository and
 the production trust store is untouched.
 
-The remaining section 18.2 work is the staging and hostile-race suites and the
-churn and boundary suites that need many live peers.
+The peer-admission churn boundary is covered: ten thousand admit-and-drop
+cycles leave no record held.
+
+One required behavior in section 4.1 is **not implemented**: adding a torrent
+from a magnet link or a bare info hash. The preparation service returned a
+fixed `UNSUPPORTED` for both, while the interface offers a magnet field, the
+app registers magnet handlers, and pasted magnets reach that dead path. The
+metadata acquisition this needs — bounded, bound to the requested info hash,
+at most two at once, destroying its staging torrent inside the metadata
+handler — is now implemented and unit-tested, and the preparation service
+accepts it and runs the full review path for a magnet when one is supplied.
+
+What remains before the magnet flow works end to end is the staging client
+itself: `EngineClientLifecycle` manages only the public and private clients,
+so the engine has nothing to hand the acquisition, and the tracker and
+consented-DHT discovery adapter for a staging acquisition is not written. Both
+are the last substantial implementation work in this milestone.
 
 ### Milestone 4 — storage, resume, and legacy import
 

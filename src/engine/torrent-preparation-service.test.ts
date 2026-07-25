@@ -10,7 +10,11 @@ import {
   type RemoteTorrentUrlOptions
 } from './network-policy'
 import { PreparationStore } from './preparation-store'
-import { validateTorrentMetadata } from './torrent-metadata'
+import type { PreparedMagnet } from './torrent-metadata'
+import {
+  canonicalInfoIdentity,
+  validateTorrentMetadata
+} from './torrent-metadata'
 import {
   TorrentPreparationService,
   TorrentPreparationServiceError,
@@ -303,7 +307,66 @@ describe('TorrentPreparationService', () => {
     )
   })
 
-  it('returns fixed unsupported errors for deferred magnet and info-hash flows', async () => {
+  it('acquires magnet metadata and reviews it like any other source', async () => {
+    const readLocalTorrent = vi.fn()
+    const bytes = singleFileTorrent('staged.txt')
+    const acquired: Array<{ dhtEnabled: boolean; infoHash: string }> = []
+    const acquireMetadata = vi.fn(async (prepared: PreparedMagnet) => {
+      acquired.push({
+        dhtEnabled: prepared.dhtEnabled,
+        infoHash: prepared.infoHash
+      })
+      return bytes
+    })
+    const service = new TorrentPreparationService({
+      acquireMetadata,
+      readLocalTorrent
+    })
+
+    const infoHash = canonicalInfoIdentity(bytes).infoHash
+    const snapshot = await service.open(
+      {
+        allowDhtExposure: false,
+        allowPrivateNetwork: false,
+        kind: 'magnet',
+        magnet:
+          `magnet:?xt=urn:btih:${infoHash}` +
+          '&tr=https%3A%2F%2Ftracker.example%2Fannounce'
+      },
+      signal()
+    )
+
+    expect(snapshot.infoHash).toBe(infoHash)
+    // Nothing reached the local reader, and the magnet's own consent was
+    // carried into the acquisition.
+    expect(readLocalTorrent).not.toHaveBeenCalled()
+    expect(acquireMetadata).toHaveBeenCalledTimes(1)
+    expect(acquired).toEqual([{ dhtEnabled: false, infoHash }])
+  })
+
+  it('reports an acquisition that never produced metadata', async () => {
+    const service = new TorrentPreparationService({
+      acquireMetadata: async () => {
+        throw new Error('Metadata acquisition failed: TIMED_OUT.')
+      },
+      readLocalTorrent: vi.fn()
+    })
+
+    await expectServiceError(
+      service.open(
+        {
+          allowDhtExposure: true,
+          allowPrivateNetwork: false,
+          infoHash: 'a'.repeat(40),
+          kind: 'info-hash'
+        },
+        signal()
+      ),
+      'METADATA_UNAVAILABLE'
+    )
+  })
+
+  it('returns fixed unsupported errors when no staging capability exists', async () => {
     const createRemotePolicy = vi.fn(() => new EgressPolicy())
     const readLocalTorrent = vi.fn()
     const service = new TorrentPreparationService({
