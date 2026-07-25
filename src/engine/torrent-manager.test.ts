@@ -101,6 +101,7 @@ let multi: ValidatedTorrentMetadata
 let torrents: FakeTorrent[]
 let manager: TorrentManager
 let pendingMetadata: ValidatedTorrentMetadata
+let addOptions: TorrentOptions[] = []
 
 function torrentBytes(name: string, fileCount: number): Uint8Array {
   return bencode.encode({
@@ -122,11 +123,17 @@ async function addTorrent(
   selectedIndexes: ReadonlyArray<number> = [0]
 ): Promise<void> {
   pendingMetadata = metadata
+  const before = torrents.length
   const pending = manager.add({
     destinationRoot: DESTINATION_ROOT,
     metadata,
     selectedIndexes
   })
+  // The manager consults resume state before adding, so the torrent appears a
+  // few microtasks later.
+  for (let turn = 0; turn < 20 && torrents.length === before; turn += 1) {
+    await Promise.resolve()
+  }
   const torrent = torrents.at(-1)
   torrent?.emit('metadata')
   torrent?.emit('ready')
@@ -141,10 +148,12 @@ beforeAll(async () => {
 
 beforeEach(() => {
   torrents = []
+  addOptions = []
   pendingMetadata = single
   manager = new TorrentManager({
     resolveClient: () => ({
-      add: (_torrentId: Uint8Array, _options: TorrentOptions) => {
+      add: (_torrentId: Uint8Array, options: TorrentOptions) => {
+        addOptions.push(options)
         const torrent = new FakeTorrent(pendingMetadata)
         torrents.push(torrent)
         return torrent
@@ -300,6 +309,50 @@ describe('TorrentManager', () => {
     expect(
       manager.files(multi.infoHash, 0, 64).items.map(item => item.selected)
     ).toEqual([true, false, true])
+  })
+
+  it('passes a validated resume bitfield and drops it when stale', async () => {
+    const bitfield = Uint8Array.from([0b1000_0000])
+    const removed: string[] = []
+    let usable = true
+    manager = new TorrentManager({
+      resolveClient: () => ({
+        add: (_torrentId: Uint8Array, options: TorrentOptions) => {
+          addOptions.push(options)
+          const torrent = new FakeTorrent(pendingMetadata)
+          torrents.push(torrent)
+          return torrent
+        }
+      }),
+      resume: {
+        describe: () => {
+          throw new Error('unused')
+        },
+        evaluate: () =>
+          Promise.resolve(
+            usable
+              ? { bitfield, usable: true as const }
+              : { reason: 'FILE_CHANGED' as const, usable: false as const }
+          ),
+        load: () => Promise.resolve(null),
+        remove: infoHash => {
+          removed.push(infoHash)
+          return Promise.resolve()
+        },
+        save: () => Promise.resolve()
+      }
+    })
+
+    await addTorrent(single)
+    expect(addOptions[0]?.bitfield).toEqual(bitfield)
+    expect(addOptions[0]?.skipVerify).toBe(false)
+
+    await manager.remove(single.infoHash)
+    expect(removed).toEqual([single.infoHash])
+
+    usable = false
+    await addTorrent(single)
+    expect(addOptions[1]?.bitfield).toBeUndefined()
   })
 
   it('closes every session on shutdown', async () => {

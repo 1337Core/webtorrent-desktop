@@ -5,6 +5,11 @@ import {
   type DiskTorrentSessionOptions,
   type EngineAddClient
 } from './disk-torrent'
+import type {
+  ResumeDecision,
+  ResumeExpectation,
+  ResumeSidecar
+} from './resume-store'
 import type { ValidatedTorrentMetadata } from './torrent-metadata'
 import { TorrentRegistry, type TorrentOwner } from './torrent-registry'
 
@@ -40,6 +45,7 @@ export class TorrentManagerError extends Error {
 
 export type TorrentManagerOptions = Readonly<{
   registry?: TorrentRegistry
+  resume?: TorrentResumeSupport
   resolveClient: (owner: TorrentOwner) => EngineAddClient
   sessionOptions?: Omit<DiskTorrentSessionOptions, 'registry'>
 }>
@@ -48,6 +54,24 @@ export type TorrentAddRequest = Readonly<{
   destinationRoot: string
   metadata: ValidatedTorrentMetadata
   selectedIndexes: ReadonlyArray<number>
+}>
+
+/** Supplies and refreshes validated fast-resume state for owned torrents. */
+export type TorrentResumeSupport = Readonly<{
+  evaluate: (
+    expectation: ResumeExpectation,
+    sidecar: ResumeSidecar | null
+  ) => Promise<ResumeDecision>
+  describe: (
+    input: Readonly<{
+      bitfield: Uint8Array
+      cleanShutdown: boolean
+      expectation: ResumeExpectation
+    }>
+  ) => Promise<ResumeSidecar>
+  load: (infoHash: string) => Promise<ResumeSidecar | null>
+  remove: (infoHash: string) => Promise<void>
+  save: (sidecar: ResumeSidecar) => Promise<void>
 }>
 
 const MAX_PAGE_SIZE = 64
@@ -63,12 +87,14 @@ const utf8Encoder = new TextEncoder()
 export class TorrentManager {
   readonly #registry: TorrentRegistry
   readonly #resolveClient: (owner: TorrentOwner) => EngineAddClient
+  readonly #resume: TorrentResumeSupport | null
   readonly #sessionOptions: Omit<DiskTorrentSessionOptions, 'registry'>
   readonly #sessions = new Map<string, DiskTorrentSession>()
 
   constructor(options: TorrentManagerOptions) {
     this.#registry = options.registry ?? new TorrentRegistry()
     this.#resolveClient = options.resolveClient
+    this.#resume = options.resume ?? null
     this.#sessionOptions = options.sessionOptions ?? {}
   }
 
@@ -82,8 +108,10 @@ export class TorrentManager {
 
   async add(request: TorrentAddRequest): Promise<TorrentSummary> {
     const owner: TorrentOwner = request.metadata.private ? 'private' : 'public'
+    const bitfield = await this.#resumeBitfield(request)
     const session = await DiskTorrentSession.add(
       {
+        ...(bitfield ? { bitfield } : {}),
         client: this.#resolveClient(owner),
         downloadRoot: request.destinationRoot,
         metadata: request.metadata,
@@ -190,6 +218,7 @@ export class TorrentManager {
     const session = this.#require(infoHash)
     await this.#guard(() => session.remove())
     this.#sessions.delete(infoHash)
+    await this.#resume?.remove(infoHash).catch(() => undefined)
   }
 
   updateSelection(
@@ -215,6 +244,41 @@ export class TorrentManager {
       } catch {
         // Shutdown continues through a failing teardown and reports later.
       }
+    }
+  }
+
+  #expectation(request: TorrentAddRequest): ResumeExpectation {
+    const selected = new Set(request.selectedIndexes)
+    return {
+      files: request.metadata.files.map(file => ({
+        length: file.length,
+        path: file.path
+      })),
+      infoHash: request.metadata.infoHash,
+      length: request.metadata.length,
+      pieceCount: request.metadata.pieceCount,
+      pieceLength: request.metadata.pieceLength,
+      root: request.destinationRoot,
+      selectedPaths: request.metadata.files
+        .filter(file => selected.has(file.index))
+        .map(file => file.path)
+    }
+  }
+
+  /** A mismatched, stale, or unreadable sidecar means a full verification. */
+  async #resumeBitfield(
+    request: TorrentAddRequest
+  ): Promise<Uint8Array | null> {
+    const resume = this.#resume
+    if (!resume) return null
+    try {
+      const decision = await resume.evaluate(
+        this.#expectation(request),
+        await resume.load(request.metadata.infoHash)
+      )
+      return decision.usable ? decision.bitfield : null
+    } catch {
+      return null
     }
   }
 

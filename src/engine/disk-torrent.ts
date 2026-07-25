@@ -104,6 +104,11 @@ export type TorrentActivation = Readonly<{
 }>
 
 export type DiskTorrentAddInput = Readonly<{
+  /**
+   * A validated fast-resume bitfield. It is passed to WebTorrent only when the
+   * resume store proved every field matches; `skipVerify` is never set.
+   */
+  bitfield?: Uint8Array
   client: EngineAddClient
   downloadRoot: string
   metadata: ValidatedTorrentMetadata
@@ -445,7 +450,7 @@ export class DiskTorrentSession {
       try {
         torrent = input.client.add(
           this.#metadata.torrentBytes,
-          this.#addOptions(input.downloadRoot)
+          this.#addOptions(input.downloadRoot, input.bitfield)
         )
       } catch {
         settled = true
@@ -511,8 +516,9 @@ export class DiskTorrentSession {
     if (input.startPaused === false) this.resume()
   }
 
-  #addOptions(downloadRoot: string): TorrentOptions {
+  #addOptions(downloadRoot: string, bitfield?: Uint8Array): TorrentOptions {
     return {
+      ...(bitfield ? { bitfield } : {}),
       addUID: false,
       deselect: true,
       destroyStoreOnDestroy: false,
