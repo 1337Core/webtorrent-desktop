@@ -6,6 +6,7 @@ import { Header } from './components/header'
 import { MediaPlayer } from './components/media-player'
 import { PreferencesPage } from './components/preferences'
 import { TorrentList } from './components/torrent-list'
+import { UnsupportedMediaModal } from './components/unsupported-media'
 
 type Location = 'create-torrent' | 'home' | 'player' | 'preferences'
 
@@ -19,6 +20,18 @@ type Playing = {
   fileIndex: number
   fileName: string
   infoHash: string
+  playlist: ReadonlyArray<{ fileIndex: number; fileName: string }>
+}
+
+/** The original showed the player's own name on the unsupported-media modal. */
+function externalPlayerName(playerPath: string | null): string | null {
+  if (playerPath === null) return null
+  const base = playerPath
+    .split('/')
+    .filter(part => part !== '')
+    .at(-1)
+  if (base === undefined) return null
+  return base.replace(/\.app$/u, '')
 }
 
 const TITLES: Readonly<Record<Location, string>> = {
@@ -65,7 +78,32 @@ export function App(): React.JSX.Element {
     | null
   >(null)
   const [playing, setPlaying] = useState<Playing | null>(null)
+  const [unsupported, setUnsupported] = useState<{
+    mediaUrl: string
+    message: string
+  } | null>(null)
+  const [externalPlayerFailed, setExternalPlayerFailed] = useState(false)
   const [listRevision, setListRevision] = useState(0)
+  const [focused, setFocused] = useState(true)
+  const [fullScreen, setFullScreen] = useState(false)
+  const [controlsHidden, setControlsHidden] = useState(false)
+
+  // The original root carried the window's own state as classes, and the
+  // stylesheet still keys the header and content off them.
+  useEffect(() => {
+    const sync = () => setFocused(document.hasFocus())
+    const syncFullScreen = () =>
+      setFullScreen(document.fullscreenElement !== null)
+    sync()
+    window.addEventListener('blur', sync)
+    window.addEventListener('focus', sync)
+    document.addEventListener('fullscreenchange', syncFullScreen)
+    return () => {
+      window.removeEventListener('blur', sync)
+      window.removeEventListener('focus', sync)
+      document.removeEventListener('fullscreenchange', syncFullScreen)
+    }
+  }, [])
 
   useEffect(() => {
     if (rendererBoundaryFailed) return undefined
@@ -124,9 +162,33 @@ export function App(): React.JSX.Element {
     setLocation('player')
   }, [])
 
+  // The lease belongs to the mounted player, so the page stays put while the
+  // owner's own player takes over the same stream.
+  const playExternally = useCallback(async () => {
+    if (unsupported === null) return
+    const launched = await window.desktop.openExternalPlayer(
+      unsupported.mediaUrl
+    )
+    if (!launched.ok) {
+      setExternalPlayerFailed(true)
+      return
+    }
+    setExternalPlayerFailed(false)
+    setUnsupported(null)
+  }, [unsupported])
+
   return (
     <div
-      className="app is-darwin"
+      className={[
+        'app',
+        'is-darwin',
+        `view-${location}`,
+        focused ? 'is-focused' : '',
+        fullScreen ? 'is-fullscreen' : '',
+        controlsHidden ? 'hide-video-controls' : ''
+      ]
+        .filter(name => name !== '')
+        .join(' ')}
       data-bootstrap-ready={bootstrap !== null}
       data-renderer-boundary={rendererBoundaryFailed ? 'failed' : 'passed'}
     >
@@ -179,7 +241,6 @@ export function App(): React.JSX.Element {
         ) : null}
         {location === 'player' && playing ? (
           <MediaPlayer
-            externalPlayerConfigured={preferences.externalPlayer !== null}
             fileIndex={playing.fileIndex}
             fileName={playing.fileName}
             infoHash={playing.infoHash}
@@ -187,24 +248,49 @@ export function App(): React.JSX.Element {
               setPlaying(null)
               setLocation('home')
             }}
+            onControlsHiddenChange={setControlsHidden}
+            onSelectTrack={entry =>
+              setPlaying(current =>
+                current === null ? current : { ...current, ...entry }
+              )
+            }
+            onUnsupported={setUnsupported}
+            playlist={playing.playlist}
           />
         ) : null}
       </div>
 
-      {modalOpen ? (
+      {modalOpen || unsupported !== null ? (
         <div className="modal">
           <div className="modal-background" />
           <div className="modal-content">
-            <AddTorrentModal
-              downloadRoot={preferences.downloadRoot}
-              intent={openIntent}
-              onAdded={() => {
-                setListRevision(revision => revision + 1)
-                closeModal()
-              }}
-              onCancel={closeModal}
-              ready={ready}
-            />
+            {unsupported === null ? (
+              <AddTorrentModal
+                downloadRoot={preferences.downloadRoot}
+                intent={openIntent}
+                onAdded={() => {
+                  setListRevision(revision => revision + 1)
+                  closeModal()
+                }}
+                onCancel={closeModal}
+                ready={ready}
+              />
+            ) : (
+              <UnsupportedMediaModal
+                externalPlayerFailed={externalPlayerFailed}
+                externalPlayerName={externalPlayerName(
+                  preferences.externalPlayer
+                )}
+                message={unsupported.message}
+                onCancel={() => {
+                  setUnsupported(null)
+                  setExternalPlayerFailed(false)
+                  setPlaying(null)
+                  setLocation('home')
+                }}
+                onPlayExternally={() => void playExternally()}
+              />
+            )}
           </div>
         </div>
       ) : null}

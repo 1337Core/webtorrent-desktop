@@ -37,6 +37,8 @@ export type TorrentListProps = Readonly<{
       fileIndex: number
       fileName: string
       infoHash: string
+      /** Every playable file of the torrent, so the player can skip tracks. */
+      playlist: ReadonlyArray<Readonly<{ fileIndex: number; fileName: string }>>
     }>
   ) => void
   refreshMs?: number
@@ -231,7 +233,13 @@ export function TorrentList({
                               onPlay({
                                 fileIndex: file.index,
                                 fileName: file.path,
-                                infoHash: torrent.infoHash
+                                infoHash: torrent.infoHash,
+                                playlist: files
+                                  .filter(entry => PLAYABLE.test(entry.path))
+                                  .map(entry => ({
+                                    fileIndex: entry.index,
+                                    fileName: entry.path
+                                  }))
                               })
                             }}
                           >

@@ -266,7 +266,9 @@ describe('TorrentList', () => {
     expect(onPlay).toHaveBeenCalledWith({
       fileIndex: 0,
       fileName: 'payload/movie.mp4',
-      infoHash: INFO_HASH
+      infoHash: INFO_HASH,
+      // The player skips tracks through the torrent's playable files.
+      playlist: [{ fileIndex: 0, fileName: 'payload/movie.mp4' }]
     })
   })
 })

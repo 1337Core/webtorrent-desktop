@@ -14,6 +14,21 @@ export function prettyBytes(value: number): string {
   return `${exponent === 0 ? rounded : Number(rounded.toFixed(1))} ${units[exponent]}`
 }
 
+/** The original player clock: `m:ss`, growing to `h:mm:ss` for long media. */
+export function formatTime(time: number, total: number): string {
+  if (!Number.isFinite(time)) return '0:00'
+
+  const totalHours = Math.floor(total / 3600)
+  const totalMinutes = Math.floor(total / 60)
+  const hours = Math.floor(time / 3600)
+  const rawMinutes = Math.floor((time % 3600) / 60)
+  const minutes =
+    totalMinutes > 9 && rawMinutes < 10 ? `0${rawMinutes}` : `${rawMinutes}`
+  const seconds = `0${Math.floor(time % 60)}`.slice(-2)
+
+  return `${totalHours > 0 ? `${hours}:` : ''}${minutes}:${seconds}`
+}
+
 export function calculateEta(
   missingBytes: number,
   downloadSpeed: number
