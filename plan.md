@@ -2287,8 +2287,12 @@ path. Both halves of the interoperability gate therefore have deterministic
 coverage; what the fixtures cannot show is a real browser peer reached through
 a public tracker, which stays an owner-machine check.
 
-The wider section 18.2 boundary, DHT, tracker, and hostile-race coverage is
-still outstanding.
+The engine-wide peer-admission budget the section 7.4 caps require is now
+implemented and enforced at every handoff, including the peers WebTorrent
+discovers for itself through PEX, which previously bypassed the session gate
+entirely. The remaining section 18.2 work is the DHT, tracker, staging, and
+hostile-race coverage, and the churn and boundary suites that need many live
+peers.
 
 ### Milestone 4 — storage, resume, and legacy import
 
