@@ -233,8 +233,11 @@ module.exports = {
     osxUniversal: false,
     platform: 'darwin'
   },
+  // The Node-API addon is packaged exactly as acquired and verified by
+  // scripts/acquire-artifacts.mjs. Forge must never rebuild it, and its
+  // package script's source-build fallback must never run.
   rebuildConfig: {
-    onlyModules: ['node-datachannel']
+    onlyModules: []
   },
   makers: [],
   hooks: {
