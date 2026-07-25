@@ -1,9 +1,11 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import {
   bootstrapResultSchema,
   DESKTOP_BOOTSTRAP_CHANNEL,
   choosePathResultSchema,
+  contextMenuResultSchema,
   DESKTOP_CHOOSE_PATH_CHANNEL,
+  DESKTOP_CONTEXT_MENU_CHANNEL,
   DESKTOP_ENGINE_RESTART_CHANNEL,
   DESKTOP_EXTERNAL_PLAYER_CHANNEL,
   DESKTOP_MENU_ACTION_CHANNEL,
@@ -22,6 +24,7 @@ import {
   torrentCommandResultSchema,
   type BootstrapResult,
   type ChoosePathResult,
+  type ContextMenuResult,
   type EngineCommand,
   type ExternalPlayerResult,
   type MenuActionEvent,
@@ -35,6 +38,8 @@ import {
 import { checkPayloadBudget } from '../shared/payload-budget'
 
 const INVOKE_TIMEOUT_MS = 5_000
+/** A drop carries a bounded number of torrents, never a whole folder tree. */
+const MAX_DROPPED_FILES = 32
 const RESULT_BUDGET = {
   maxBytes: 64 * 1024,
   maxDepth: 16,
@@ -285,6 +290,52 @@ async function choosePath(
   }
 }
 
+/** Asks main for the original right-click menu on one visible torrent. */
+async function openTorrentMenu(infoHash: string): Promise<ContextMenuResult> {
+  const requestId = crypto.randomUUID()
+  try {
+    const value = await invokeBounded(DESKTOP_CONTEXT_MENU_CHANNEL, {
+      protocolVersion: PROTOCOL_VERSION,
+      requestId,
+      command: 'openContextMenu',
+      payload: { infoHash }
+    })
+    const result = contextMenuResultSchema.safeParse(value)
+    if (!result.success || result.data.requestId !== requestId) {
+      return protocolError(
+        requestId,
+        'The application returned an invalid menu response.'
+      ) as ContextMenuResult
+    }
+    return result.data
+  } catch {
+    return protocolError(
+      requestId,
+      'The menu could not be opened.'
+    ) as ContextMenuResult
+  }
+}
+
+/**
+ * Resolves dropped `.torrent` files to the paths the OS actually handed over.
+ * The renderer never learns a path it did not receive from a drop, and the
+ * engine revalidates every path before reading it.
+ */
+function resolveDroppedTorrents(files: ReadonlyArray<File>): string[] {
+  const paths: string[] = []
+  for (const file of files.slice(0, MAX_DROPPED_FILES)) {
+    if (!file.name.toLowerCase().endsWith('.torrent')) continue
+    let resolved: string
+    try {
+      resolved = webUtils.getPathForFile(file)
+    } catch {
+      continue
+    }
+    if (resolved !== '' && resolved.length <= 4_096) paths.push(resolved)
+  }
+  return paths
+}
+
 /** Records chosen preference paths; main validates and persists them. */
 async function setPreferences(
   update: Readonly<{
@@ -381,6 +432,8 @@ contextBridge.exposeInMainWorld(
     choosePath,
     getBootstrap,
     openExternalPlayer,
+    openTorrentMenu,
+    resolveDroppedTorrents,
     restartEngine,
     runTorrentCommand,
     setPreferences,

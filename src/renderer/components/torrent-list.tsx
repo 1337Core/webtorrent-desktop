@@ -231,6 +231,10 @@ export function TorrentList({
             className={`torrent${isSelected ? ' selected' : ''}`}
             key={torrent.infoHash}
             onClick={() => void select(torrent.infoHash)}
+            onContextMenu={event => {
+              event.preventDefault()
+              void window.desktop.openTorrentMenu(torrent.infoHash)
+            }}
           >
             <div className="metadata">
               <div className="name ellipsis">{torrent.name}</div>

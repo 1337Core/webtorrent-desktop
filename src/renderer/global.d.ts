@@ -1,6 +1,7 @@
 import type {
   BootstrapResult,
   ChoosePathResult,
+  ContextMenuResult,
   EngineCommand,
   EngineStatus,
   ExternalPlayerResult,
@@ -26,6 +27,8 @@ declare global {
       onOpenIntent: (
         listener: (intent: OpenIntentEvent['intent']) => void
       ) => () => void
+      openTorrentMenu: (infoHash: string) => Promise<ContextMenuResult>
+      resolveDroppedTorrents: (files: ReadonlyArray<File>) => string[]
       restartEngine: () => Promise<RestartEngineResult>
       runTorrentCommand: (
         operation: EngineCommand

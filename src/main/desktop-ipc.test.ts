@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   DESKTOP_BOOTSTRAP_CHANNEL,
   DESKTOP_CHOOSE_PATH_CHANNEL,
+  DESKTOP_CONTEXT_MENU_CHANNEL,
   DESKTOP_ENGINE_RESTART_CHANNEL,
   DESKTOP_TORRENT_COMMAND_CHANNEL,
   PROTOCOL_VERSION,
@@ -23,6 +24,7 @@ function createHarness(
   options: {
     chosenPath?: string
     chosenSummary?: { fileCount: number; totalBytes: number }
+    openTorrentMenu?: (infoHash: string) => boolean
     stateRevision?: number
   } = {}
 ): {
@@ -125,6 +127,9 @@ function createHarness(
   }))
   const cleanup = registerDesktopIpc({
     choosePath,
+    ...(options.openTorrentMenu
+      ? { openTorrentMenu: options.openTorrentMenu }
+      : {}),
     diagnostics,
     engineSupervisor,
     getEngineStatusEvent: () => statusEvent,
@@ -375,6 +380,41 @@ describe('registerDesktopIpc', () => {
         summary: { fileCount: 4, totalBytes: 9_000 }
       }
     })
+  })
+
+  it('asks main for the context menu and returns only whether it showed', async () => {
+    const openTorrentMenu = vi.fn(() => true)
+    const { event, handlers } = createHarness({ openTorrentMenu })
+    const handler = handlers.get(DESKTOP_CONTEXT_MENU_CHANNEL)
+
+    const shown = await handler?.(event, {
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: '33333333-3333-4333-8333-333333333331',
+      command: 'openContextMenu',
+      payload: { infoHash: '0'.repeat(40) }
+    })
+
+    expect(shown).toMatchObject({ ok: true, value: { shown: true } })
+    expect(openTorrentMenu).toHaveBeenCalledWith('0'.repeat(40))
+  })
+
+  it('refuses a context-menu request that names no real info hash', async () => {
+    const openTorrentMenu = vi.fn(() => true)
+    const { event, handlers } = createHarness({ openTorrentMenu })
+    const handler = handlers.get(DESKTOP_CONTEXT_MENU_CHANNEL)
+
+    const rejected = await handler?.(event, {
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: '33333333-3333-4333-8333-333333333332',
+      command: 'openContextMenu',
+      payload: { infoHash: '../etc/passwd' }
+    })
+
+    expect(rejected).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_REQUEST' }
+    })
+    expect(openTorrentMenu).not.toHaveBeenCalled()
   })
 
   it('refuses a chooser request with an unknown kind', async () => {

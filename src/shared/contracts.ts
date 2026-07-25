@@ -27,6 +27,7 @@ export type MenuActionEvent = z.infer<typeof menuActionEventSchema>
 
 export const DESKTOP_OPEN_INTENT_CHANNEL = 'desktop:open-intent:v1'
 export const DESKTOP_EXTERNAL_PLAYER_CHANNEL = 'desktop:external-player:v1'
+export const DESKTOP_CONTEXT_MENU_CHANNEL = 'desktop:context-menu:v1'
 
 /** A validated open request from the OS, still unvalidated as a torrent. */
 export const openIntentEventSchema = z.strictObject({
@@ -514,6 +515,37 @@ export const externalPlayerResultSchema = z.discriminatedUnion('ok', [
 ])
 
 export type ExternalPlayerResult = z.infer<typeof externalPlayerResultSchema>
+
+/**
+ * The renderer asks for the original right-click menu; main owns the menu, its
+ * items, and every action they perform. The renderer names one torrent and
+ * learns only whether a menu was shown.
+ */
+export const contextMenuRequestSchema = z.strictObject({
+  protocolVersion: protocolVersionSchema,
+  requestId: requestIdSchema,
+  command: z.literal('openContextMenu'),
+  payload: z.strictObject({
+    infoHash: z.string().regex(/^[0-9a-f]{40}$/u)
+  })
+})
+
+export const contextMenuResultSchema = z.discriminatedUnion('ok', [
+  z.strictObject({
+    protocolVersion: protocolVersionSchema,
+    requestId: requestIdSchema,
+    ok: z.literal(true),
+    value: z.strictObject({ shown: z.boolean() })
+  }),
+  z.strictObject({
+    protocolVersion: protocolVersionSchema,
+    requestId: requestIdSchema.nullable(),
+    ok: z.literal(false),
+    error: desktopErrorSchema
+  })
+])
+
+export type ContextMenuResult = z.infer<typeof contextMenuResultSchema>
 
 export function isEngineStatus(value: unknown): value is EngineStatus {
   return engineStatusSchema.safeParse(value).success

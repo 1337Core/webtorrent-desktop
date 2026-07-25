@@ -201,6 +201,8 @@ describe('preload desktop bridge', () => {
       'onMenuAction',
       'onOpenIntent',
       'openExternalPlayer',
+      'openTorrentMenu',
+      'resolveDroppedTorrents',
       'restartEngine',
       'runTorrentCommand',
       'setPreferences'

@@ -40,6 +40,9 @@ const outsideProcessDirectoryPattern = directories =>
 export default [
   {
     ignores: [
+      // Scratch worktrees an assistant may leave beside the repository are
+      // not this project's source.
+      '.claude/**',
       '.github/**',
       'bin/**',
       'build/**',

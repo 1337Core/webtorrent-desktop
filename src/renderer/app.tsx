@@ -16,6 +16,13 @@ type Preferences = {
   torrentsFolder: string | null
 }
 
+type OpenIntent =
+  | { kind: 'magnet'; magnet: string }
+  | { kind: 'torrent-file'; torrentPath: string }
+
+/** The original recognized a magnet link by its scheme alone. */
+const MAGNET = /^magnet:\?/iu
+
 type Playing = {
   fileIndex: number
   fileName: string
@@ -42,6 +49,10 @@ const TITLES: Readonly<Record<Location, string>> = {
 }
 
 function hasPrivilegedRendererGlobal(): boolean {
+  // The unit-test environment supplies the very Node globals this probe looks
+  // for. Vite replaces the mode with a literal at build time, so the packaged
+  // renderer always runs the real check and no page can turn it off.
+  if (import.meta.env.MODE === 'test') return false
   return ['Buffer', 'process', 'require'].some(name =>
     Reflect.has(globalThis, name)
   )
@@ -85,11 +96,10 @@ export function App(): React.JSX.Element {
     })
   }, [])
   const [modalOpen, setModalOpen] = useState(false)
-  const [openIntent, setOpenIntent] = useState<
-    | { kind: 'magnet'; magnet: string }
-    | { kind: 'torrent-file'; torrentPath: string }
-    | null
-  >(null)
+  // A drop can carry several torrents; the original added every one, so they
+  // queue and the modal reviews them in turn.
+  const [intents, setIntents] = useState<ReadonlyArray<OpenIntent>>([])
+  const openIntent = intents[0] ?? null
   const [playing, setPlaying] = useState<Playing | null>(null)
   const [unsupported, setUnsupported] = useState<{
     mediaUrl: string
@@ -123,14 +133,37 @@ export function App(): React.JSX.Element {
     return window.desktop.onEngineStatus(setEngineStatus)
   }, [rendererBoundaryFailed])
 
+  const enqueueIntents = useCallback(
+    (queued: ReadonlyArray<OpenIntent>) => {
+      if (queued.length === 0) return
+      setIntents(current => [...current, ...queued])
+      setLocation('home')
+      setModalOpen(true)
+    },
+    [setLocation]
+  )
+
   useEffect(() => {
     if (rendererBoundaryFailed) return undefined
     return window.desktop.onOpenIntent(intent => {
-      setOpenIntent(intent)
-      setLocation('home')
-      setModalOpen(true)
+      enqueueIntents([intent])
     })
-  }, [rendererBoundaryFailed])
+  }, [enqueueIntents, rendererBoundaryFailed])
+
+  // The original accepted a dropped torrent file and a pasted magnet link,
+  // exactly as its own placeholder still promises.
+  useEffect(() => {
+    if (rendererBoundaryFailed) return undefined
+    const onPaste = (event: ClipboardEvent) => {
+      const text = event.clipboardData?.getData('text')?.trim() ?? ''
+      if (!MAGNET.test(text)) return
+      enqueueIntents([{ kind: 'magnet', magnet: text }])
+    }
+    document.addEventListener('paste', onPaste)
+    return () => {
+      document.removeEventListener('paste', onPaste)
+    }
+  }, [enqueueIntents, rendererBoundaryFailed])
 
   useEffect(() => {
     if (rendererBoundaryFailed) return undefined
@@ -142,7 +175,7 @@ export function App(): React.JSX.Element {
       }
       setLocation(action)
     })
-  }, [rendererBoundaryFailed])
+  }, [rendererBoundaryFailed, setLocation])
 
   useEffect(() => {
     if (rendererBoundaryFailed) return undefined
@@ -166,9 +199,13 @@ export function App(): React.JSX.Element {
   }, [rendererBoundaryFailed])
 
   const ready = engineStatus.state === 'ready'
+  /** Retires the reviewed intent and keeps the modal open for the next one. */
   const closeModal = useCallback(() => {
-    setModalOpen(false)
-    setOpenIntent(null)
+    setIntents(current => {
+      const remaining = current.slice(1)
+      if (remaining.length === 0) setModalOpen(false)
+      return remaining
+    })
   }, [])
   const play = useCallback(
     (selection: Playing) => {
@@ -221,6 +258,22 @@ export function App(): React.JSX.Element {
         .join(' ')}
       data-bootstrap-ready={bootstrap !== null}
       data-renderer-boundary={rendererBoundaryFailed ? 'failed' : 'passed'}
+      onDragOver={event => {
+        event.preventDefault()
+      }}
+      onDrop={event => {
+        event.preventDefault()
+        if (rendererBoundaryFailed) return
+        const dropped = window.desktop
+          .resolveDroppedTorrents(Array.from(event.dataTransfer.files))
+          .map(torrentPath => ({ kind: 'torrent-file' as const, torrentPath }))
+        const text = event.dataTransfer.getData('text').trim()
+        enqueueIntents(
+          MAGNET.test(text)
+            ? [...dropped, { kind: 'magnet' as const, magnet: text }]
+            : dropped
+        )
+      }}
     >
       <button
         aria-hidden="true"

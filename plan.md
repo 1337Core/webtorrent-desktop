@@ -1537,9 +1537,19 @@ The parity checklist, tracked to completion:
   release keeps. Done.
 - **Add torrent** — the address modal with its CANCEL/OK pair. Done; the
   section 9.8 review is presented inside the same modal.
-- **Outstanding** — the right-click context menus for the list and its rows,
-  and drag-and-drop of torrent files and magnet links onto the window. Both
-  need a main-owned capability and are not yet ported.
+- **Row context menu** — Remove From List, Remove Data File, Show in Finder,
+  and Copy Magnet Link to Clipboard. Done: the renderer names one torrent it
+  can already see and main builds the menu, shows it, and performs every
+  action. Its "Copy Instant.io Link" item is gone with the other third-party
+  services; "Save Torrent File As…" and "Sort by Name" are not ported.
+- **Drop and paste** — dropped `.torrent` files and dropped or pasted magnet
+  links enter the ordinary section 9.8 review, several at a time if a drop
+  carries several. Done. Dropping ordinary media to create a torrent from it
+  is not ported: the create-torrent source still comes from the main-owned
+  chooser, which is what measures it.
+- **Outstanding** — the two unported menu items above, dropped-media creation,
+  the poster artwork section 4.2 defers, and the subtitle track and its
+  closed-caption control.
 
 ### 11.3 Renderer behavior
 

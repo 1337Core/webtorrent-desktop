@@ -8,7 +8,10 @@ import {
   choosePathResultSchema,
   externalPlayerRequestSchema,
   externalPlayerResultSchema,
+  contextMenuRequestSchema,
+  contextMenuResultSchema,
   DESKTOP_CHOOSE_PATH_CHANNEL,
+  DESKTOP_CONTEXT_MENU_CHANNEL,
   DESKTOP_ENGINE_RESTART_CHANNEL,
   DESKTOP_EXTERNAL_PLAYER_CHANNEL,
   DESKTOP_PREFERENCES_CHANNEL,
@@ -67,6 +70,8 @@ type DesktopIpcOptions = {
   onBootstrap: (trustProof: PreloadTrustProof) => void
   runtime: RuntimeInfo
   stateStore: AppStateStore
+  /** Pops the main-owned right-click menu for one torrent. */
+  openTorrentMenu?: (infoHash: string) => boolean
   /** Keeps the durable library current from the commands main validates. */
   torrentLibrary?: TorrentLibrary
   window: BrowserWindow
@@ -118,6 +123,7 @@ export function registerDesktopIpc(options: DesktopIpcOptions): () => void {
     engineSupervisor,
     getEngineStatusEvent,
     onBootstrap,
+    openTorrentMenu,
     runtime,
     stateStore,
     torrentLibrary,
@@ -437,8 +443,42 @@ export function registerDesktopIpc(options: DesktopIpcOptions): () => void {
     }
   )
 
+  /**
+   * The renderer may ask for the original right-click menu on one torrent it
+   * can already see. Main owns the menu and every action it performs.
+   */
+  frameIpc.handle(DESKTOP_CONTEXT_MENU_CHANNEL, (event, value: unknown) => {
+    const rejected = authorize(event, value)
+    if (rejected) return contextMenuResultSchema.parse(rejected)
+
+    const request = contextMenuRequestSchema.safeParse(value)
+    if (!request.success) {
+      return contextMenuResultSchema.parse(
+        errorResult(
+          candidateRequestId(value),
+          'INVALID_REQUEST',
+          'The application received an invalid menu request.',
+          false
+        )
+      )
+    }
+
+    const duplicate = rememberRequest(request.data.requestId)
+    if (duplicate) return contextMenuResultSchema.parse(duplicate)
+
+    return contextMenuResultSchema.parse({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: request.data.requestId,
+      ok: true,
+      value: {
+        shown: openTorrentMenu?.(request.data.payload.infoHash) ?? false
+      }
+    })
+  })
+
   return () => {
     frameIpc.removeHandler(DESKTOP_BOOTSTRAP_CHANNEL)
+    frameIpc.removeHandler(DESKTOP_CONTEXT_MENU_CHANNEL)
     frameIpc.removeHandler(DESKTOP_EXTERNAL_PLAYER_CHANNEL)
     frameIpc.removeHandler(DESKTOP_CHOOSE_PATH_CHANNEL)
     frameIpc.removeHandler(DESKTOP_PREFERENCES_CHANNEL)

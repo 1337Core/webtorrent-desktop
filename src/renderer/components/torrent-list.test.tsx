@@ -31,6 +31,7 @@ let items: Summary[] = []
 let commands: EngineCommand[] = []
 let failNext: { code: string; displayMessage: string } | null = null
 let onPlay = vi.fn()
+let openTorrentMenu = vi.fn()
 
 function summary(overrides: Partial<Summary> = {}): Summary {
   return {
@@ -156,12 +157,21 @@ beforeEach(() => {
   commands = []
   failNext = null
   onPlay = vi.fn()
+  openTorrentMenu = vi.fn(() =>
+    Promise.resolve({
+      protocolVersion: 1,
+      requestId: '00000000-0000-4000-8000-000000000005',
+      ok: true,
+      value: { shown: true }
+    })
+  )
   Object.defineProperty(window, 'desktop', {
     configurable: true,
     value: {
       getBootstrap: vi.fn(),
       onEngineStatus: vi.fn(() => () => undefined),
       restartEngine: vi.fn(),
+      openTorrentMenu: openTorrentMenu,
       runTorrentCommand: vi.fn((operation: EngineCommand) => {
         commands.push(operation)
         return Promise.resolve(response(operation))
@@ -316,5 +326,18 @@ describe('TorrentList', () => {
         )
       ).toBe(true)
     )
+  })
+
+  it('asks main for the original right-click menu', async () => {
+    const user = userEvent.setup()
+    render(<TorrentList active onPlay={onPlay} refreshMs={100_000} />)
+    await screen.findByText('Example payload')
+
+    await user.pointer({
+      keys: '[MouseRight]',
+      target: screen.getByText('Example payload')
+    })
+
+    expect(openTorrentMenu).toHaveBeenCalledWith(INFO_HASH)
   })
 })

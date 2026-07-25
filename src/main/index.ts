@@ -12,9 +12,12 @@ import path from 'node:path'
 import {
   app,
   BrowserWindow,
+  clipboard,
   dialog,
+  Menu,
   protocol,
   screen,
+  shell,
   type BrowserWindowConstructorOptions,
   type Rectangle,
   type Session
@@ -52,6 +55,8 @@ import { DesktopNotifier, DockBadge, PowerSaveGuard } from './os-integration'
 import { measureSource } from './source-summary'
 import { TorrentHandlers } from './torrent-handlers'
 import { AppStateStore } from './state-store'
+import { PayloadTrash } from './payload-trash'
+import { TorrentContextMenu } from './torrent-context-menu'
 import { TorrentLibrary } from './torrent-library'
 import { TRUSTED_RENDERER_URL } from './trusted-renderer'
 
@@ -98,6 +103,8 @@ const rendererSmokeEvidenceSchema = z.strictObject({
     z.literal('onMenuAction'),
     z.literal('onOpenIntent'),
     z.literal('openExternalPlayer'),
+    z.literal('openTorrentMenu'),
+    z.literal('resolveDroppedTorrents'),
     z.literal('restartEngine'),
     z.literal('runTorrentCommand'),
     z.literal('setPreferences')
@@ -813,9 +820,31 @@ function createMainWindow(runtime: RuntimeInfo): BrowserWindow {
     stateStore?.snapshot().preferences.torrentsFolder ?? null
   )
 
+  // The row's right-click menu is built, shown, and acted on entirely in main.
+  const supervisor = engineSupervisor
+  const contextMenu =
+    stateStore && torrentLibrary && supervisor
+      ? new TorrentContextMenu({
+          buildMenu: template => {
+            const menu = Menu.buildFromTemplate([...template])
+            return { popup: () => menu.popup({ window }) }
+          },
+          copyText: text => clipboard.writeText(text),
+          diagnostics,
+          execute: operation => supervisor.execute(operation),
+          library: torrentLibrary,
+          payloadTrash: new PayloadTrash({ diagnostics }),
+          revealPath: target => shell.showItemInFolder(target),
+          stateStore
+        })
+      : null
+
   unregisterDesktopIpc = registerDesktopIpc({
     choosePath: kind => chooseUserPath(window, kind),
     diagnostics,
+    ...(contextMenu
+      ? { openTorrentMenu: (infoHash: string) => contextMenu.open(infoHash) }
+      : {}),
     openExternalPlayer: async mediaUrl => {
       const configured = stateStore?.snapshot().preferences.externalPlayer
       if (!configured) throw new Error('No external player is configured')
