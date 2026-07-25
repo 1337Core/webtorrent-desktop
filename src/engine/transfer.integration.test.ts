@@ -24,7 +24,7 @@ const TRANSFER_TIMEOUT_MS = 60_000
 type Fixture = {
   /** The exact loopback endpoint the fixture peer filter admits, and nothing else. */
   allowedPeer: string
-  payload: Uint8Array
+  payloads: ReadonlyArray<Uint8Array>
   root: string
   seeder: WebTorrent
   torrentBytes: Uint8Array
@@ -45,18 +45,27 @@ async function destroyClient(client: WebTorrent): Promise<void> {
  * existing path — rather than through `client.seed()`, so the fixture exercises
  * the same acquisition shape as production.
  */
-async function seedLocally(): Promise<Fixture> {
+async function seedLocally(fileCount = 1): Promise<Fixture> {
   const root = await mkdtemp(path.join(tmpdir(), 'webtorrent-updated-xfer-'))
   const seedRoot = path.join(root, 'seed')
-  await mkdir(seedRoot, { recursive: true })
-  const payload = randomBytes(PAYLOAD_BYTES)
-  const payloadPath = path.join(seedRoot, 'payload.bin')
-  await writeFile(payloadPath, payload)
+  const contentRoot =
+    fileCount === 1 ? seedRoot : path.join(seedRoot, 'payloads')
+  await mkdir(contentRoot, { recursive: true })
 
-  const torrentBytes = await createTorrentAsync(payloadPath, {
-    announceList: [],
-    private: false
-  })
+  const payloads: Uint8Array[] = []
+  for (let index = 0; index < fileCount; index += 1) {
+    const payload = randomBytes(PAYLOAD_BYTES)
+    payloads.push(payload)
+    await writeFile(path.join(contentRoot, payloadName(index)), payload)
+  }
+
+  const torrentBytes = await createTorrentAsync(
+    fileCount === 1 ? path.join(contentRoot, payloadName(0)) : contentRoot,
+    {
+      announceList: [],
+      private: false
+    }
+  )
 
   const seeder = new WebTorrent(createClientOptions('public'))
   created.push({ client: seeder, root })
@@ -90,11 +99,15 @@ async function seedLocally(): Promise<Fixture> {
 
   return {
     allowedPeer: `127.0.0.1:${port}`,
-    payload,
+    payloads,
     root,
     seeder,
     torrentBytes
   }
+}
+
+function payloadName(index: number): string {
+  return `payload-${index}.bin`
 }
 
 beforeEach(() => {
@@ -110,6 +123,63 @@ afterEach(async () => {
   }
   created.length = 0
 })
+
+type Downloader = {
+  destinationRoot: string
+  manager: TorrentManager
+  session: () => DiskTorrentSession
+}
+
+/** One engine-side downloader wired to the fixture's single allowed peer. */
+async function downloaderFor(
+  fixture: Fixture,
+  metadata: Awaited<ReturnType<typeof validateTorrentMetadata>>,
+  selectedIndexes: ReadonlyArray<number>
+): Promise<Downloader> {
+  const destinationRoot = path.join(fixture.root, 'download')
+  await mkdir(destinationRoot, { recursive: true })
+
+  const client = new WebTorrent(createClientOptions('public'))
+  created.push({ client, root: path.join(fixture.root, 'unused') })
+
+  let opened: DiskTorrentSession | null = null
+  const manager = new TorrentManager({
+    resolveClient: () => client as unknown as EngineAddClient,
+    sessionOptions: {
+      // The activation factory is the engine's own per-torrent hook; the
+      // fixture uses it to reach the session and starts no announce.
+      createActivation: session => {
+        opened = session
+        return null
+      },
+      // The fixture reaches exactly the one ephemeral loopback endpoint the
+      // test created. Production policy still rejects loopback entirely.
+      peerFilter: address => address === fixture.allowedPeer
+    }
+  })
+
+  await manager.add({ destinationRoot, metadata, selectedIndexes })
+  await manager.resume(metadata.infoHash)
+
+  return {
+    destinationRoot,
+    manager,
+    session: () => {
+      const session = opened as DiskTorrentSession | null
+      if (!session) throw new Error('The session was never created')
+      return session
+    }
+  }
+}
+
+/** Waits for a condition the transfer is expected to reach. */
+async function waitFor(reached: () => boolean, message: string): Promise<void> {
+  const deadline = Date.now() + TRANSFER_TIMEOUT_MS
+  while (!reached()) {
+    if (Date.now() > deadline) throw new Error(message)
+    await new Promise(resolve => setTimeout(resolve, 25))
+  }
+}
 
 describe('engine transfer', () => {
   it(
@@ -142,7 +212,7 @@ describe('engine transfer', () => {
         }
       })
 
-      const expectedPath = path.join(destinationRoot, 'payload.bin')
+      const expectedPath = path.join(destinationRoot, payloadName(0))
       expect(existsSync(expectedPath)).toBe(false)
 
       const summary = await manager.add({
@@ -180,13 +250,110 @@ describe('engine transfer', () => {
       expect(stats.done).toBe(true)
 
       const downloaded = await readFile(
-        path.join(destinationRoot, metadata.files[0]?.path ?? 'payload.bin')
+        path.join(destinationRoot, metadata.files[0]?.path ?? payloadName(0))
       )
       expect(downloaded.byteLength).toBe(PAYLOAD_BYTES)
-      expect(Buffer.from(downloaded).equals(Buffer.from(fixture.payload))).toBe(
-        true
-      )
+      expect(
+        Buffer.from(downloaded).equals(Buffer.from(fixture.payloads[0] ?? []))
+      ).toBe(true)
       await manager.closeAll()
+    },
+    TRANSFER_TIMEOUT_MS
+  )
+
+  it(
+    'downloads only the selected file of a multi-file torrent',
+    async () => {
+      const fixture = await seedLocally(2)
+      const metadata = await validateTorrentMetadata(
+        fixture.torrentBytes,
+        new EgressPolicy()
+      )
+      const wanted = metadata.files.findIndex(file =>
+        file.path.endsWith(payloadName(1))
+      )
+      expect(wanted).toBeGreaterThanOrEqual(0)
+
+      const downloader = await downloaderFor(fixture, metadata, [wanted])
+      expect(downloader.session().admitPeer(fixture.allowedPeer)).toBe(true)
+
+      await waitFor(
+        () => downloader.session().stats().downloaded >= PAYLOAD_BYTES,
+        'The selected file never completed'
+      )
+
+      const stats = downloader.session().stats()
+      const other = wanted === 0 ? 1 : 0
+      // Exactly the selected file's bytes crossed the wire, and the
+      // deselected file received none of them.
+      expect(stats.downloaded).toBe(PAYLOAD_BYTES)
+      expect(stats.fileDownloaded[other]).toBe(0)
+      expect(stats.done).toBe(false)
+
+      const selectedPath = path.join(
+        downloader.destinationRoot,
+        metadata.files[wanted]?.path ?? ''
+      )
+      const downloaded = await readFile(selectedPath)
+      expect(
+        Buffer.from(downloaded).equals(Buffer.from(fixture.payloads[1] ?? []))
+      ).toBe(true)
+
+      await downloader.manager.closeAll()
+    },
+    TRANSFER_TIMEOUT_MS
+  )
+
+  it(
+    'admits nothing while paused and resumes to completion',
+    async () => {
+      const fixture = await seedLocally()
+      const metadata = await validateTorrentMetadata(
+        fixture.torrentBytes,
+        new EgressPolicy()
+      )
+      const downloader = await downloaderFor(fixture, metadata, [0])
+
+      await downloader.manager.pause(metadata.infoHash)
+      // A paused generation admits no peer at all, whatever discovered it.
+      expect(downloader.session().admitPeer(fixture.allowedPeer)).toBe(false)
+      expect(downloader.session().stats().numPeers).toBe(0)
+
+      await downloader.manager.resume(metadata.infoHash)
+      expect(downloader.session().admitPeer(fixture.allowedPeer)).toBe(true)
+
+      await waitFor(
+        () => downloader.manager.summary(metadata.infoHash).progress >= 1,
+        'The resumed transfer never completed'
+      )
+
+      await downloader.manager.closeAll()
+    },
+    TRANSFER_TIMEOUT_MS
+  )
+
+  it(
+    'releases the info hash only after removal completes',
+    async () => {
+      const fixture = await seedLocally()
+      const metadata = await validateTorrentMetadata(
+        fixture.torrentBytes,
+        new EgressPolicy()
+      )
+      const downloader = await downloaderFor(fixture, metadata, [0])
+      expect(downloader.manager.registry.has(metadata.infoHash)).toBe(true)
+
+      await downloader.manager.remove(metadata.infoHash)
+
+      expect(downloader.manager.registry.has(metadata.infoHash)).toBe(false)
+      expect(() => downloader.manager.summary(metadata.infoHash)).toThrow()
+      // The hash is genuinely gone: a repeat is an explicit NOT_FOUND rather
+      // than a second destroy of live state.
+      await expect(
+        downloader.manager.remove(metadata.infoHash)
+      ).rejects.toMatchObject({ code: 'NOT_FOUND' })
+
+      await downloader.manager.closeAll()
     },
     TRANSFER_TIMEOUT_MS
   )
