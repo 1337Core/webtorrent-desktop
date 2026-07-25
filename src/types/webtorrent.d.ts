@@ -73,11 +73,13 @@ declare module 'webtorrent' {
     deselect?: boolean
     destroyStoreOnDestroy?: boolean
     path?: string
+    paused?: boolean
     private?: boolean
     secure?: 0 | 1 | 2
     skipVerify?: boolean
     store?: ChunkStoreConstructor
     storeCacheSlots?: number
+    storeOpts?: Record<string, unknown>
     urlList?: string[]
   }
 
@@ -146,6 +148,8 @@ declare module 'webtorrent' {
     private: boolean
 
     addPeer(peer: string | object, source?: string): boolean
+    deselect(start: number, end: number): void
+    select(start: number, end: number, priority?: number): void
     destroy(
       options?: { destroyStore?: boolean } | ((error?: Error) => void),
       callback?: (error?: Error) => void
