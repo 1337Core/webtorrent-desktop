@@ -11,12 +11,16 @@ import { createHash } from 'node:crypto'
 import { createWriteStream } from 'node:fs'
 import {
   access,
+  lstat,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
+  readlink,
   rename,
   rm,
-  stat
+  stat,
+  writeFile
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -46,6 +50,7 @@ const NODE_DATACHANNEL = Object.freeze({
   version: '0.32.3'
 })
 
+const ELECTRON_LAUNCHER = 'Electron.app/Contents/MacOS/Electron'
 const verifyOnly = process.argv.includes('--verify')
 const records = []
 
@@ -132,6 +137,112 @@ function isMachOArm64(target) {
   return described.includes('Mach-O') && described.includes('arm64')
 }
 
+function validateElectronArchiveEntries(archivePath) {
+  const entries = execFileSync('/usr/bin/unzip', ['-Z1', archivePath], {
+    encoding: 'utf8'
+  })
+    .split('\n')
+    .filter(entry => entry !== '')
+
+  const allowedTopLevelFiles = new Set([
+    'LICENSE',
+    'LICENSES.chromium.html',
+    'version'
+  ])
+
+  for (const entry of entries) {
+    if (entry.includes('\0') || entry.includes('\\') || entry.startsWith('/')) {
+      fail(`unsafe Electron archive member: ${entry}`)
+    }
+
+    const components = entry.replace(/\/$/, '').split('/')
+    if (
+      components.some(
+        component => component === '' || component === '.' || component === '..'
+      )
+    ) {
+      fail(`unsafe Electron archive member: ${entry}`)
+    }
+    if (
+      components[0] !== 'Electron.app' &&
+      !(components.length === 1 && allowedTopLevelFiles.has(components[0]))
+    ) {
+      fail(`unexpected Electron archive member: ${entry}`)
+    }
+  }
+
+  if (!entries.includes(ELECTRON_LAUNCHER)) {
+    fail(`Electron archive is missing ${ELECTRON_LAUNCHER}`)
+  }
+  for (const required of allowedTopLevelFiles) {
+    if (!entries.includes(required)) {
+      fail(`Electron archive is missing ${required}`)
+    }
+  }
+}
+
+async function validateExtractedElectronTree(target, appRoot) {
+  for (const entry of await readdir(target)) {
+    const child = path.join(target, entry)
+    const info = await lstat(child)
+
+    if (info.isSymbolicLink()) {
+      const resolved = path.resolve(path.dirname(child), await readlink(child))
+      if (
+        resolved !== appRoot &&
+        !resolved.startsWith(`${appRoot}${path.sep}`)
+      ) {
+        fail(`Electron archive contains an escaping symbolic link: ${child}`)
+      }
+      continue
+    }
+    if (info.isDirectory()) {
+      await validateExtractedElectronTree(child, appRoot)
+      continue
+    }
+    if (!info.isFile()) {
+      fail(`Electron archive contains an unsupported entry type: ${child}`)
+    }
+  }
+}
+
+async function extractElectron(archivePath) {
+  validateElectronArchiveEntries(archivePath)
+
+  const electronPackage = path.join(root, 'node_modules', 'electron')
+  const destination = path.join(electronPackage, 'dist')
+  const staging = await mkdtemp(path.join(electronPackage, '.dist-'))
+  let moved = false
+
+  try {
+    execFileSync('/usr/bin/ditto', ['-x', '-k', archivePath, staging], {
+      stdio: 'ignore'
+    })
+
+    const appRoot = path.join(staging, 'Electron.app')
+    await validateExtractedElectronTree(staging, appRoot)
+    const version = (
+      await readFile(path.join(staging, 'version'), 'utf8')
+    ).trim()
+    if (version !== ELECTRON.version) {
+      fail(`Electron archive reports ${version}, expected ${ELECTRON.version}`)
+    }
+
+    const launcher = path.join(staging, ELECTRON_LAUNCHER)
+    if (!isMachOArm64(launcher)) {
+      fail('extracted Electron is not Mach-O arm64')
+    }
+
+    await rename(staging, destination)
+    moved = true
+    await writeFile(path.join(electronPackage, 'path.txt'), ELECTRON_LAUNCHER, {
+      mode: 0o600
+    })
+  } finally {
+    if (!moved) await rm(staging, { force: true, recursive: true })
+  }
+}
+
 async function verifyElectron() {
   const installed = path.join(
     root,
@@ -143,47 +254,47 @@ async function verifyElectron() {
     'MacOS',
     'Electron'
   )
-  if (await exists(installed)) {
-    if (!isMachOArm64(installed)) fail('installed Electron is not Mach-O arm64')
-    const reported = execFileSync(installed, ['--version'], {
-      encoding: 'utf8',
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
-    })
-    // ELECTRON_RUN_AS_NODE reports the bundled Node; the version file is the
-    // authority for the Electron line itself.
-    const versionFile = path.join(
-      root,
-      'node_modules',
-      'electron',
-      'dist',
-      'version'
-    )
-    const version = (await readFile(versionFile, 'utf8')).trim()
-    if (version !== ELECTRON.version) {
-      fail(
-        `installed Electron reports ${version}, expected ${ELECTRON.version}`
-      )
-    }
-    record({
-      artifact: 'electron',
-      hash: null,
-      result: 'present',
-      source: `${installed} (node ${reported.trim()})`
-    })
-    return
+  const pathFile = path.join(root, 'node_modules', 'electron', 'path.txt')
+  let archiveSource = null
+
+  if (!(await exists(installed))) {
+    const archive = await ensureArchive(ELECTRON)
+    if (!archive)
+      fail('Electron runtime is absent and --verify cannot fetch it')
+    await extractElectron(archive.path)
+    archiveSource = archive.source
   }
 
-  const archive = await ensureArchive(ELECTRON)
-  if (!archive) fail('Electron runtime is absent and --verify cannot fetch it')
+  if (!isMachOArm64(installed)) fail('installed Electron is not Mach-O arm64')
+  const reported = execFileSync(installed, ['--version'], {
+    encoding: 'utf8',
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
+  })
+  // ELECTRON_RUN_AS_NODE reports the bundled Node; the version file is the
+  // authority for the Electron line itself.
+  const versionFile = path.join(
+    root,
+    'node_modules',
+    'electron',
+    'dist',
+    'version'
+  )
+  const version = (await readFile(versionFile, 'utf8')).trim()
+  if (version !== ELECTRON.version) {
+    fail(`installed Electron reports ${version}, expected ${ELECTRON.version}`)
+  }
+  if (!(await exists(pathFile))) {
+    if (verifyOnly) fail('electron/path.txt is absent')
+    await writeFile(pathFile, ELECTRON_LAUNCHER, { mode: 0o600 })
+  } else if ((await readFile(pathFile, 'utf8')) !== ELECTRON_LAUNCHER) {
+    fail(`electron/path.txt must contain ${ELECTRON_LAUNCHER}`)
+  }
   record({
     artifact: 'electron',
-    hash: ELECTRON.archiveSha256,
-    result: 'archive-verified',
-    source: archive.source
+    hash: archiveSource ? ELECTRON.archiveSha256 : null,
+    result: archiveSource ? 'installed' : 'present',
+    source: archiveSource ?? `${installed} (node ${reported.trim()})`
   })
-  fail(
-    'Electron archive verified but not extracted; run without --verify after removing node_modules/electron/dist'
-  )
 }
 
 /**
