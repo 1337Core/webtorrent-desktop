@@ -621,6 +621,82 @@ describe('EngineRuntime', () => {
     expect(archive.remove).toHaveBeenCalledWith(INFO_HASH)
   })
 
+  it('serves the torrent’s own subtitle files as proxy-backed tracks', async () => {
+    const english = new TextEncoder().encode(
+      [
+        '1',
+        '00:00:01,000 --> 00:00:04,000',
+        'Good evening, and welcome to the show.',
+        ''
+      ].join('\n')
+    )
+    const manager = {
+      mediaFile: vi.fn((_infoHash: string, index: number) =>
+        index === 2
+          ? {
+              createReadStream: () => Readable.from([english]),
+              length: english.byteLength
+            }
+          : null
+      ),
+      subtitleFiles: vi.fn(() => [
+        { index: 2, path: 'payload/movie.en.srt' },
+        { index: 3, path: 'payload/missing.srt' }
+      ])
+    }
+    const proxy = new MediaProxy()
+    await proxy.start()
+    const runtime = new EngineRuntime({
+      mediaProxy: proxy,
+      torrentManager: manager as unknown as TorrentManager
+    })
+    const operation: EngineCommand = {
+      command: 'open-subtitles',
+      payload: { infoHash: INFO_HASH }
+    }
+
+    const result = await runtime.execute(operation, signal())
+
+    expectStrictResult(operation, result)
+    if (!result.ok || result.result.command !== 'open-subtitles') {
+      throw new Error('The runtime did not return subtitle tracks')
+    }
+    // The unreadable file is skipped rather than failing the readable one.
+    expect(result.result.value.tracks).toHaveLength(1)
+    expect(result.result.value.tracks[0]).toMatchObject({
+      fileIndex: 2,
+      label: 'English',
+      language: 'en'
+    })
+    // No subtitle text crosses the command boundary.
+    expect(JSON.stringify(result)).not.toContain('welcome to the show')
+    await proxy.shutdown()
+  })
+
+  it('returns no tracks when the torrent carries no subtitle file', async () => {
+    const manager = {
+      mediaFile: vi.fn(() => null),
+      subtitleFiles: vi.fn(() => [])
+    }
+    const proxy = new MediaProxy()
+    await proxy.start()
+    const runtime = new EngineRuntime({
+      mediaProxy: proxy,
+      torrentManager: manager as unknown as TorrentManager
+    })
+
+    const result = await runtime.execute(
+      { command: 'open-subtitles', payload: { infoHash: INFO_HASH } },
+      signal()
+    )
+
+    if (!result.ok || result.result.command !== 'open-subtitles') {
+      throw new Error('The runtime did not return subtitle tracks')
+    }
+    expect(result.result.value.tracks).toEqual([])
+    await proxy.shutdown()
+  })
+
   it('reports an unavailable engine when no clients are attached', async () => {
     const runtime = new EngineRuntime()
     const operation: EngineCommand = {

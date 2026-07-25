@@ -73,6 +73,11 @@ export function MediaPlayer({
   const [stalled, setStalled] = useState(false)
   const [fileProgress, setFileProgress] = useState(0)
   const [speeds, setSpeeds] = useState({ download: 0, upload: 0 })
+  const [subtitles, setSubtitles] = useState<
+    ReadonlyArray<Readonly<{ label: string; language: string; url: string }>>
+  >([])
+  const [subtitleIndex, setSubtitleIndex] = useState(-1)
+  const [subtitleMenuOpen, setSubtitleMenuOpen] = useState(false)
   const mediaRef = useRef<HTMLVideoElement | null>(null)
   const leaseRef = useRef<string | null>(null)
   const lastUpdateRef = useRef(0)
@@ -206,6 +211,37 @@ export function MediaPlayer({
     }
   }, [onControlsHiddenChange, paused])
 
+  // The original looked for the torrent's own subtitle files as soon as a
+  // video started; the engine converts them and serves each one by URL.
+  useEffect(() => {
+    if (url === null) return undefined
+    let active = true
+    const timer = setTimeout(() => {
+      void runCommand({
+        command: 'open-subtitles',
+        payload: { infoHash }
+      }).then(outcome => {
+        if (!active || !outcome.ok) return
+        setSubtitles(outcome.value.tracks)
+      })
+    }, 0)
+    return () => {
+      active = false
+      clearTimeout(timer)
+    }
+  }, [infoHash, url])
+
+  // Only the chosen track shows; the rest stay loaded but hidden, as the
+  // original's track handling did.
+  useEffect(() => {
+    const media = mediaRef.current
+    if (!media) return
+    for (let index = 0; index < media.textTracks.length; index += 1) {
+      const track = media.textTracks[index]
+      if (track) track.mode = index === subtitleIndex ? 'showing' : 'hidden'
+    }
+  }, [subtitleIndex, subtitles])
+
   const playPause = useCallback(() => {
     const media = mediaRef.current
     if (!media) return
@@ -273,7 +309,18 @@ export function MediaPlayer({
             }}
             ref={mediaRef}
             src={url}
-          />
+          >
+            {subtitles.map((track, index) => (
+              <track
+                default={index === subtitleIndex}
+                key={track.url}
+                kind="subtitles"
+                label={track.label}
+                src={track.url}
+                {...(track.language === '' ? {} : { srcLang: track.language })}
+              />
+            ))}
+          </video>
         )}
 
         {stalled || url === null ? (
@@ -375,6 +422,24 @@ export function MediaPlayer({
           fullscreen
         </i>
 
+        <i
+          aria-label="Closed captions"
+          className={`icon closed-caption float-right ${
+            subtitles.length === 0
+              ? 'disabled'
+              : subtitleIndex >= 0
+                ? 'active'
+                : ''
+          }`}
+          onClick={() => {
+            if (subtitles.length === 0) return
+            setSubtitleMenuOpen(open => !open)
+          }}
+          role="button"
+        >
+          closed_caption
+        </i>
+
         <div className="volume float-left">
           <i
             aria-label="Mute"
@@ -398,6 +463,36 @@ export function MediaPlayer({
             value={volume}
           />
         </div>
+
+        {subtitleMenuOpen && subtitles.length > 0 ? (
+          <ul className="options-list">
+            {subtitles.map((track, index) => (
+              <li
+                key={track.url}
+                onClick={() => {
+                  setSubtitleIndex(index)
+                  setSubtitleMenuOpen(false)
+                }}
+              >
+                <i className="icon">
+                  {`radio_button_${index === subtitleIndex ? 'checked' : 'unchecked'}`}
+                </i>
+                {track.label}
+              </li>
+            ))}
+            <li
+              onClick={() => {
+                setSubtitleIndex(-1)
+                setSubtitleMenuOpen(false)
+              }}
+            >
+              <i className="icon">
+                {`radio_button_${subtitleIndex === -1 ? 'checked' : 'unchecked'}`}
+              </i>
+              None
+            </li>
+          </ul>
+        ) : null}
 
         <span className="time float-left">
           {`${formatTime(currentTime, duration)} / ${formatTime(duration, duration)}`}

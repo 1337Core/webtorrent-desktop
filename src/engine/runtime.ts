@@ -19,6 +19,8 @@ import {
   TorrentCreationError,
   TorrentCreationService
 } from './torrent-creation'
+import { Readable } from 'node:stream'
+import { relabelTracks, SUBTITLE_LIMITS, toSubtitleTrack } from './subtitles'
 import { TorrentArchive, TorrentArchiveError } from './torrent-archive'
 import { TorrentManager, TorrentManagerError } from './torrent-manager'
 import type { ValidatedTorrentMetadata } from './torrent-metadata'
@@ -56,6 +58,33 @@ type EngineRuntimeOptions = Readonly<{
   resumeSelection?: (infoHash: string) => Promise<ReadonlyArray<string> | null>
   torrentManager?: TorrentManager
 }>
+
+/** Reads one bounded stream fully; anything longer than the bound fails. */
+async function readAll(
+  stream: Readable,
+  maxBytes: number
+): Promise<Uint8Array> {
+  const chunks: Uint8Array[] = []
+  let total = 0
+  for await (const chunk of stream) {
+    const bytes =
+      chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk as ArrayBuffer)
+    total += bytes.byteLength
+    if (total > maxBytes) {
+      stream.destroy()
+      throw new Error('SUBTITLE_TOO_LARGE')
+    }
+    chunks.push(bytes)
+  }
+
+  const merged = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    merged.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return merged
+}
 
 /** Raised when a torrent command arrives before the clients are attached. */
 class EngineRuntimeUnavailableError extends Error {
@@ -547,6 +576,8 @@ export class EngineRuntime {
       }
       case 'open-media':
         return this.#openMedia(operation)
+      case 'open-subtitles':
+        return await this.#openSubtitles(operation)
       case 'heartbeat-media': {
         const proxy = this.#requireMediaProxy()
         const lease = proxy.heartbeat(operation.payload.leaseId)
@@ -767,6 +798,76 @@ export class EngineRuntime {
           leaseId: lease.leaseId,
           url: lease.url
         }
+      }
+    }
+  }
+
+  /**
+   * Converts the torrent's own completed subtitle files and hands each one to
+   * the loopback proxy. The renderer receives opaque URLs, never the text and
+   * never a path, and an unreadable or unsupported file is skipped rather than
+   * failing the others.
+   */
+  async #openSubtitles(
+    operation: Extract<EngineCommand, { command: 'open-subtitles' }>
+  ): Promise<EngineCommandResult> {
+    const manager = this.#requireManager()
+    const proxy = this.#requireMediaProxy()
+    const { infoHash } = operation.payload
+
+    const candidates = manager
+      .subtitleFiles(infoHash)
+      .slice(0, SUBTITLE_LIMITS.maxTracks)
+    const tracks: Array<{
+      fileIndex: number
+      label: string
+      language: string
+      leaseId: string
+      url: string
+    }> = []
+
+    for (const candidate of candidates) {
+      const file = manager.mediaFile(infoHash, candidate.index)
+      if (!file || file.length > SUBTITLE_LIMITS.maxSourceBytes) continue
+
+      let track
+      try {
+        track = toSubtitleTrack(
+          await readAll(
+            file.createReadStream({ end: file.length - 1, start: 0 }),
+            SUBTITLE_LIMITS.maxSourceBytes
+          ),
+          { fallbackLabel: candidate.path.split('/').at(-1) ?? 'Subtitle' }
+        )
+      } catch {
+        continue
+      }
+
+      const vtt = new TextEncoder().encode(track.vtt)
+      const lease = proxy.open({
+        fileIndex: candidate.index,
+        infoHash,
+        source: {
+          contentType: 'text/vtt',
+          createReadStream: range =>
+            Readable.from([vtt.subarray(range.start, range.end + 1)]),
+          length: vtt.byteLength
+        }
+      })
+      tracks.push({
+        fileIndex: candidate.index,
+        label: track.label,
+        language: track.language,
+        leaseId: lease.leaseId,
+        url: lease.url
+      })
+    }
+
+    return {
+      ok: true,
+      result: {
+        command: 'open-subtitles',
+        value: { infoHash, tracks: relabelTracks(tracks) as typeof tracks }
       }
     }
   }

@@ -10,6 +10,7 @@ import type {
   ResumeExpectation,
   ResumeSidecar
 } from './resume-store'
+import { isSubtitlePath } from './subtitles'
 import type { ValidatedTorrentMetadata } from './torrent-metadata'
 import { TorrentRegistry, type TorrentOwner } from './torrent-registry'
 
@@ -219,6 +220,25 @@ export class TorrentManager {
     await this.#guard(() => session.remove())
     this.#sessions.delete(infoHash)
     await this.#resume?.remove(infoHash).catch(() => undefined)
+  }
+
+  /**
+   * Every completed subtitle file of one torrent, in manifest order. Only a
+   * fully downloaded file is offered: a partial subtitle would parse into a
+   * truncated track.
+   */
+  subtitleFiles(
+    infoHash: string
+  ): ReadonlyArray<Readonly<{ index: number; path: string }>> {
+    const session = this.#require(infoHash)
+    const stats = session.stats()
+    return session.metadata.files
+      .filter(
+        file =>
+          isSubtitlePath(file.path) &&
+          (stats.fileDownloaded[file.index] ?? 0) === file.length
+      )
+      .map(file => ({ index: file.index, path: file.path }))
   }
 
   /** The complete current selection, which paging never truncates. */

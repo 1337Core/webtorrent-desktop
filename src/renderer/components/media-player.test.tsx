@@ -21,6 +21,13 @@ const MEDIA_URL = `http://127.0.0.1:52000/v1/media/${'a'.repeat(43)}`
 let commands: EngineCommand[] = []
 let failOpen = false
 let onUnsupported = vi.fn()
+let subtitleTracks: Array<{
+  fileIndex: number
+  label: string
+  language: string
+  leaseId: string
+  url: string
+}> = []
 
 function response(operation: EngineCommand): TorrentCommandResult {
   const envelope = {
@@ -62,6 +69,21 @@ function response(operation: EngineCommand): TorrentCommandResult {
           }
         }
       } as TorrentCommandResult
+    case 'open-subtitles':
+      return {
+        ...envelope,
+        ok: true,
+        value: {
+          ok: true,
+          result: {
+            command: 'open-subtitles',
+            value: {
+              infoHash: INFO_HASH,
+              tracks: subtitleTracks
+            }
+          }
+        }
+      } as TorrentCommandResult
     case 'heartbeat-media':
       return {
         ...envelope,
@@ -93,6 +115,15 @@ beforeEach(() => {
   commands = []
   failOpen = false
   onUnsupported = vi.fn()
+  subtitleTracks = [
+    {
+      fileIndex: 2,
+      label: 'English',
+      language: 'en',
+      leaseId: '00000000-0000-4000-8000-000000000021',
+      url: `http://127.0.0.1:52000/v1/media/${'b'.repeat(43)}`
+    }
+  ]
   Object.defineProperty(window, 'desktop', {
     configurable: true,
     value: {
@@ -306,5 +337,59 @@ describe('MediaPlayer', () => {
 
     fireEvent.ended(element)
     expect(onClose).toHaveBeenCalledOnce()
+  })
+
+  it("offers the torrent's subtitle tracks through the caption control", async () => {
+    const user = userEvent.setup()
+    render(
+      <MediaPlayer
+        fileIndex={1}
+        fileName="payload/second.bin"
+        infoHash={INFO_HASH}
+        onClose={vi.fn()}
+      />
+    )
+    await screen.findByTestId('media-element')
+
+    await waitFor(() =>
+      expect(
+        commands.some(command => command.command === 'open-subtitles')
+      ).toBe(true)
+    )
+    const caption = await screen.findByRole('button', {
+      name: 'Closed captions'
+    })
+    await waitFor(() => expect(caption.className).not.toContain('disabled'))
+
+    await user.click(caption)
+    await user.click(await screen.findByText('English'))
+
+    expect(caption.className).toContain('active')
+    const track = document.querySelector('track')
+    expect(track?.getAttribute('src')).toBe(subtitleTracks[0]?.url)
+    expect(track?.getAttribute('srclang')).toBe('en')
+  })
+
+  it('leaves the caption control disabled with no subtitle to show', async () => {
+    subtitleTracks = []
+    render(
+      <MediaPlayer
+        fileIndex={1}
+        fileName="payload/second.bin"
+        infoHash={INFO_HASH}
+        onClose={vi.fn()}
+      />
+    )
+    await screen.findByTestId('media-element')
+    await waitFor(() =>
+      expect(
+        commands.some(command => command.command === 'open-subtitles')
+      ).toBe(true)
+    )
+
+    expect(
+      screen.getByRole('button', { name: 'Closed captions' }).className
+    ).toContain('disabled')
+    expect(document.querySelector('track')).toBeNull()
   })
 })

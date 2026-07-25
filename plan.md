@@ -1278,6 +1278,15 @@ The UI distinguishes “checking,” “downloading,” “seeding,” “paused
 “missing files,” and “error.” It must not show a torrent as complete merely
 because legacy JSON says it was complete.
 
+Subtitles ride the same boundary. The engine converts a torrent's own
+completed `.srt` and basic-WebVTT files with the pinned `subtitle` parser,
+names each track by the language `tinyld` detects in its dialogue, and hands
+the WebVTT to the loopback proxy under its own opaque token. The renderer
+receives labels and URLs only: no subtitle text and no path cross the command
+boundary, an unreadable or unsupported file is skipped rather than failing the
+others, and only fully downloaded files are offered because a partial subtitle
+would parse into a truncated track.
+
 ### 9.11 Streaming proxy
 
 Do not expose WebTorrent’s built-in Node server to the renderer. Its `origin`
@@ -1529,8 +1538,8 @@ The parity checklist, tracked to completion:
   five columns, and the drop placeholder. Done, except the poster artwork that
   section 4.2 defers.
 - **Player** — letterboxed media, the self-drawn control bar, the stall
-  overlay, and the unsupported-media modal. Done, except subtitle tracks and
-  the closed-caption control, which land with the subtitle work.
+  overlay, the unsupported-media modal, and the closed-caption control with
+  its track menu. Done.
 - **Create torrent** — heading, file count and size, path attribute, advanced
   settings, and the Cancel / Create Torrent pair. Done.
 - **Preferences** — the sections and path selectors for the settings this
@@ -1548,8 +1557,8 @@ The parity checklist, tracked to completion:
   is not ported: the create-torrent source still comes from the main-owned
   chooser, which is what measures it.
 - **Outstanding** — the two unported menu items above, dropped-media creation,
-  the poster artwork section 4.2 defers, and the subtitle track and its
-  closed-caption control.
+  the poster artwork section 4.2 defers, and opening a subtitle file the owner
+  picks from outside the torrent.
 
 ### 11.3 Renderer behavior
 

@@ -106,6 +106,7 @@ const engineCommandNameSchema = z.enum([
   'list-torrents',
   'open-media',
   'open-preparation',
+  'open-subtitles',
   'pause-torrent',
   'remove-torrent',
   'restore-torrent',
@@ -327,6 +328,17 @@ export const engineCommandSchema = z.discriminatedUnion('command', [
     payload: z.strictObject({
       infoHash: infoHashSchema,
       fileIndex: z.number().int().min(0).max(99_999)
+    })
+  }),
+  /**
+   * Offers the torrent's own completed subtitle files as WebVTT tracks the
+   * player can attach. Each track is served by the same loopback proxy under
+   * its own opaque token, so no subtitle text crosses the command boundary.
+   */
+  z.strictObject({
+    command: z.literal('open-subtitles'),
+    payload: z.strictObject({
+      infoHash: infoHashSchema
     })
   }),
   z.strictObject({
@@ -620,6 +632,27 @@ const engineCommandSuccessSchema = z.discriminatedUnion('command', [
     })
   }),
   z.strictObject({
+    command: z.literal('open-subtitles'),
+    value: z.strictObject({
+      infoHash: infoHashSchema,
+      tracks: z
+        .array(
+          z.strictObject({
+            fileIndex: z.number().int().min(0).max(99_999),
+            label: z.string().min(1).max(64),
+            language: z.string().max(16),
+            leaseId: uuidSchema,
+            url: z
+              .string()
+              .regex(
+                /^http:\/\/127\.0\.0\.1:\d{1,5}\/v1\/media\/[A-Za-z0-9_-]{43}$/u
+              )
+          })
+        )
+        .max(8)
+    })
+  }),
+  z.strictObject({
     command: z.literal('heartbeat-media'),
     value: z.strictObject({
       leaseId: uuidSchema,
@@ -757,6 +790,11 @@ export function engineResultMatchesOperation(
         result.result.command === operation.command &&
         result.result.value.infoHash === operation.payload.infoHash &&
         result.result.value.fileIndex === operation.payload.fileIndex
+      )
+    case 'open-subtitles':
+      return (
+        result.result.command === operation.command &&
+        result.result.value.infoHash === operation.payload.infoHash
       )
     case 'heartbeat-media':
     case 'close-media':
