@@ -106,6 +106,24 @@ async function smokeDataDirectories() {
   )
 }
 
+/**
+ * The complete renderer capability inventory, sorted as the probe reports it.
+ * A packaged build that exposes anything else fails this gate.
+ */
+const EXPECTED_DESKTOP_API = [
+  'choosePath',
+  'getBootstrap',
+  'onEngineStatus',
+  'onMenuAction',
+  'onOpenIntent',
+  'openExternalPlayer',
+  'openTorrentMenu',
+  'resolveDroppedTorrents',
+  'restartEngine',
+  'runTorrentCommand',
+  'setPreferences'
+].join(',')
+
 for (const scenario of scenarios) {
   const { stdout } = await execFile(executable, [scenario.argument], {
     env: smokeEnvironment,
@@ -123,8 +141,7 @@ for (const scenario of scenarios) {
     result.protocolVersion !== 1 ||
     result.renderer?.bootstrapCommitted !== true ||
     result.renderer?.bufferPresent !== false ||
-    result.renderer?.desktopApiKeys?.join(',') !==
-      'getBootstrap,onEngineStatus,restartEngine' ||
+    result.renderer?.desktopApiKeys?.join(',') !== EXPECTED_DESKTOP_API ||
     result.renderer?.navigationDenied !== true ||
     result.renderer?.networkFetchDenied !== true ||
     result.renderer?.pageUrl !== 'app://bundle/index.html' ||
