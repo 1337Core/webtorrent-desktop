@@ -13,5 +13,5 @@
       "expect-webdriverio"
     ]
   },
-  "include": ["e2e/**/*.ts", "wdio.conf.ts"]
+  "include": ["e2e/**/*.ts", "wdio.conf.ts", "src/types/torrent-packages.d.ts"]
 }
