@@ -6,6 +6,7 @@ import {
   type CommitBarrierResult
 } from './metadata-commit-barrier'
 import { desiredPieceRanges, type PieceRange } from './piece-selection'
+import type { PeerBudget } from './peer-budget'
 import type { ValidatedTorrentMetadata } from './torrent-metadata'
 import {
   TorrentRegistry,
@@ -125,6 +126,8 @@ export type DiskTorrentAddInput = Readonly<{
 }>
 
 export type DiskTorrentSessionOptions = Readonly<{
+  /** The shared engine-wide admission budget, when one is in force. */
+  budget?: PeerBudget
   createActivation?: (session: DiskTorrentSession) => TorrentActivation | null
   destroyTimeoutMs?: number
   onCommitFailure?: (infoHash: string, result: CommitBarrierResult) => void
@@ -169,6 +172,7 @@ export class DiskTorrentSession {
   readonly #destroyTimeoutMs: number
   readonly #metadata: ValidatedTorrentMetadata
   readonly #owner: TorrentOwner
+  readonly #budget: PeerBudget | null
   readonly #peerFilter: (address: string) => boolean
   readonly #registry: TorrentRegistry
   readonly #reservation: TorrentReservation
@@ -193,6 +197,7 @@ export class DiskTorrentSession {
       options.destroyTimeoutMs ?? DISK_TORRENT_TIMEOUTS.destroyMs
     this.#metadata = metadata
     this.#owner = owner
+    this.#budget = options.budget ?? null
     this.#peerFilter = options.peerFilter ?? (() => true)
     this.#registry = registry
     this.#reservation = reservation
@@ -344,6 +349,7 @@ export class DiskTorrentSession {
       return false
     }
     if (!this.#peerFilter(address)) return false
+    if (!this.#admitsBudget(address)) return false
     try {
       return torrent.addPeer(address, source)
     } catch {
@@ -369,11 +375,25 @@ export class DiskTorrentSession {
     }
     const address = peer.remoteAddress
     if (typeof address !== 'string' || !this.#peerFilter(address)) return false
+    if (!this.#admitsBudget(peer.id ?? address)) return false
     try {
       return torrent.addPeer(peer, source)
     } catch {
       return false
     }
+  }
+
+  /**
+   * The shared engine-wide bound. WebTorrent's own `maxConns` is per torrent,
+   * so without this one torrent could hold the whole engine's capacity.
+   */
+  #admitsBudget(peer: string): boolean {
+    return (
+      this.#budget?.admit({
+        key: `${this.#metadata.infoHash}:${this.#reservation.generationId}`,
+        peer
+      }) ?? true
+    )
   }
 
   /**
@@ -447,6 +467,10 @@ export class DiskTorrentSession {
     await this.#storeSupervisor.close()
 
     if (this.#committed) this.#registry.release(this.#metadata.infoHash)
+    // The generation's peer records return to the engine with it.
+    this.#budget?.release(
+      `${this.#metadata.infoHash}:${this.#reservation.generationId}`
+    )
     this.#state = 'removed'
   }
 

@@ -103,6 +103,18 @@ export class TorrentManager {
     return this.#registry
   }
 
+  /**
+   * Live peer transports across every owned torrent. The shared admission
+   * budget reads this rather than tracking transports itself.
+   */
+  get liveTransports(): number {
+    let total = 0
+    for (const session of this.#sessions.values()) {
+      total += session.stats().numPeers
+    }
+    return total
+  }
+
   get size(): number {
     return this.#sessions.size
   }

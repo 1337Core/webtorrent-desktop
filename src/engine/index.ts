@@ -18,6 +18,7 @@ import { TorrentCreationService } from './torrent-creation'
 import { validateTorrentMetadata } from './torrent-metadata'
 import { TrackerActivation } from './tracker-activation'
 import { TrackerHttpRequestGate, TrackerHttpTransport } from './tracker-http'
+import { PeerBudget } from './peer-budget'
 import { TorrentManager } from './torrent-manager'
 import {
   PendingSignalingBudget,
@@ -147,10 +148,20 @@ const torrentArchive = new TorrentArchive({
   directory: path.join(forkDirectory, 'torrents')
 })
 
-const torrentManager = new TorrentManager({
+/**
+ * One shared admission budget for the whole engine. WebTorrent bounds
+ * connections per torrent, so without this a single busy torrent could hold
+ * every peer slot across both clients.
+ */
+const peerBudget = new PeerBudget({
+  liveTransports: () => torrentManager.liveTransports
+})
+
+const torrentManager: TorrentManager = new TorrentManager({
   resolveClient,
   resume: resumeStore,
   sessionOptions: {
+    budget: peerBudget,
     createActivation: session => {
       const tiers = session.metadata.announceTiers
       if (tiers.length === 0) return null
