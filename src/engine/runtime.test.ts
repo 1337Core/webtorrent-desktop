@@ -14,6 +14,10 @@ import {
 } from './preparation-store'
 import { EngineRuntime } from './runtime'
 import { DiskTorrentError } from './disk-torrent'
+import {
+  TorrentCreationError,
+  type TorrentCreationService
+} from './torrent-creation'
 import type { TorrentManager } from './torrent-manager'
 import { TorrentManager as TorrentManagerImpl } from './torrent-manager'
 import type { ValidatedTorrentMetadata } from './torrent-metadata'
@@ -514,22 +518,101 @@ describe('EngineRuntime', () => {
     })
   })
 
+  it('creates a torrent and adds it through the guarded path', async () => {
+    const prepared = metadata({ fileCount: 2 })
+    const summary = {
+      downloadSpeed: 0,
+      downloaded: 0,
+      fileCount: 2,
+      infoHash: INFO_HASH,
+      length: prepared.length,
+      name: prepared.name,
+      peerCount: 0,
+      private: false,
+      progress: 0,
+      selectedFileCount: 2,
+      state: 'paused' as const,
+      timeRemainingMs: null,
+      uploadSpeed: 0,
+      uploaded: 0
+    }
+    const manager = { add: vi.fn(async () => summary) }
+    const creationService = {
+      create: vi.fn(async () => ({
+        metadata: prepared,
+        seedRoot: '/authorized/source'
+      }))
+    }
+    const runtime = new EngineRuntime({
+      creationService: creationService as unknown as TorrentCreationService,
+      torrentManager: manager as unknown as TorrentManager
+    })
+
+    const operation: EngineCommand = {
+      command: 'create-torrent',
+      payload: {
+        allowHttpTrackers: false,
+        allowPrivateNetwork: false,
+        announceTiers: [['https://tracker.example/announce']],
+        destinationRoot: '/authorized/downloads',
+        filterJunkFiles: true,
+        operationId: OPERATION_ID,
+        private: false,
+        sourcePath: '/authorized/source'
+      }
+    }
+    const result = await runtime.execute(operation, signal())
+
+    expectStrictResult(operation, result)
+    expect(result).toMatchObject({
+      ok: true,
+      result: {
+        command: 'create-torrent',
+        value: { operationId: OPERATION_ID, torrent: { infoHash: INFO_HASH } }
+      }
+    })
+    // Seeding happens in place from the source parent, never the download root.
+    expect(manager.add).toHaveBeenCalledWith(
+      expect.objectContaining({
+        destinationRoot: '/authorized/source',
+        selectedIndexes: [0, 1]
+      })
+    )
+  })
+
+  it('reports a rejected creation source as a fixed public error', async () => {
+    const creationService = {
+      create: vi.fn(async () => {
+        throw new TorrentCreationError('SOURCE_NOT_AUTHORIZED')
+      })
+    }
+    const runtime = new EngineRuntime({
+      creationService: creationService as unknown as TorrentCreationService,
+      torrentManager: emptyTorrentManager()
+    })
+
+    const operation: EngineCommand = {
+      command: 'create-torrent',
+      payload: {
+        allowHttpTrackers: false,
+        allowPrivateNetwork: false,
+        announceTiers: [['https://tracker.example/announce']],
+        destinationRoot: '/authorized/downloads',
+        filterJunkFiles: true,
+        operationId: OPERATION_ID,
+        private: false,
+        sourcePath: '/authorized/source'
+      }
+    }
+    const result = await runtime.execute(operation, signal())
+
+    expectStrictResult(operation, result)
+    expect(errorCode(result)).toBe('PATH_NOT_AUTHORIZED')
+  })
+
   it('returns fixed unsupported results for every deferred command', async () => {
     const runtime = new EngineRuntime({ torrentManager: emptyTorrentManager() })
     const operations = [
-      {
-        command: 'create-torrent',
-        payload: {
-          allowHttpTrackers: false,
-          allowPrivateNetwork: false,
-          announceTiers: [],
-          destinationRoot: '/authorized/downloads',
-          filterJunkFiles: true,
-          operationId: OPERATION_ID,
-          private: false,
-          sourcePath: '/authorized/source'
-        }
-      },
       {
         command: 'open-media',
         payload: { fileIndex: 0, infoHash: INFO_HASH }

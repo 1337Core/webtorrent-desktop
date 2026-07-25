@@ -9,6 +9,7 @@ import { EgressPolicy } from './network-policy'
 import { PeerAdmissionPolicy } from './peer-admission'
 import { EngineProtocolController } from './protocol-controller'
 import { EngineRuntime } from './runtime'
+import { TorrentCreationService } from './torrent-creation'
 import { TrackerActivation } from './tracker-activation'
 import { TrackerHttpRequestGate, TrackerHttpTransport } from './tracker-http'
 import { TorrentManager } from './torrent-manager'
@@ -192,6 +193,7 @@ async function startClients(): Promise<EngineRuntimeInfo> {
 
 let emitRuntimeEvent = (_event: EngineEvent): void => undefined
 const runtime = new EngineRuntime({
+  creationService: new TorrentCreationService({ policy: egress }),
   emitEvent: event => emitRuntimeEvent(event),
   torrentManager
 })

@@ -62,6 +62,7 @@ await buildNodeEntry({
   external: [
     '@thaunknown/simple-peer',
     'bencode',
+    'create-torrent',
     'parse-torrent',
     'undici',
     'webtorrent',

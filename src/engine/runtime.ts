@@ -12,6 +12,10 @@ import {
   type PreparationSnapshot
 } from './preparation-store'
 import { DiskTorrentError } from './disk-torrent'
+import {
+  TorrentCreationError,
+  TorrentCreationService
+} from './torrent-creation'
 import { TorrentManager, TorrentManagerError } from './torrent-manager'
 import {
   TorrentPreparationService,
@@ -33,6 +37,7 @@ type PublicPreparationFilePage = Extract<
 type EngineRuntimeOptions = Readonly<{
   createPreparationService?: (store: PreparationStore) => PreparationService
   emitEvent?: (event: EngineEvent) => void
+  creationService?: TorrentCreationService
   preparationStore?: PreparationStore
   torrentManager?: TorrentManager
 }>
@@ -101,6 +106,21 @@ const PUBLIC_ERRORS = Object.freeze({
     code: 'NOT_FOUND',
     displayMessage: 'The remote torrent could not be loaded.',
     retryable: true
+  },
+  creationFailed: {
+    code: 'INTERNAL',
+    displayMessage: 'The torrent could not be created.',
+    retryable: false
+  },
+  sourceNotAuthorized: {
+    code: 'PATH_NOT_AUTHORIZED',
+    displayMessage: 'The selected source is not available.',
+    retryable: false
+  },
+  trackerRejected: {
+    code: 'INPUT_INVALID',
+    displayMessage: 'A selected tracker is not supported.',
+    retryable: false
   },
   torrentAddFailed: {
     code: 'INTERNAL',
@@ -209,12 +229,14 @@ export class EngineRuntime {
   readonly #preparationService: PreparationService
   readonly #preparationStore: PreparationStore
   readonly #activeExecutions = new Set<Promise<EngineCommandResult>>()
+  readonly #creationService: TorrentCreationService | null
   readonly #torrentManager: TorrentManager | null
   #closePromise: Promise<void> | null = null
   #closed = false
 
   constructor(options: EngineRuntimeOptions = {}) {
     this.#emitEvent = options.emitEvent ?? (() => undefined)
+    this.#creationService = options.creationService ?? null
     this.#torrentManager = options.torrentManager ?? null
     this.#preparationStore = options.preparationStore ?? new PreparationStore()
     this.#preparationService =
@@ -409,8 +431,9 @@ export class EngineRuntime {
       }
       case 'commit-preparation':
         return await this.#commitPreparation(operation)
-      case 'close-media':
       case 'create-torrent':
+        return await this.#createTorrent(operation)
+      case 'close-media':
       case 'heartbeat-media':
       case 'open-media':
         return errorResult(operation, PUBLIC_ERRORS.unsupported)
@@ -456,6 +479,46 @@ export class EngineRuntime {
           preparationId: reservation.preparationId,
           torrent
         }
+      }
+    }
+  }
+
+  /**
+   * Creates validated v1 bytes, then adds them through the ordinary guarded
+   * path so the new torrent is fully verified before it seeds in place.
+   */
+  async #createTorrent(
+    operation: Extract<EngineCommand, { command: 'create-torrent' }>
+  ): Promise<EngineCommandResult> {
+    const manager = this.#requireManager()
+    const creation = this.#creationService
+    if (!creation) throw new EngineRuntimeUnavailableError()
+
+    const created = await creation.create({
+      allowHttpTrackers: operation.payload.allowHttpTrackers,
+      announceTiers: operation.payload.announceTiers,
+      filterJunkFiles: operation.payload.filterJunkFiles,
+      private: operation.payload.private,
+      sourcePath: operation.payload.sourcePath,
+      ...(operation.payload.comment === undefined
+        ? {}
+        : { comment: operation.payload.comment }),
+      ...(operation.payload.name === undefined
+        ? {}
+        : { name: operation.payload.name })
+    })
+
+    const torrent = await manager.add({
+      destinationRoot: created.seedRoot,
+      metadata: created.metadata,
+      selectedIndexes: created.metadata.files.map(file => file.index)
+    })
+    this.#emit({ event: 'torrent-updated', payload: torrent })
+    return {
+      ok: true,
+      result: {
+        command: 'create-torrent',
+        value: { operationId: operation.payload.operationId, torrent }
       }
     }
   }
@@ -557,6 +620,20 @@ export class EngineRuntime {
 
     if (error instanceof EngineRuntimeUnavailableError) {
       return errorResult(operation, PUBLIC_ERRORS.engineNotReady)
+    }
+
+    if (error instanceof TorrentCreationError) {
+      switch (error.code) {
+        case 'INPUT_INVALID':
+          return errorResult(operation, PUBLIC_ERRORS.inputInvalid)
+        case 'PRIVATE_TRACKER_REQUIRED':
+        case 'TRACKER_REJECTED':
+          return errorResult(operation, PUBLIC_ERRORS.trackerRejected)
+        case 'SOURCE_NOT_AUTHORIZED':
+          return errorResult(operation, PUBLIC_ERRORS.sourceNotAuthorized)
+        case 'CREATION_FAILED':
+          return errorResult(operation, PUBLIC_ERRORS.creationFailed)
+      }
     }
 
     if (error instanceof DiskTorrentError) {
