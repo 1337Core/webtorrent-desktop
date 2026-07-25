@@ -2295,10 +2295,15 @@ entirely. The DHT wire and boundary, filesystem containment, and the
 egress policy is proven to resolve once and stay pinned to the address it
 approved.
 
-The remaining section 18.2 work is: the real local-TLS tracker fixtures, which
-need a fixture certificate authority trusted by the test process only; the
-staging and hostile-race suites; and the churn and boundary suites that need
-many live peers.
+The real local-TLS fixture is in place: a certificate authority generated per
+run and trusted only inside the test process proves the shared egress path
+verifies the original host while the socket stays pinned to the approved
+address, and rejects both a certificate issued for another host and one the
+fixture authority never signed. No key material lives in the repository and
+the production trust store is untouched.
+
+The remaining section 18.2 work is the staging and hostile-race suites and the
+churn and boundary suites that need many live peers.
 
 ### Milestone 4 — storage, resume, and legacy import
 
