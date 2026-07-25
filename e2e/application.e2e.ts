@@ -23,8 +23,8 @@ describe('WebTorrent Updated', () => {
   })
 
   it('renders the sandboxed application shell', async () => {
-    await expect(browser.$('h1')).toHaveText('WebTorrent Updated')
-    await expect(browser.$('main')).toHaveAttribute(
+    await expect(browser.$('header .title')).toHaveText('WebTorrent Updated')
+    await expect(browser.$('[data-renderer-boundary]')).toHaveAttribute(
       'data-renderer-boundary',
       'passed'
     )

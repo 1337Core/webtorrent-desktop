@@ -431,7 +431,9 @@ async function collectSmokeTrustEvidence(): Promise<SmokeTrustEvidence> {
       (async () => {
         const wait = milliseconds =>
           new Promise(resolve => setTimeout(resolve, milliseconds))
-        const root = document.querySelector('main')
+        // The boundary marker, not a tag name: the shell's markup is free to
+        // change without silently voiding this evidence.
+        const root = document.querySelector('[data-renderer-boundary]')
         const desktopApiKeys = Object.keys(globalThis.desktop ?? {}).sort()
 
         const networkFetchDenied = await fetch(

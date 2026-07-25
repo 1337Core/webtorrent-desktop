@@ -79,6 +79,9 @@ await buildNodeEntry({
     'bencode',
     'create-torrent',
     'parse-torrent',
+    // `subtitle` reaches an old CommonJS readable-stream that calls `require`
+    // at load time, which no ES bundle can satisfy; it stays external.
+    'subtitle',
     'undici',
     'webtorrent',
     'ws'
