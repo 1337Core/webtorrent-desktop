@@ -39,6 +39,7 @@ export class DiskTorrentError extends Error {
 
 /** The exact WebTorrent torrent surface the disk-backed session consumes. */
 export type EngineTorrent = {
+  addPeer(peer: string, source?: string): boolean
   deselect(start: number, end: number): void
   destroy(
     options: { destroyStore: boolean },
@@ -106,6 +107,8 @@ export type DiskTorrentSessionOptions = Readonly<{
   createActivation?: (session: DiskTorrentSession) => TorrentActivation | null
   destroyTimeoutMs?: number
   onCommitFailure?: (infoHash: string, result: CommitBarrierResult) => void
+  /** Runs again immediately before every handoff, whatever discovered it. */
+  peerFilter?: (address: string) => boolean
   readyTimeoutMs?: number
   registry: TorrentRegistry
 }>
@@ -145,6 +148,7 @@ export class DiskTorrentSession {
   readonly #destroyTimeoutMs: number
   readonly #metadata: ValidatedTorrentMetadata
   readonly #owner: TorrentOwner
+  readonly #peerFilter: (address: string) => boolean
   readonly #registry: TorrentRegistry
   readonly #reservation: TorrentReservation
   readonly #storeSupervisor: GuardedStoreSupervisor
@@ -168,6 +172,7 @@ export class DiskTorrentSession {
       options.destroyTimeoutMs ?? DISK_TORRENT_TIMEOUTS.destroyMs
     this.#metadata = metadata
     this.#owner = owner
+    this.#peerFilter = options.peerFilter ?? (() => true)
     this.#registry = registry
     this.#reservation = reservation
     this.#selectedIndexes = [...selectedIndexes]
@@ -272,9 +277,14 @@ export class DiskTorrentSession {
       downloadSpeed: clampRate(torrent?.downloadSpeed),
       downloaded,
       fileDownloaded: this.#metadata.files.map((file, index) =>
-        Math.trunc(clamp(torrent?.files[index]?.downloaded ?? 0, 0, file.length))
+        Math.trunc(
+          clamp(torrent?.files[index]?.downloaded ?? 0, 0, file.length)
+        )
       ),
-      numPeers: Math.min(Math.max(Math.trunc(torrent?.numPeers ?? 0), 0), 10_000),
+      numPeers: Math.min(
+        Math.max(Math.trunc(torrent?.numPeers ?? 0), 0),
+        10_000
+      ),
       progress: length === 0 ? 1 : clamp(downloaded / length, 0, 1),
       timeRemainingMs:
         Number.isFinite(timeRemaining) && timeRemaining >= 0
@@ -293,6 +303,30 @@ export class DiskTorrentSession {
       owner: this.#owner,
       selectedIndexes: [...this.#selectedIndexes],
       state: this.#state
+    }
+  }
+
+  /**
+   * The last gate before WebTorrent sees a discovered peer. A closed, paused,
+   * or superseded generation admits nothing, and the address policy runs again
+   * here rather than trusting whichever transport produced the candidate.
+   */
+  admitPeer(address: string, source = 'tracker'): boolean {
+    const torrent = this.#torrent
+    if (!torrent || this.#state !== 'running') return false
+    if (
+      !this.#registry.admits(
+        this.#metadata.infoHash,
+        this.#reservation.generationId
+      )
+    ) {
+      return false
+    }
+    if (!this.#peerFilter(address)) return false
+    try {
+      return torrent.addPeer(address, source)
+    } catch {
+      return false
     }
   }
 

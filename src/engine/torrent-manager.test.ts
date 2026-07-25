@@ -24,6 +24,7 @@ class FakeTorrent extends EventEmitter implements EngineTorrent {
   timeRemaining = Number.POSITIVE_INFINITY
   uploadSpeed = 0
   uploaded = 0
+  readonly peers: string[] = []
   readonly #metadata: ValidatedTorrentMetadata
 
   constructor(metadata: ValidatedTorrentMetadata) {
@@ -65,6 +66,11 @@ class FakeTorrent extends EventEmitter implements EngineTorrent {
 
   get torrentFile(): Uint8Array {
     return this.#metadata.torrentBytes
+  }
+
+  addPeer(peer: string): boolean {
+    this.peers.push(peer)
+    return true
   }
 
   deselect(): void {}

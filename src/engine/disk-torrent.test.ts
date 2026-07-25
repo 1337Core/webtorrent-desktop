@@ -34,6 +34,7 @@ class FakeTorrent extends EventEmitter implements EngineTorrent {
   uploadSpeed = 0
   uploaded = 0
   readonly destroyCalls: Array<{ destroyStore: boolean }> = []
+  readonly peers: string[] = []
   readonly selectionCalls: string[] = []
   #metadata: ValidatedTorrentMetadata
   #overrides: Partial<EngineTorrent>
@@ -84,6 +85,11 @@ class FakeTorrent extends EventEmitter implements EngineTorrent {
 
   get torrentFile(): Uint8Array {
     return this.#overrides.torrentFile ?? this.#metadata.torrentBytes
+  }
+
+  addPeer(peer: string): boolean {
+    this.peers.push(peer)
+    return true
   }
 
   deselect(start: number, end: number): void {
@@ -368,6 +374,26 @@ describe('DiskTorrentSession', () => {
 
     await expect(pending).rejects.toMatchObject({ code: 'TORRENT_ERROR' })
     expect(harness.registry.has(metadata.infoHash)).toBe(false)
+  })
+
+  it('admits a discovered peer only for a running committed generation', async () => {
+    const session = await addReadySession(
+      {},
+      { peerFilter: address => address !== '10.0.0.5:6881' }
+    )
+    const torrent = harness.torrents[0]
+    if (!torrent) throw new Error('Expected a torrent')
+
+    expect(session.admitPeer('203.0.113.7:6881')).toBe(false)
+
+    session.resume()
+    expect(session.admitPeer('203.0.113.7:6881')).toBe(true)
+    expect(session.admitPeer('10.0.0.5:6881')).toBe(false)
+    expect(torrent.peers).toEqual(['203.0.113.7:6881'])
+
+    await session.pause()
+    expect(session.admitPeer('203.0.113.8:6881')).toBe(false)
+    expect(torrent.peers).toEqual(['203.0.113.7:6881'])
   })
 
   it('refuses lifecycle commands that do not match the current state', async () => {
