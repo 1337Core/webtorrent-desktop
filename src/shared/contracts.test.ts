@@ -18,6 +18,7 @@ const generationId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 
 const engineRuntime = {
   architecture: 'arm64',
+  audioMetadataParser: 'music-metadata.parseStream',
   mediaPort: 52_000,
   electronVersion: '43.2.0',
   nodeVersion: '24.18.0',

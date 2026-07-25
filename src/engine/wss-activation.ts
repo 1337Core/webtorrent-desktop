@@ -25,7 +25,7 @@ export type WssActivationOptions = Readonly<{
   allowPrivateNetwork: boolean
   /** Opens one pinned, policy-approved socket, or rejects. */
   connectSocket: (
-    input: Readonly<{ infoHash: string; url: string }>
+    input: Readonly<{ infoHash: string; signal?: AbortSignal; url: string }>
   ) => Promise<WssSocket>
   /** The tracker URL identifies the endpoint whose budget the offers use. */
   createOffers: (
@@ -33,6 +33,7 @@ export type WssActivationOptions = Readonly<{
     trackerUrl: string
   ) => Promise<ReadonlyArray<WssOfferDescription>>
   infoHash: string
+  onActivated?: (trackerUrl: string) => void
   onAnswer: (
     answer: Readonly<{ offerId: string; peerId: string; sdp: string }>
   ) => void
@@ -45,8 +46,12 @@ export type WssActivationOptions = Readonly<{
     trackerUrl: string,
     respond: (answer: Readonly<{ offerId: string; sdp: string }>) => void
   ) => void
+  /** Unknown-private staging awaits full retirement before failover. */
+  onRetireEndpoint?: (trackerUrl: string) => Promise<void> | void
+  onExhausted?: () => void
   peerId: string
   progress: () => WssActivationProgress
+  serialRetirement?: boolean
   tiers: ReadonlyArray<ReadonlyArray<string>>
 }>
 
@@ -114,7 +119,9 @@ export class WssActivation {
   readonly #closing = new Set<Promise<void>>()
   /** Every URL the activation has already opened once. Nothing is retried. */
   readonly #attempted = new Set<string>()
+  readonly #openController = new AbortController()
   #started = false
+  #exhaustedSent = false
 
   constructor(options: WssActivationOptions) {
     this.#options = options
@@ -147,6 +154,7 @@ export class WssActivation {
    */
   async stop(): Promise<void> {
     this.#started = false
+    this.#openController.abort()
     const entries = [...this.#live.values()]
     this.#live.clear()
     for (const entry of entries) {
@@ -163,7 +171,17 @@ export class WssActivation {
   async #fill(): Promise<void> {
     for (;;) {
       const candidate = this.#nextCandidate()
-      if (!candidate) return
+      if (!candidate) {
+        if (this.#started && this.#live.size === 0 && !this.#exhaustedSent) {
+          this.#exhaustedSent = true
+          try {
+            this.#options.onExhausted?.()
+          } catch {
+            // Lifecycle observation cannot change tracker scheduling.
+          }
+        }
+        return
+      }
       this.#attempted.add(candidate.url)
       await this.#open(candidate)
     }
@@ -199,9 +217,18 @@ export class WssActivation {
     try {
       socket = await this.#options.connectSocket({
         infoHash: this.#options.infoHash,
+        signal: this.#openController.signal,
         url
       })
     } catch {
+      return
+    }
+    if (!this.#started) {
+      try {
+        socket.terminate()
+      } catch {
+        // The socket is already closing.
+      }
       return
     }
 
@@ -212,6 +239,9 @@ export class WssActivation {
       createSocket: () => socket,
       infoHash: this.#options.infoHash,
       onAnswer: this.#options.onAnswer,
+      onFailure: () => {
+        void this.#retire(url)
+      },
       onInterval: seconds => this.#schedule(url, seconds),
       ...(onOffer
         ? {
@@ -240,11 +270,15 @@ export class WssActivation {
       await endpoint.connect()
       await this.#announce(entry, 'started')
       entry.contacted = true
+      try {
+        this.#options.onActivated?.(url)
+      } catch {
+        // Lifecycle observation cannot change tracker scheduling.
+      }
     } catch {
       await this.#retire(url)
       return
     }
-    this.#schedule(url, WSS_TRACKER_LIMITS.defaultIntervalSeconds)
   }
 
   /**
@@ -328,6 +362,12 @@ export class WssActivation {
     this.#live.delete(url)
     if (entry.timer) clearTimeout(entry.timer)
     await this.#attemptStopped(entry)
+    if (this.#options.serialRetirement) {
+      await this.#close(entry)
+      await this.#options.onRetireEndpoint?.(entry.url)
+      await this.#fill()
+      return
+    }
     // The close runs its grace period alongside the replacement rather than
     // ahead of it: a retired endpoint never blocks its failover.
     const closing = this.#close(entry).finally(() => {

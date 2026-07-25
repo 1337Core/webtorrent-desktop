@@ -14,13 +14,19 @@ export const DESKTOP_ENGINE_RESTART_CHANNEL = 'desktop:engine-restart:v1'
 export const ENGINE_STATUS_CHANNEL = 'desktop:engine-status:v1'
 export const DESKTOP_TORRENT_COMMAND_CHANNEL = 'desktop:torrent-command:v1'
 export const DESKTOP_CHOOSE_PATH_CHANNEL = 'desktop:choose-path:v1'
+export const DESKTOP_EXPORT_TORRENT_CHANNEL = 'desktop:export-torrent:v1'
 export const DESKTOP_PREFERENCES_CHANNEL = 'desktop:preferences:v1'
 export const DESKTOP_MENU_ACTION_CHANNEL = 'desktop:menu-action:v1'
 
 /** The bounded set of menu actions main may ask the renderer to surface. */
 export const menuActionEventSchema = z.strictObject({
   protocolVersion: z.literal(PROTOCOL_VERSION),
-  action: z.enum(['add-torrent', 'create-torrent', 'preferences'])
+  action: z.enum([
+    'add-subtitles',
+    'add-torrent',
+    'create-torrent',
+    'preferences'
+  ])
 })
 
 export type MenuActionEvent = z.infer<typeof menuActionEventSchema>
@@ -145,6 +151,7 @@ export type RuntimeInfo = z.infer<typeof runtimeInfoSchema>
 
 const engineRuntimeInfoSchema = z.strictObject({
   architecture: z.literal('arm64'),
+  audioMetadataParser: z.literal('music-metadata.parseStream'),
   /** The loopback media proxy port the renderer's CSP must authorize. */
   mediaPort: z.number().int().min(1).max(65_535),
   electronVersion: z.literal('43.2.0'),
@@ -421,7 +428,13 @@ export const choosePathRequestSchema = z.strictObject({
   requestId: requestIdSchema,
   command: z.literal('choosePath'),
   payload: z.strictObject({
-    kind: z.enum(['application', 'directory', 'source', 'torrent-file'])
+    kind: z.enum([
+      'application',
+      'directory',
+      'source',
+      'subtitle',
+      'torrent-file'
+    ])
   })
 })
 
@@ -454,6 +467,38 @@ export const choosePathResultSchema = z.discriminatedUnion('ok', [
 ])
 
 export type ChoosePathResult = z.infer<typeof choosePathResultSchema>
+
+/**
+ * Export names only an already-created torrent. Main resolves its display
+ * name, owns the save dialog, and never reveals the chosen destination.
+ */
+export const exportTorrentRequestSchema = z.strictObject({
+  protocolVersion: protocolVersionSchema,
+  requestId: requestIdSchema,
+  command: z.literal('exportTorrent'),
+  payload: z.strictObject({
+    infoHash: z.string().regex(/^[0-9a-f]{40}$/u)
+  })
+})
+
+export const exportTorrentResultSchema = z.discriminatedUnion('ok', [
+  z.strictObject({
+    protocolVersion: protocolVersionSchema,
+    requestId: requestIdSchema,
+    ok: z.literal(true),
+    value: z.strictObject({
+      saved: z.boolean()
+    })
+  }),
+  z.strictObject({
+    protocolVersion: protocolVersionSchema,
+    requestId: requestIdSchema.nullable(),
+    ok: z.literal(false),
+    error: desktopErrorSchema
+  })
+])
+
+export type ExportTorrentResult = z.infer<typeof exportTorrentResultSchema>
 
 export const setPreferencesRequestSchema = z.strictObject({
   protocolVersion: protocolVersionSchema,

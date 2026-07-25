@@ -1,5 +1,6 @@
 /** @vitest-environment jsdom */
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -16,11 +17,16 @@ import { MediaPlayer } from './media-player'
 
 const INFO_HASH = '0123456789abcdef0123456789abcdef01234567'
 const LEASE_ID = '00000000-0000-4000-8000-000000000020'
+const EXTERNAL_LEASE_IDS = [
+  '00000000-0000-4000-8000-000000000030',
+  '00000000-0000-4000-8000-000000000031'
+] as const
 const MEDIA_URL = `http://127.0.0.1:52000/v1/media/${'a'.repeat(43)}`
 
 let commands: EngineCommand[] = []
 let failOpen = false
 let onUnsupported = vi.fn()
+let externalSubtitleCount = 0
 let subtitleTracks: Array<{
   fileIndex: number
   label: string
@@ -28,6 +34,79 @@ let subtitleTracks: Array<{
   leaseId: string
   url: string
 }> = []
+
+type FakeAudioTrack = {
+  enabled: boolean
+  label: string
+  language: string
+}
+
+class FakeAudioTrackList {
+  readonly [index: number]: FakeAudioTrack | undefined
+  readonly #listeners = new Map<string, Set<EventListener>>()
+  readonly #tracks: FakeAudioTrack[]
+
+  constructor(tracks: FakeAudioTrack[]) {
+    this.#tracks = tracks
+    this.#reindex()
+  }
+
+  get length(): number {
+    return this.#tracks.length
+  }
+
+  addEventListener(type: string, listener: EventListener): void {
+    const listeners = this.#listeners.get(type) ?? new Set<EventListener>()
+    listeners.add(listener)
+    this.#listeners.set(type, listeners)
+  }
+
+  removeEventListener(type: string, listener: EventListener): void {
+    this.#listeners.get(type)?.delete(listener)
+  }
+
+  addTrack(track: FakeAudioTrack): void {
+    this.#tracks.push(track)
+    this.#reindex()
+    this.#dispatch('addtrack')
+  }
+
+  removeTrack(index: number): void {
+    this.#tracks.splice(index, 1)
+    this.#reindex()
+    this.#dispatch('removetrack')
+  }
+
+  change(): void {
+    this.#dispatch('change')
+  }
+
+  listenerCount(): number {
+    return [...this.#listeners.values()].reduce(
+      (total, listeners) => total + listeners.size,
+      0
+    )
+  }
+
+  #dispatch(type: string): void {
+    for (const listener of this.#listeners.get(type) ?? []) {
+      listener(new Event(type))
+    }
+  }
+
+  #reindex(): void {
+    for (let index = 0; index < 32; index += 1) {
+      Reflect.deleteProperty(this, index)
+    }
+    for (const [index, track] of this.#tracks.entries()) {
+      Object.defineProperty(this, index, {
+        configurable: true,
+        enumerable: true,
+        value: track
+      })
+    }
+  }
+}
 
 function response(operation: EngineCommand): TorrentCommandResult {
   const envelope = {
@@ -84,6 +163,34 @@ function response(operation: EngineCommand): TorrentCommandResult {
           }
         }
       } as TorrentCommandResult
+    case 'open-external-subtitle': {
+      const index = Math.min(
+        externalSubtitleCount,
+        EXTERNAL_LEASE_IDS.length - 1
+      )
+      const leaseId = EXTERNAL_LEASE_IDS[index] ?? EXTERNAL_LEASE_IDS[0]
+      externalSubtitleCount += 1
+      return {
+        ...envelope,
+        ok: true,
+        value: {
+          ok: true,
+          result: {
+            command: 'open-external-subtitle',
+            value: {
+              infoHash: INFO_HASH,
+              mediaFileIndex: 1,
+              track: {
+                label: `External ${externalSubtitleCount}`,
+                language: '',
+                leaseId,
+                url: `http://127.0.0.1:52000/v1/media/${index === 0 ? 'c'.repeat(43) : 'd'.repeat(43)}`
+              }
+            }
+          }
+        }
+      } as TorrentCommandResult
+    }
     case 'heartbeat-media':
       return {
         ...envelope,
@@ -114,6 +221,7 @@ function response(operation: EngineCommand): TorrentCommandResult {
 beforeEach(() => {
   commands = []
   failOpen = false
+  externalSubtitleCount = 0
   onUnsupported = vi.fn()
   subtitleTracks = [
     {
@@ -127,6 +235,14 @@ beforeEach(() => {
   Object.defineProperty(window, 'desktop', {
     configurable: true,
     value: {
+      choosePath: vi.fn(() =>
+        Promise.resolve({
+          protocolVersion: 1,
+          requestId: '00000000-0000-4000-8000-000000000005',
+          ok: true,
+          value: { path: '/tmp/captions.srt', summary: null }
+        })
+      ),
       getBootstrap: vi.fn(),
       openExternalPlayer: vi.fn(() =>
         Promise.resolve({
@@ -164,6 +280,7 @@ describe('MediaPlayer', () => {
 
     const element = await screen.findByTestId('media-element')
     expect(element.getAttribute('src')).toBe(MEDIA_URL)
+    expect(element).toHaveProperty('crossOrigin', 'anonymous')
     expect(commands[0]).toEqual({
       command: 'open-media',
       payload: { fileIndex: 1, infoHash: INFO_HASH }
@@ -391,5 +508,178 @@ describe('MediaPlayer', () => {
       screen.getByRole('button', { name: 'Closed captions' }).className
     ).toContain('disabled')
     expect(document.querySelector('track')).toBeNull()
+  })
+
+  it('does not reopen the subtitle chooser when remounted with an old request', async () => {
+    const first = render(
+      <MediaPlayer
+        externalSubtitleRequest={4}
+        fileIndex={1}
+        fileName="payload/second.bin"
+        infoHash={INFO_HASH}
+        onClose={vi.fn()}
+      />
+    )
+    await screen.findByTestId('media-element')
+    first.unmount()
+
+    render(
+      <MediaPlayer
+        externalSubtitleRequest={4}
+        fileIndex={1}
+        fileName="payload/second.bin"
+        infoHash={INFO_HASH}
+        onClose={vi.fn()}
+      />
+    )
+    await screen.findByTestId('media-element')
+
+    expect(window.desktop.choosePath).not.toHaveBeenCalled()
+  })
+
+  it('closes the prior external subtitle lease when replacing it', async () => {
+    subtitleTracks = []
+    const { rerender } = render(
+      <MediaPlayer
+        externalSubtitleRequest={0}
+        fileIndex={1}
+        fileName="payload/second.bin"
+        infoHash={INFO_HASH}
+        onClose={vi.fn()}
+      />
+    )
+    await screen.findByTestId('media-element')
+
+    rerender(
+      <MediaPlayer
+        externalSubtitleRequest={1}
+        fileIndex={1}
+        fileName="payload/second.bin"
+        infoHash={INFO_HASH}
+        onClose={vi.fn()}
+      />
+    )
+    await waitFor(() =>
+      expect(
+        commands.filter(command => command.command === 'open-external-subtitle')
+      ).toHaveLength(1)
+    )
+    rerender(
+      <MediaPlayer
+        externalSubtitleRequest={2}
+        fileIndex={1}
+        fileName="payload/second.bin"
+        infoHash={INFO_HASH}
+        onClose={vi.fn()}
+      />
+    )
+
+    await waitFor(() =>
+      expect(
+        commands.some(
+          command =>
+            command.command === 'close-media' &&
+            command.payload.leaseId === EXTERNAL_LEASE_IDS[0]
+        )
+      ).toBe(true)
+    )
+    expect(document.querySelectorAll('track')).toHaveLength(1)
+    expect(document.querySelector('track')?.getAttribute('src')).toContain(
+      'd'.repeat(43)
+    )
+  })
+
+  it('omits audio-track controls when the runtime exposes no track API', async () => {
+    render(
+      <MediaPlayer
+        fileIndex={1}
+        fileName="payload/second.bin"
+        infoHash={INFO_HASH}
+        onClose={vi.fn()}
+      />
+    )
+    const element = await screen.findByTestId('media-element')
+
+    fireEvent.loadedMetadata(element)
+
+    expect(screen.queryByRole('button', { name: 'Audio tracks' })).toBeNull()
+  })
+
+  it('selects among audio tracks when the runtime exposes more than one', async () => {
+    const tracks = [
+      { enabled: true, label: 'English', language: 'en' },
+      { enabled: false, label: 'French', language: 'fr' }
+    ]
+    const user = userEvent.setup()
+    render(
+      <MediaPlayer
+        fileIndex={1}
+        fileName="payload/second.bin"
+        infoHash={INFO_HASH}
+        onClose={vi.fn()}
+      />
+    )
+    const element = await screen.findByTestId('media-element')
+    Object.defineProperty(element, 'audioTracks', {
+      configurable: true,
+      value: tracks
+    })
+
+    fireEvent.loadedMetadata(element)
+    const control = await screen.findByRole('button', {
+      name: 'Audio tracks'
+    })
+    await user.click(control)
+    await user.click(await screen.findByText('French'))
+
+    expect(tracks).toEqual([
+      expect.objectContaining({ enabled: false }),
+      expect.objectContaining({ enabled: true })
+    ])
+  })
+
+  it('tracks late audio-track list changes and removes its listeners', async () => {
+    const tracks = [
+      { enabled: true, label: 'English', language: 'en' },
+      { enabled: false, label: 'French', language: 'fr' }
+    ]
+    const list = new FakeAudioTrackList(tracks.slice(0, 1))
+    const user = userEvent.setup()
+    const view = render(
+      <MediaPlayer
+        fileIndex={1}
+        fileName="payload/second.bin"
+        infoHash={INFO_HASH}
+        onClose={vi.fn()}
+      />
+    )
+    const element = await screen.findByTestId('media-element')
+    Object.defineProperty(element, 'audioTracks', {
+      configurable: true,
+      value: list
+    })
+
+    fireEvent.loadedMetadata(element)
+    expect(list.listenerCount()).toBe(3)
+    expect(screen.queryByRole('button', { name: 'Audio tracks' })).toBeNull()
+
+    act(() => list.addTrack(tracks[1] as FakeAudioTrack))
+    const control = await screen.findByRole('button', { name: 'Audio tracks' })
+
+    act(() => {
+      tracks[0]!.enabled = false
+      tracks[1]!.enabled = true
+      list.change()
+    })
+    await user.click(control)
+    expect(screen.getByText('French').textContent).toContain(
+      'radio_button_checked'
+    )
+
+    act(() => list.removeTrack(1))
+    expect(screen.queryByRole('button', { name: 'Audio tracks' })).toBeNull()
+
+    view.unmount()
+    expect(list.listenerCount()).toBe(0)
   })
 })

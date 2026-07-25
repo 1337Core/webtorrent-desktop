@@ -219,6 +219,18 @@ export class WebrtcSignaling {
     }
   }
 
+  /** Retires every pending/connecting peer attributable to one endpoint. */
+  retireEndpoint(endpoint: string): void {
+    for (const entry of [...this.#leased]) {
+      if (entry.endpoint !== endpoint) continue
+      for (const [key, pending] of this.#pending) {
+        if (pending === entry) this.#pending.delete(key)
+      }
+      if (entry.timer) clearTimeout(entry.timer)
+      this.#discard(entry)
+    }
+  }
+
   /**
    * Every budget counts leases, not map entries: a peer that is signaled and
    * still connecting has left the pending map but has not yet reached a

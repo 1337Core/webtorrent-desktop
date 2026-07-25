@@ -9,6 +9,10 @@ import { desiredPieceRanges, type PieceRange } from './piece-selection'
 import type { PeerBudget } from './peer-budget'
 import type { ValidatedTorrentMetadata } from './torrent-metadata'
 import {
+  addPeerTracked,
+  type TrackedWebTorrentPeer
+} from './webtorrent-peer-adapter'
+import {
   TorrentRegistry,
   type TorrentOwner,
   type TorrentReservation
@@ -56,7 +60,10 @@ export type EngineWebRtcPeer = {
 }
 
 export type EngineTorrent = {
-  addPeer(peer: EngineWebRtcPeer | string, source?: string): boolean
+  addPeer(
+    peer: EngineWebRtcPeer | string,
+    source?: string
+  ): boolean | TrackedWebTorrentPeer
   deselect(start: number, end: number): void
   destroy(
     options: { destroyStore: boolean },
@@ -77,6 +84,7 @@ export type EngineTorrent = {
   private: boolean
   progress: number
   ready: boolean
+  removePeer?(peer: unknown): void
   resume(): void
   select(start: number, end: number, priority?: number): void
   timeRemaining: number
@@ -350,9 +358,14 @@ export class DiskTorrentSession {
       return false
     }
     if (!this.#peerFilter(address)) return false
-    if (!this.#admitsBudget(address)) return false
+    const admission = this.#admitBudget(address, () =>
+      torrent.removePeer?.(address)
+    )
+    if (!admission) return false
     try {
-      return this.#handoff(() => torrent.addPeer(address, source))
+      return this.#handoffBudgeted(address, admission.newRecord, () =>
+        addPeerTracked(torrent, address, source)
+      )
     } catch {
       return false
     }
@@ -376,9 +389,15 @@ export class DiskTorrentSession {
     }
     const address = peer.remoteAddress
     if (typeof address !== 'string' || !this.#peerFilter(address)) return false
-    if (!this.#admitsBudget(peer.id ?? address)) return false
+    const identity = peer.id ?? address
+    const admission = this.#admitBudget(identity, () =>
+      torrent.removePeer?.(peer)
+    )
+    if (!admission) return false
     try {
-      return this.#handoff(() => torrent.addPeer(peer, source))
+      return this.#handoffBudgeted(identity, admission.newRecord, () =>
+        addPeerTracked(torrent, peer, source)
+      )
     } catch {
       return false
     }
@@ -388,14 +407,24 @@ export class DiskTorrentSession {
    * The shared engine-wide bound. WebTorrent's own `maxConns` is per torrent,
    * so without this one torrent could hold the whole engine's capacity.
    */
-  #admitsBudget(peer: string, scope?: 'pex'): boolean {
-    return (
-      this.#budget?.admit({
+  #admitBudget(
+    peer: string,
+    remove: () => void,
+    scope?: 'pex'
+  ): { newRecord: boolean } | null {
+    if (!this.#budget) return { newRecord: false }
+    const newRecord = !this.#budget.has(this.#budgetKey, peer)
+    if (
+      !this.#budget.admit({
         key: this.#budgetKey,
         peer,
+        remove,
         ...(scope ? { scope } : {})
-      }) ?? true
-    )
+      })
+    ) {
+      return null
+    }
+    return { newRecord }
   }
 
   get #budgetKey(): string {
@@ -411,7 +440,10 @@ export class DiskTorrentSession {
    */
   #containDiscovery(torrent: EngineTorrent): void {
     const target = torrent as {
-      addPeer: (peer: EngineWebRtcPeer | string, source?: string) => boolean
+      addPeer: (
+        peer: EngineWebRtcPeer | string,
+        source?: string
+      ) => boolean | TrackedWebTorrentPeer
     }
     const original = target.addPeer.bind(torrent)
     target.addPeer = (peer, source) => {
@@ -422,18 +454,88 @@ export class DiskTorrentSession {
       const [host] = peer.split(':')
       if (!host || this.#state !== 'running') return false
       if (!this.#peerFilter(peer)) return false
-      if (!this.#admitsBudget(peer, 'pex')) return false
-      return original(peer, source)
+      const admission = this.#admitBudget(
+        peer,
+        () => torrent.removePeer?.(peer),
+        'pex'
+      )
+      if (!admission) return false
+      return this.#handoffBudgeted(
+        peer,
+        admission.newRecord,
+        () => addPeerTracked(torrent, peer, source),
+        'pex'
+      )
     }
   }
 
   /** Runs one handoff this session authorized, past its own wrapper. */
-  #handoff(run: () => boolean): boolean {
+  #handoff<T>(run: () => T): T {
     this.#admitting = true
     try {
       return run()
     } finally {
       this.#admitting = false
+    }
+  }
+
+  /** Holds aggregate transport capacity across the handoff race. */
+  #handoffBudgeted(
+    peer: string,
+    newRecord: boolean,
+    run: () => false | TrackedWebTorrentPeer,
+    scope?: 'pex'
+  ): boolean {
+    const lease = this.#budget?.reserveTransport({
+      key: this.#budgetKey,
+      peer,
+      ...(scope ? { scope } : {})
+    })
+    if (this.#budget && !lease) {
+      if (newRecord) this.#budget.forget(this.#budgetKey, peer)
+      return false
+    }
+    try {
+      const accepted = this.#handoff(run)
+      if (!accepted) {
+        if (newRecord) this.#budget?.forget(this.#budgetKey, peer)
+        else lease?.release()
+        return false
+      }
+      if (lease) {
+        this.#releaseReservationWhenCounted(accepted, lease.release, () =>
+          this.#budget?.forget(this.#budgetKey, peer)
+        )
+      }
+      return true
+    } catch (error) {
+      if (newRecord) this.#budget?.forget(this.#budgetKey, peer)
+      else lease?.release()
+      throw error
+    }
+  }
+
+  /**
+   * WebTorrent returns its internal Peer from addPeer. Its own connect
+   * listener increments `numPeers` before this listener runs, so releasing
+   * here atomically moves capacity from pending-reserved to sampled-live.
+   * Failed outgoing peers do not emit disconnect before connection; wrapping
+   * destroy closes that path too.
+   */
+  #releaseReservationWhenCounted(
+    peer: TrackedWebTorrentPeer,
+    release: () => void,
+    retire: () => void
+  ): void {
+    if (peer.connected) {
+      release()
+    } else {
+      peer.once?.('connect', release)
+    }
+    const destroy = peer.destroy.bind(peer)
+    peer.destroy = (...args: unknown[]) => {
+      retire()
+      destroy(...args)
     }
   }
 

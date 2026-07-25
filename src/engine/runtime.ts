@@ -12,10 +12,16 @@ import {
   type PreparationSnapshot
 } from './preparation-store'
 import { randomUUID } from 'node:crypto'
+import { inspectAudioMetadata } from './audio-metadata'
 import { DiskTorrentError } from './disk-torrent'
+import {
+  ExternalSubtitleError,
+  readExternalSubtitle
+} from './external-subtitle'
 import { LegacyImportError } from './legacy-import'
 import type { LegacyImportService } from './legacy-import-service'
 import { MediaProxy, MediaProxyError } from './media-proxy'
+import { mediaContentType } from './media-types'
 import {
   TorrentCreationError,
   TorrentCreationService
@@ -51,11 +57,17 @@ type AcquisitionState =
   | Readonly<{ state: 'acquiring' }>
   | Readonly<{ preparation: PreparationSummary; state: 'ready' }>
   | Readonly<{
-      code: 'INPUT_INVALID' | 'INTERNAL' | 'METADATA_UNAVAILABLE'
+      code:
+        | 'DHT_CONSENT_REQUIRED'
+        | 'INPUT_INVALID'
+        | 'INTERNAL'
+        | 'METADATA_UNAVAILABLE'
+        | 'PRIVATE_DHT_METADATA'
       state: 'failed'
     }>
 
 type AcquisitionRecord = {
+  completion: Promise<void>
   controller: AbortController
   expiresAtMs: number
   state: AcquisitionState
@@ -141,6 +153,12 @@ const PUBLIC_ERRORS = Object.freeze({
     displayMessage: 'Too many torrent preparations are open.',
     retryable: true
   },
+  dhtConsentRequired: {
+    code: 'DHT_CONSENT_REQUIRED',
+    displayMessage:
+      'This torrent has no usable tracker. Public DHT lookup requires consent.',
+    retryable: true
+  },
   engineNotReady: {
     code: 'ENGINE_NOT_READY',
     displayMessage: 'The torrent engine is not ready.',
@@ -164,6 +182,12 @@ const PUBLIC_ERRORS = Object.freeze({
   preparationNotFound: {
     code: 'NOT_FOUND',
     displayMessage: 'The torrent preparation was not found.',
+    retryable: false
+  },
+  privateDhtMetadata: {
+    code: 'PRIVATE_DHT_METADATA',
+    displayMessage:
+      'The recovered torrent is private. Add a tracker-bearing magnet or torrent file instead.',
     retryable: false
   },
   remoteConcurrencyLimit: {
@@ -195,6 +219,11 @@ const PUBLIC_ERRORS = Object.freeze({
     code: 'INTERNAL',
     displayMessage: 'The torrent could not be created.',
     retryable: false
+  },
+  exportFailed: {
+    code: 'INTERNAL',
+    displayMessage: 'The torrent file could not be saved.',
+    retryable: true
   },
   sourceNotAuthorized: {
     code: 'PATH_NOT_AUTHORIZED',
@@ -386,10 +415,20 @@ export class EngineRuntime {
 
     this.#closed = true
     this.#lifecycleController.abort()
+    for (const record of this.#acquisitions.values()) {
+      record.controller.abort()
+    }
     this.#preparationStore.clear()
     const activeExecutions = [...this.#activeExecutions]
-    this.#closePromise = Promise.allSettled(activeExecutions)
+    const activeAcquisitions = [...this.#acquisitions.values()].map(
+      record => record.completion
+    )
+    this.#closePromise = Promise.allSettled([
+      ...activeExecutions,
+      ...activeAcquisitions
+    ])
       .then(async () => {
+        this.#acquisitions.clear()
         await this.#torrentManager?.closeAll()
       })
       .then(() => {
@@ -567,6 +606,8 @@ export class EngineRuntime {
         return await this.#commitPreparation(operation)
       case 'create-torrent':
         return await this.#createTorrent(operation)
+      case 'export-torrent':
+        return await this.#exportTorrent(operation)
       case 'list-legacy-imports': {
         const importer = this.#requireLegacyImports()
         return {
@@ -606,8 +647,12 @@ export class EngineRuntime {
       }
       case 'open-media':
         return this.#openMedia(operation)
+      case 'open-audio-metadata':
+        return await this.#openAudioMetadata(operation, signal)
       case 'open-subtitles':
         return await this.#openSubtitles(operation)
+      case 'open-external-subtitle':
+        return await this.#openExternalSubtitle(operation)
       case 'heartbeat-media': {
         const proxy = this.#requireMediaProxy()
         const lease = proxy.heartbeat(operation.payload.leaseId)
@@ -792,6 +837,34 @@ export class EngineRuntime {
     }
   }
 
+  /** Writes archived bytes only to the destination approved by main. */
+  async #exportTorrent(
+    operation: Extract<EngineCommand, { command: 'export-torrent' }>
+  ): Promise<EngineCommandResult> {
+    const archive = this.#torrentArchive
+    if (!archive) throw new EngineRuntimeUnavailableError()
+
+    try {
+      const exported = await archive.export(
+        operation.payload.infoHash,
+        operation.payload.destinationPath
+      )
+      if (!exported) {
+        return errorResult(operation, PUBLIC_ERRORS.archiveUnavailable)
+      }
+    } catch {
+      return errorResult(operation, PUBLIC_ERRORS.exportFailed)
+    }
+
+    return {
+      ok: true,
+      result: {
+        command: 'export-torrent',
+        value: { exported: true, infoHash: operation.payload.infoHash }
+      }
+    }
+  }
+
   /**
    * Mints one opaque per-file loopback URL. The renderer never receives a
    * torrent index route, a raw WebTorrent server URL, or a file path.
@@ -811,7 +884,7 @@ export class EngineRuntime {
       fileIndex: operation.payload.fileIndex,
       infoHash: operation.payload.infoHash,
       source: {
-        contentType: 'application/octet-stream',
+        contentType: mediaContentType(file.path),
         createReadStream: range =>
           file.createReadStream({ end: range.end, start: range.start }),
         length: file.length
@@ -827,6 +900,67 @@ export class EngineRuntime {
           infoHash: lease.infoHash,
           leaseId: lease.leaseId,
           url: lease.url
+        }
+      }
+    }
+  }
+
+  /**
+   * Parses only a bounded prefix and returns an owned DTO. Embedded artwork
+   * remains behind a separate opaque proxy lease; raw tags and image bytes
+   * never cross the engine command boundary.
+   */
+  async #openAudioMetadata(
+    operation: Extract<EngineCommand, { command: 'open-audio-metadata' }>,
+    signal: AbortSignal
+  ): Promise<EngineCommandResult> {
+    const manager = this.#requireManager()
+    const proxy = this.#requireMediaProxy()
+    const { fileIndex, infoHash } = operation.payload
+    const file = manager.mediaFile(infoHash, fileIndex)
+    if (!file) return errorResult(operation, PUBLIC_ERRORS.mediaNotFound)
+
+    const inspected = await inspectAudioMetadata(
+      {
+        createReadStream: () =>
+          file.createReadStream({ end: file.length - 1, start: 0 }),
+        length: file.length,
+        name: file.path
+      },
+      signal
+    )
+    let artwork = null
+    if (inspected.artwork) {
+      const bytes = inspected.artwork.bytes
+      const lease = proxy.open({
+        fileIndex,
+        infoHash,
+        source: {
+          contentType: inspected.artwork.contentType,
+          createReadStream: range =>
+            Readable.from([bytes.subarray(range.start, range.end + 1)]),
+          length: bytes.byteLength
+        }
+      })
+      artwork = {
+        byteLength: bytes.byteLength,
+        contentType: inspected.artwork.contentType,
+        height: inspected.artwork.height,
+        leaseId: lease.leaseId,
+        url: lease.url,
+        width: inspected.artwork.width
+      }
+    }
+
+    return {
+      ok: true,
+      result: {
+        command: 'open-audio-metadata',
+        value: {
+          artwork,
+          fileIndex,
+          infoHash,
+          metadata: inspected.metadata
         }
       }
     }
@@ -855,42 +989,49 @@ export class EngineRuntime {
       leaseId: string
       url: string
     }> = []
+    const openedLeaseIds: string[] = []
 
-    for (const candidate of candidates) {
-      const file = manager.mediaFile(infoHash, candidate.index)
-      if (!file || file.length > SUBTITLE_LIMITS.maxSourceBytes) continue
+    try {
+      for (const candidate of candidates) {
+        const file = manager.mediaFile(infoHash, candidate.index)
+        if (!file || file.length > SUBTITLE_LIMITS.maxSourceBytes) continue
 
-      let track
-      try {
-        track = toSubtitleTrack(
-          await readAll(
-            file.createReadStream({ end: file.length - 1, start: 0 }),
-            SUBTITLE_LIMITS.maxSourceBytes
-          ),
-          { fallbackLabel: candidate.path.split('/').at(-1) ?? 'Subtitle' }
-        )
-      } catch {
-        continue
-      }
-
-      const vtt = new TextEncoder().encode(track.vtt)
-      const lease = proxy.open({
-        fileIndex: candidate.index,
-        infoHash,
-        source: {
-          contentType: 'text/vtt',
-          createReadStream: range =>
-            Readable.from([vtt.subarray(range.start, range.end + 1)]),
-          length: vtt.byteLength
+        let track
+        try {
+          track = toSubtitleTrack(
+            await readAll(
+              file.createReadStream({ end: file.length - 1, start: 0 }),
+              SUBTITLE_LIMITS.maxSourceBytes
+            ),
+            { fallbackLabel: candidate.path.split('/').at(-1) ?? 'Subtitle' }
+          )
+        } catch {
+          continue
         }
-      })
-      tracks.push({
-        fileIndex: candidate.index,
-        label: track.label,
-        language: track.language,
-        leaseId: lease.leaseId,
-        url: lease.url
-      })
+
+        const vtt = new TextEncoder().encode(track.vtt)
+        const lease = proxy.open({
+          fileIndex: candidate.index,
+          infoHash,
+          source: {
+            contentType: 'text/vtt',
+            createReadStream: range =>
+              Readable.from([vtt.subarray(range.start, range.end + 1)]),
+            length: vtt.byteLength
+          }
+        })
+        openedLeaseIds.push(lease.leaseId)
+        tracks.push({
+          fileIndex: candidate.index,
+          label: track.label,
+          language: track.language,
+          leaseId: lease.leaseId,
+          url: lease.url
+        })
+      }
+    } catch (error) {
+      for (const leaseId of openedLeaseIds) proxy.close(leaseId)
+      throw error
     }
 
     return {
@@ -898,6 +1039,53 @@ export class EngineRuntime {
       result: {
         command: 'open-subtitles',
         value: { infoHash, tracks: relabelTracks(tracks) as typeof tracks }
+      }
+    }
+  }
+
+  /** Converts one one-use, chooser-authorized local subtitle into WebVTT. */
+  async #openExternalSubtitle(
+    operation: Extract<EngineCommand, { command: 'open-external-subtitle' }>
+  ): Promise<EngineCommandResult> {
+    const manager = this.#requireManager()
+    const proxy = this.#requireMediaProxy()
+    const { infoHash, mediaFileIndex } = operation.payload
+    if (!manager.mediaFile(infoHash, mediaFileIndex)) {
+      return errorResult(operation, PUBLIC_ERRORS.mediaNotFound)
+    }
+
+    if (!operation.payload.grant) {
+      throw new ExternalSubtitleError('UNAVAILABLE')
+    }
+    const track = await readExternalSubtitle(
+      operation.payload.path,
+      operation.payload.grant
+    )
+    const vtt = new TextEncoder().encode(track.vtt)
+    const lease = proxy.open({
+      fileIndex: mediaFileIndex,
+      infoHash,
+      source: {
+        contentType: 'text/vtt',
+        createReadStream: range =>
+          Readable.from([vtt.subarray(range.start, range.end + 1)]),
+        length: vtt.byteLength
+      }
+    })
+    return {
+      ok: true,
+      result: {
+        command: 'open-external-subtitle',
+        value: {
+          infoHash,
+          mediaFileIndex,
+          track: {
+            label: track.label,
+            language: track.language,
+            leaseId: lease.leaseId,
+            url: lease.url
+          }
+        }
       }
     }
   }
@@ -942,16 +1130,25 @@ export class EngineRuntime {
 
     const acquisitionId = randomUUID()
     const controller = new AbortController()
-    const record: AcquisitionRecord = {
+    const record = {
+      completion: Promise.resolve(),
       controller,
       expiresAtMs: Date.now() + ACQUISITION_TTL_MS,
       state: { state: 'acquiring' }
-    }
+    } as AcquisitionRecord
     this.#acquisitions.set(acquisitionId, record)
 
-    void this.#preparationService
+    record.completion = this.#preparationService
       .open(operation.payload.source, controller.signal)
       .then(snapshot => {
+        if (controller.signal.aborted || this.#closed) {
+          try {
+            this.#preparationStore.discard(snapshot.preparationId)
+          } catch {
+            // Shutdown or expiry may already have released it.
+          }
+          return
+        }
         record.state = {
           preparation: preparationSummary(snapshot),
           state: 'ready'
@@ -961,12 +1158,18 @@ export class EngineRuntime {
         record.state = {
           code:
             error instanceof TorrentPreparationServiceError &&
-            error.code === 'INPUT_INVALID'
-              ? 'INPUT_INVALID'
+            error.code === 'DHT_CONSENT_REQUIRED'
+              ? 'DHT_CONSENT_REQUIRED'
               : error instanceof TorrentPreparationServiceError &&
-                  error.code === 'METADATA_UNAVAILABLE'
-                ? 'METADATA_UNAVAILABLE'
-                : 'INTERNAL',
+                  error.code === 'PRIVATE_DHT_METADATA'
+                ? 'PRIVATE_DHT_METADATA'
+                : error instanceof TorrentPreparationServiceError &&
+                    error.code === 'INPUT_INVALID'
+                  ? 'INPUT_INVALID'
+                  : error instanceof TorrentPreparationServiceError &&
+                      error.code === 'METADATA_UNAVAILABLE'
+                    ? 'METADATA_UNAVAILABLE'
+                    : 'INTERNAL',
           state: 'failed'
         }
       })
@@ -1066,12 +1269,16 @@ export class EngineRuntime {
           return errorResult(operation, PUBLIC_ERRORS.alreadyExists)
         case 'CAPACITY_EXCEEDED':
           return errorResult(operation, PUBLIC_ERRORS.capacityExceeded)
+        case 'DHT_CONSENT_REQUIRED':
+          return errorResult(operation, PUBLIC_ERRORS.dhtConsentRequired)
         case 'INPUT_INVALID':
           return errorResult(operation, PUBLIC_ERRORS.inputInvalid)
         case 'LOCAL_TORRENT_UNAVAILABLE':
           return errorResult(operation, PUBLIC_ERRORS.localTorrentUnavailable)
         case 'METADATA_UNAVAILABLE':
           return errorResult(operation, PUBLIC_ERRORS.metadataUnavailable)
+        case 'PRIVATE_DHT_METADATA':
+          return errorResult(operation, PUBLIC_ERRORS.privateDhtMetadata)
         case 'REMOTE_CONCURRENCY_LIMIT':
           return errorResult(operation, PUBLIC_ERRORS.remoteConcurrencyLimit)
         case 'REMOTE_TORRENT_UNAVAILABLE':
@@ -1107,6 +1314,15 @@ export class EngineRuntime {
         case 'NOT_FOUND':
           return errorResult(operation, PUBLIC_ERRORS.mediaNotFound)
       }
+    }
+
+    if (error instanceof ExternalSubtitleError) {
+      return errorResult(
+        operation,
+        error.code === 'UNAVAILABLE'
+          ? PUBLIC_ERRORS.sourceNotAuthorized
+          : PUBLIC_ERRORS.inputInvalid
+      )
     }
 
     if (error instanceof TorrentCreationError) {

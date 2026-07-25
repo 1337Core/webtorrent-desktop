@@ -5,6 +5,7 @@ import type {
   EngineCommand,
   EngineStatus,
   ExternalPlayerResult,
+  ExportTorrentResult,
   MenuActionEvent,
   OpenIntentEvent,
   RestartEngineResult,
@@ -16,8 +17,10 @@ declare global {
   interface Window {
     desktop: {
       choosePath: (
-        kind: 'application' | 'directory' | 'source' | 'torrent-file'
+        kind:
+          'application' | 'directory' | 'source' | 'subtitle' | 'torrent-file'
       ) => Promise<ChoosePathResult>
+      exportTorrent: (infoHash: string) => Promise<ExportTorrentResult>
       getBootstrap: () => Promise<BootstrapResult>
       openExternalPlayer: (mediaUrl: string) => Promise<ExternalPlayerResult>
       onEngineStatus: (listener: (status: EngineStatus) => void) => () => void

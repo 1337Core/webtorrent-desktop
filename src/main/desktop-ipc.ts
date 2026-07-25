@@ -1,5 +1,6 @@
 import type { BrowserWindow, IpcMainInvokeEvent } from 'electron'
 import { z } from 'zod'
+import type { ExternalSubtitleGrant } from '../shared/engine-api'
 import {
   bootstrapRequestSchema,
   bootstrapResultSchema,
@@ -13,9 +14,12 @@ import {
   DESKTOP_CHOOSE_PATH_CHANNEL,
   DESKTOP_CONTEXT_MENU_CHANNEL,
   DESKTOP_ENGINE_RESTART_CHANNEL,
+  DESKTOP_EXPORT_TORRENT_CHANNEL,
   DESKTOP_EXTERNAL_PLAYER_CHANNEL,
   DESKTOP_PREFERENCES_CHANNEL,
   DESKTOP_TORRENT_COMMAND_CHANNEL,
+  exportTorrentRequestSchema,
+  exportTorrentResultSchema,
   PROTOCOL_VERSION,
   restartEngineRequestSchema,
   restartEngineResultSchema,
@@ -36,6 +40,7 @@ import type { EngineSupervisor } from './engine-supervisor'
 import type { AppStateStore } from './state-store'
 import type { TorrentLibrary } from './torrent-library'
 import { isTrustedRendererEvent } from './trusted-renderer'
+import { captureExternalSubtitleGrant } from './subtitle-file-grant'
 
 const REQUEST_BUDGET = {
   maxBytes: 4 * 1024,
@@ -48,10 +53,18 @@ const RESULT_BUDGET = {
   maxNodes: 1024
 }
 const MAX_RECENT_REQUESTS = 256
+const MAX_SUBTITLE_PATH_GRANTS = 8
+const SUBTITLE_PATH_GRANT_TTL_MS = 60_000
 
 type DesktopIpcOptions = {
+  /** Binds a native subtitle choice to its canonical filesystem identity. */
+  captureSubtitleGrant?: (
+    selectedPath: string
+  ) => Promise<ExternalSubtitleGrant>
   /** Launches the owner's chosen player; absent until one is configured. */
   openExternalPlayer?: (mediaUrl: string) => Promise<void>
+  /** Owns the save dialog and the privileged engine export command. */
+  exportTorrent?: (infoHash: string) => Promise<boolean>
   /** Lets main react to a saved preference, such as the watched folder. */
   onPreferencesChanged?: (preferences: AppState['preferences']) => void
   /**
@@ -59,7 +72,7 @@ type DesktopIpcOptions = {
    * a creation source, the file count and total size main measured itself.
    */
   choosePath?: (
-    kind: 'application' | 'directory' | 'source' | 'torrent-file'
+    kind: 'application' | 'directory' | 'source' | 'subtitle' | 'torrent-file'
   ) => Promise<{
     path: string | null
     summary: { fileCount: number; totalBytes: number } | null
@@ -116,8 +129,10 @@ function errorResult(
 
 export function registerDesktopIpc(options: DesktopIpcOptions): () => void {
   const {
+    captureSubtitleGrant = captureExternalSubtitleGrant,
     choosePath,
     diagnostics,
+    exportTorrent,
     onPreferencesChanged,
     openExternalPlayer,
     engineSupervisor,
@@ -132,6 +147,43 @@ export function registerDesktopIpc(options: DesktopIpcOptions): () => void {
   const frameIpc = window.webContents.mainFrame.ipc
   const recentRequests = new Set<string>()
   const requestOrder: string[] = []
+  const subtitlePathGrants = new Map<
+    string,
+    Readonly<{ expiresAtMs: number; grant: ExternalSubtitleGrant }>
+  >()
+
+  function pruneSubtitlePathGrants(): void {
+    const now = Date.now()
+    for (const [grantedPath, record] of subtitlePathGrants) {
+      if (record.expiresAtMs <= now) subtitlePathGrants.delete(grantedPath)
+    }
+  }
+
+  function grantSubtitlePath(
+    grantedPath: string,
+    grant: ExternalSubtitleGrant
+  ): void {
+    pruneSubtitlePathGrants()
+    subtitlePathGrants.delete(grantedPath)
+    while (subtitlePathGrants.size >= MAX_SUBTITLE_PATH_GRANTS) {
+      const oldest = subtitlePathGrants.keys().next().value
+      if (typeof oldest !== 'string') break
+      subtitlePathGrants.delete(oldest)
+    }
+    subtitlePathGrants.set(grantedPath, {
+      expiresAtMs: Date.now() + SUBTITLE_PATH_GRANT_TTL_MS,
+      grant
+    })
+  }
+
+  function consumeSubtitlePath(
+    grantedPath: string
+  ): ExternalSubtitleGrant | null {
+    pruneSubtitlePathGrants()
+    const record = subtitlePathGrants.get(grantedPath)
+    subtitlePathGrants.delete(grantedPath)
+    return record?.grant ?? null
+  }
 
   function authorize(
     event: IpcMainInvokeEvent,
@@ -290,7 +342,10 @@ export function registerDesktopIpc(options: DesktopIpcOptions): () => void {
       if (rejected) return torrentCommandResultSchema.parse(rejected)
 
       const request = torrentCommandRequestSchema.safeParse(value)
-      if (!request.success) {
+      if (
+        !request.success ||
+        request.data.payload.operation.command === 'export-torrent'
+      ) {
         return torrentCommandResultSchema.parse(
           errorResult(
             candidateRequestId(value),
@@ -301,19 +356,88 @@ export function registerDesktopIpc(options: DesktopIpcOptions): () => void {
         )
       }
 
+      let operation = request.data.payload.operation
+      if (operation.command === 'open-external-subtitle') {
+        const grant = consumeSubtitlePath(operation.payload.path)
+        if (!grant) {
+          return torrentCommandResultSchema.parse(
+            errorResult(
+              request.data.requestId,
+              'INVALID_REQUEST',
+              'Select that subtitle file before opening it.',
+              false
+            )
+          )
+        }
+        operation = {
+          ...operation,
+          payload: { ...operation.payload, grant }
+        }
+      }
+
       const duplicate = rememberRequest(request.data.requestId)
       if (duplicate) return torrentCommandResultSchema.parse(duplicate)
 
-      const result = await engineSupervisor.execute(
-        request.data.payload.operation
-      )
-      torrentLibrary?.record(request.data.payload.operation, result)
+      const result = await engineSupervisor.execute(operation)
+      torrentLibrary?.record(operation, result)
       return torrentCommandResultSchema.parse({
         protocolVersion: PROTOCOL_VERSION,
         requestId: request.data.requestId,
         ok: true,
         value: result
       })
+    }
+  )
+
+  frameIpc.handle(
+    DESKTOP_EXPORT_TORRENT_CHANNEL,
+    async (event, value: unknown) => {
+      const rejected = authorize(event, value)
+      if (rejected) return exportTorrentResultSchema.parse(rejected)
+
+      const request = exportTorrentRequestSchema.safeParse(value)
+      if (!request.success) {
+        return exportTorrentResultSchema.parse(
+          errorResult(
+            candidateRequestId(value),
+            'INVALID_REQUEST',
+            'The application received an invalid export request.',
+            false
+          )
+        )
+      }
+
+      const duplicate = rememberRequest(request.data.requestId)
+      if (duplicate) return exportTorrentResultSchema.parse(duplicate)
+      if (!exportTorrent) {
+        return exportTorrentResultSchema.parse(
+          errorResult(
+            request.data.requestId,
+            'INTERNAL',
+            'The torrent file could not be saved.',
+            true
+          )
+        )
+      }
+
+      try {
+        const saved = await exportTorrent(request.data.payload.infoHash)
+        return exportTorrentResultSchema.parse({
+          protocolVersion: PROTOCOL_VERSION,
+          requestId: request.data.requestId,
+          ok: true,
+          value: { saved }
+        })
+      } catch {
+        return exportTorrentResultSchema.parse(
+          errorResult(
+            request.data.requestId,
+            'INTERNAL',
+            'The torrent file could not be saved.',
+            true
+          )
+        )
+      }
     }
   )
 
@@ -341,6 +465,24 @@ export function registerDesktopIpc(options: DesktopIpcOptions): () => void {
       const chosen = choosePath
         ? await choosePath(request.data.payload.kind)
         : { path: null, summary: null }
+      if (request.data.payload.kind === 'subtitle' && chosen.path !== null) {
+        try {
+          grantSubtitlePath(
+            chosen.path,
+            await captureSubtitleGrant(chosen.path)
+          )
+        } catch {
+          diagnostics.warn('subtitle.grant-capture-failed')
+          return choosePathResultSchema.parse(
+            errorResult(
+              request.data.requestId,
+              'INTERNAL',
+              'The selected subtitle file could not be authorized.',
+              true
+            )
+          )
+        }
+      }
       return choosePathResultSchema.parse({
         protocolVersion: PROTOCOL_VERSION,
         requestId: request.data.requestId,
@@ -477,8 +619,10 @@ export function registerDesktopIpc(options: DesktopIpcOptions): () => void {
   })
 
   return () => {
+    subtitlePathGrants.clear()
     frameIpc.removeHandler(DESKTOP_BOOTSTRAP_CHANNEL)
     frameIpc.removeHandler(DESKTOP_CONTEXT_MENU_CHANNEL)
+    frameIpc.removeHandler(DESKTOP_EXPORT_TORRENT_CHANNEL)
     frameIpc.removeHandler(DESKTOP_EXTERNAL_PLAYER_CHANNEL)
     frameIpc.removeHandler(DESKTOP_CHOOSE_PATH_CHANNEL)
     frameIpc.removeHandler(DESKTOP_PREFERENCES_CHANNEL)

@@ -24,6 +24,7 @@ class FakeSocket extends EventEmitter implements WssSocket {
   /** Frames accepted before the transport starts refusing, if ever. */
   acceptLimit = Number.POSITIVE_INFINITY
   readonly sent: string[] = []
+  response: 'failure' | 'none' | 'success' = 'success'
 
   close(): void {
     this.closed = true
@@ -32,6 +33,22 @@ class FakeSocket extends EventEmitter implements WssSocket {
   send(data: string): void {
     if (this.sent.length >= this.acceptLimit) throw new Error('refused')
     this.sent.push(data)
+    const frame = JSON.parse(data) as {
+      answer?: unknown
+      event?: string
+      info_hash?: string
+    }
+    if (frame.answer !== undefined || frame.event === 'stopped') return
+    if (this.response === 'none') return
+    queueMicrotask(() => {
+      this.deliver({
+        action: 'announce',
+        ...(this.response === 'failure'
+          ? { 'failure reason': 'tracker refused' }
+          : {}),
+        info_hash: frame.info_hash
+      })
+    })
   }
 
   terminate(): void {
@@ -44,6 +61,7 @@ class FakeSocket extends EventEmitter implements WssSocket {
 }
 
 type Harness = {
+  activated: string[]
   activation: WssActivation
   /** Every endpoint an offer was generated for, in request order. */
   offerEndpoints: string[]
@@ -63,11 +81,16 @@ function harness(
   options: {
     /** Frames each named endpoint accepts before its transport refuses. */
     acceptLimits?: ReadonlyMap<string, number>
+    exhaust?: () => void
     refuse?: ReadonlySet<string>
+    responses?: ReadonlyMap<string, FakeSocket['response']>
+    retire?: (url: string) => void
+    serialRetirement?: boolean
     tiers?: ReadonlyArray<ReadonlyArray<string>>
   } = {}
 ): Harness {
   const opened: string[] = []
+  const activated: string[] = []
   const offerEndpoints: string[] = []
   const offers: Harness['offers'] = []
   const sockets = new Map<string, FakeSocket>()
@@ -82,6 +105,7 @@ function harness(
       const socket = new FakeSocket()
       const limit = options.acceptLimits?.get(url)
       if (limit !== undefined) socket.acceptLimit = limit
+      socket.response = options.responses?.get(url) ?? 'success'
       sockets.set(url, socket)
       // The endpoint attaches its listeners synchronously after this
       // resolves, so the open event is delivered on the next turn.
@@ -96,17 +120,22 @@ function harness(
       }))
     },
     infoHash: INFO_HASH,
+    onActivated: url => activated.push(url),
     onAnswer: () => undefined,
+    onExhausted: options.exhaust,
     onOffer: (offer, trackerUrl, reply) => {
       offers.push({ offer, trackerUrl })
       respond = reply
     },
+    onRetireEndpoint: options.retire,
     peerId: PEER_ID,
     progress: () => ({ downloaded: 0, left: 10, uploaded: 0 }),
+    serialRetirement: options.serialRetirement,
     tiers: options.tiers ?? [['wss://one.example'], ['wss://two.example']]
   })
 
   return {
+    activated,
     activation,
     offerEndpoints,
     offers,
@@ -143,6 +172,10 @@ describe('WssActivation', () => {
       'wss://one.example',
       'wss://two.example'
     ])
+    expect(context.activated).toEqual([
+      'wss://one.example',
+      'wss://two.example'
+    ])
     for (const socket of context.sockets.values()) {
       expect(socket.sent).toHaveLength(1)
       expect(JSON.parse(socket.sent[0] as string)).toMatchObject({
@@ -151,6 +184,70 @@ describe('WssActivation', () => {
       })
     }
   })
+
+  it('does not activate until the matching started response arrives', async () => {
+    const url = 'wss://one.example'
+    const context = harness({
+      responses: new Map([[url, 'none']]),
+      tiers: [[url]]
+    })
+
+    const started = context.activation.start()
+    await settle()
+    expect(context.activated).toEqual([])
+
+    const socket = context.sockets.get(url)
+    if (!socket) throw new Error('The endpoint never opened')
+    socket.deliver({ action: 'announce', info_hash: INFO_HASH })
+    await settle()
+    await started
+
+    expect(context.activated).toEqual([url])
+  })
+
+  it('exhausts a staging endpoint after a tracker failure response', async () => {
+    const events: string[] = []
+    const url = 'wss://one.example'
+    const context = harness({
+      exhaust: () => events.push('exhausted'),
+      responses: new Map([[url, 'failure']]),
+      retire: () => events.push('retired'),
+      serialRetirement: true,
+      tiers: [[url]]
+    })
+
+    const started = context.activation.start()
+    await vi.advanceTimersByTimeAsync(WSS_TRACKER_LIMITS.terminateGraceMs + 20)
+    await settle()
+    await started
+
+    expect(context.activated).toEqual([])
+    expect(events).toEqual(['retired', 'exhausted'])
+  })
+
+  it.each(['close', 'error'] as const)(
+    'exhausts an active staging endpoint after socket %s',
+    async event => {
+      const exhausted = vi.fn()
+      const url = 'wss://one.example'
+      const context = harness({
+        exhaust: exhausted,
+        serialRetirement: true,
+        tiers: [[url]]
+      })
+      const started = context.activation.start()
+      await settle()
+      await started
+
+      const socket = context.sockets.get(url)
+      if (!socket) throw new Error('The endpoint never opened')
+      socket.emit(event, ...(event === 'error' ? [new Error('failed')] : []))
+      await settle()
+
+      expect(exhausted).toHaveBeenCalledOnce()
+      expect(context.activation.snapshot().live).toEqual([])
+    }
+  )
 
   it('tries one endpoint from every tier before any tier’s second', async () => {
     const context = harness({
@@ -325,6 +422,54 @@ describe('WssActivation', () => {
     expect(broken.closed).toBe(true)
     // The refused stopped attempt is made once and never retried.
     expect(broken.sent).toHaveLength(1)
+  })
+
+  it('awaits close and retirement before staging failover opens', async () => {
+    const retired: string[] = []
+    const context = harness({
+      acceptLimits: new Map([['wss://one.example', 1]]),
+      retire: url => retired.push(url),
+      serialRetirement: true,
+      tiers: [['wss://one.example', 'wss://two.example']]
+    })
+    const started = context.activation.start()
+    await settle()
+    await started
+
+    await vi.advanceTimersByTimeAsync(
+      WSS_TRACKER_LIMITS.defaultIntervalSeconds * 1_000
+    )
+    await settle()
+    expect(context.opened).toEqual(['wss://one.example'])
+    expect(retired).toEqual([])
+
+    await vi.advanceTimersByTimeAsync(WSS_TRACKER_LIMITS.terminateGraceMs + 10)
+    await settle()
+    expect(retired).toEqual(['wss://one.example'])
+    expect(context.opened).toEqual(['wss://one.example', 'wss://two.example'])
+  })
+
+  it('reports exhaustion only after serial WSS retirement', async () => {
+    const order: string[] = []
+    const context = harness({
+      acceptLimits: new Map([['wss://one.example', 1]]),
+      exhaust: () => order.push('exhausted'),
+      retire: () => order.push('retired'),
+      serialRetirement: true,
+      tiers: [['wss://one.example']]
+    })
+    const started = context.activation.start()
+    await settle()
+    await started
+
+    await vi.advanceTimersByTimeAsync(
+      WSS_TRACKER_LIMITS.defaultIntervalSeconds * 1_000 +
+        WSS_TRACKER_LIMITS.terminateGraceMs +
+        10
+    )
+    await settle()
+
+    expect(order).toEqual(['retired', 'exhausted'])
   })
 
   it('generates each endpoint’s offers against that endpoint', async () => {

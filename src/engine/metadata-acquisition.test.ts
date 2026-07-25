@@ -61,6 +61,11 @@ class FakeTorrent extends EventEmitter implements AcquisitionTorrent {
     callback()
   }
 
+  removePeer(peer: string): void {
+    const index = this.peers.indexOf(peer)
+    if (index >= 0) this.peers.splice(index, 1)
+  }
+
   /** Delivers the info dictionary the way WebTorrent does. */
   deliver(bytes: Uint8Array): void {
     this.torrentFile = bytes
@@ -70,20 +75,28 @@ class FakeTorrent extends EventEmitter implements AcquisitionTorrent {
 
 type Harness = {
   acquisition: MetadataAcquisition
-  discovery: { started: number; stopped: number }
+  addOptions: Record<string, unknown>[]
+  discovery: { frozen: number; started: number; stopped: number }
   staging: { leased: number; released: number }
   torrents: FakeTorrent[]
 }
 
 function harness(
-  options: { discoverFails?: boolean; stagingFails?: boolean } = {}
+  options: {
+    addFails?: boolean
+    discoverFails?: boolean
+    stagingFails?: boolean
+  } = {}
 ): Harness {
   const torrents: FakeTorrent[] = []
-  const discovery = { started: 0, stopped: 0 }
+  const addOptions: Record<string, unknown>[] = []
+  const discovery = { frozen: 0, started: 0, stopped: 0 }
   const staging = { leased: 0, released: 0 }
 
   const client: AcquisitionClient = {
-    add: () => {
+    add: (_uri, addOption) => {
+      addOptions.push(addOption)
+      if (options.addFails) throw new Error('duplicate torrent')
       const torrent = new FakeTorrent()
       torrents.push(torrent)
       return torrent
@@ -91,11 +104,21 @@ function harness(
   }
 
   const acquisition = new MetadataAcquisition({
-    discover: async () => {
-      if (options.discoverFails) throw new Error('unreachable')
+    discover: () => {
       discovery.started += 1
-      return async () => {
-        discovery.stopped += 1
+      let frozen = false
+      return {
+        freeze: () => {
+          if (frozen) return
+          frozen = true
+          discovery.frozen += 1
+        },
+        ready: options.discoverFails
+          ? Promise.reject(new Error('unreachable'))
+          : Promise.resolve(),
+        stop: async () => {
+          discovery.stopped += 1
+        }
       }
     },
     openStaging: async () => {
@@ -110,11 +133,10 @@ function harness(
         }
       }
     },
-    stagingPath: '/tmp/staging',
     timeoutMs: 50
   })
 
-  return { acquisition, discovery, staging, torrents }
+  return { acquisition, addOptions, discovery, staging, torrents }
 }
 
 function preparedFor(infoHash: string): PreparedMagnet {
@@ -140,11 +162,19 @@ describe('MetadataAcquisition', () => {
     await vi.waitFor(() => expect(context.torrents).toHaveLength(1))
     context.torrents[0]?.deliver(fixture.bytes)
 
-    expect(new Uint8Array(await pending)).toEqual(fixture.bytes)
-    // The staging torrent never survives its own acquisition.
+    // Destruction begins inside the metadata event, before WebTorrent can
+    // continue into verification or payload I/O.
     expect(context.torrents[0]?.destroyed).toBe(true)
     expect(context.torrents[0]?.destroyedStore).toBe(true)
-    expect(context.discovery).toEqual({ started: 1, stopped: 1 })
+    expect(context.addOptions[0]).toMatchObject({
+      announce: [],
+      deselect: true,
+      destroyStoreOnDestroy: true,
+      store: expect.any(Function),
+      storeCacheSlots: 0
+    })
+    expect(new Uint8Array(await pending)).toEqual(fixture.bytes)
+    expect(context.discovery).toEqual({ frozen: 1, started: 1, stopped: 1 })
     // The staging client is leased for the acquisition and given back with it.
     expect(context.staging).toEqual({ leased: 1, released: 1 })
   })
@@ -197,6 +227,119 @@ describe('MetadataAcquisition', () => {
     expect(context.torrents[0]?.destroyed).toBe(true)
   })
 
+  it('freezes discovery synchronously before torrent destruction', async () => {
+    const fixture = torrentFixture()
+    const order: string[] = []
+    const torrent = new FakeTorrent()
+    torrent.destroy = (_options, callback) => {
+      order.push('destroy')
+      torrent.destroyed = true
+      callback()
+    }
+    const acquisition = new MetadataAcquisition({
+      discover: () => ({
+        freeze: () => order.push('freeze'),
+        ready: Promise.resolve(),
+        stop: async () => undefined
+      }),
+      openStaging: async () => ({
+        client: { add: () => torrent },
+        peerId: new Uint8Array(20),
+        port: 51_413,
+        release: async () => undefined
+      })
+    })
+
+    const pending = acquisition.acquire(preparedFor(fixture.infoHash))
+    await vi.waitFor(() => expect(torrent.listenerCount('metadata')).toBe(1))
+    torrent.deliver(fixture.bytes)
+    await pending
+
+    expect(order.slice(0, 2)).toEqual(['freeze', 'destroy'])
+  })
+
+  it('marks a destroy timeout unhealthy and holds the slot until callback', async () => {
+    const fixture = torrentFixture()
+    const torrent = new FakeTorrent()
+    const destroy = {
+      finish: null as ((error?: Error) => void) | null
+    }
+    torrent.destroy = (options, callback) => {
+      torrent.destroyed = true
+      torrent.destroyedStore = options.destroyStore
+      destroy.finish = callback
+    }
+    const released = vi.fn()
+    const unhealthy = vi.fn()
+    const acquisition = new MetadataAcquisition({
+      destroyTimeoutMs: 10,
+      discover: () => ({
+        freeze: () => undefined,
+        ready: Promise.resolve(),
+        stop: async () => undefined
+      }),
+      openStaging: async () => ({
+        client: { add: () => torrent },
+        peerId: new Uint8Array(20),
+        port: 51_413,
+        release: async () => {
+          released()
+        }
+      }),
+      onUnhealthy: unhealthy
+    })
+
+    const pending = acquisition.acquire(preparedFor(fixture.infoHash))
+    await vi.waitFor(() => expect(torrent.listenerCount('metadata')).toBe(1))
+    torrent.deliver(fixture.bytes)
+
+    await expect(pending).rejects.toMatchObject({ code: 'TEARDOWN_FAILED' })
+    expect(unhealthy).toHaveBeenCalledOnce()
+    expect(released).not.toHaveBeenCalled()
+    expect(acquisition.activeCount).toBe(1)
+    await expect(
+      acquisition.acquire(preparedFor(fixture.infoHash))
+    ).rejects.toMatchObject({ code: 'TEARDOWN_FAILED' })
+
+    if (!destroy.finish) throw new Error('Expected a destroy callback')
+    destroy.finish()
+    await vi.waitFor(() => expect(released).toHaveBeenCalledOnce())
+    await vi.waitFor(() => expect(acquisition.activeCount).toBe(0))
+  })
+
+  it('does not release a slot from the destroyed flag before a callback', async () => {
+    const torrent = new FakeTorrent()
+    const released = vi.fn()
+    const unhealthy = vi.fn()
+    const acquisition = new MetadataAcquisition({
+      destroyTimeoutMs: 10,
+      discover: () => ({
+        freeze: () => undefined,
+        ready: Promise.resolve(),
+        stop: async () => undefined
+      }),
+      onUnhealthy: unhealthy,
+      openStaging: async () => ({
+        client: { add: () => torrent },
+        peerId: new Uint8Array(20),
+        port: 51_413,
+        release: async () => {
+          released()
+        }
+      })
+    })
+    const pending = acquisition.acquire(preparedFor('d'.repeat(40)))
+    await vi.waitFor(() => expect(torrent.listenerCount('error')).toBe(1))
+
+    torrent.destroyed = true
+    torrent.emit('error', new Error('auto-destroyed'))
+
+    await expect(pending).rejects.toMatchObject({ code: 'TEARDOWN_FAILED' })
+    expect(unhealthy).toHaveBeenCalledOnce()
+    expect(released).not.toHaveBeenCalled()
+    expect(acquisition.activeCount).toBe(1)
+  })
+
   it('runs at most two acquisitions at once', async () => {
     const context = harness()
     const first = context.acquisition.acquire(preparedFor('e'.repeat(40)))
@@ -223,6 +366,16 @@ describe('MetadataAcquisition', () => {
       context.acquisition.acquire(preparedFor('a'.repeat(40)))
     ).rejects.toMatchObject({ code: 'STAGING_UNAVAILABLE' })
     expect(context.torrents).toHaveLength(0)
+    expect(context.acquisition.activeCount).toBe(0)
+  })
+
+  it('releases its staging lease when the client refuses the add', async () => {
+    const context = harness({ addFails: true })
+
+    await expect(
+      context.acquisition.acquire(preparedFor('a'.repeat(40)))
+    ).rejects.toMatchObject({ code: 'TORRENT_ERROR' })
+    expect(context.staging).toEqual({ leased: 1, released: 1 })
     expect(context.acquisition.activeCount).toBe(0)
   })
 

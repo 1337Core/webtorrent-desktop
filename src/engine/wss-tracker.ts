@@ -7,6 +7,7 @@ import {
 } from './wss-message'
 
 export const WSS_TRACKER_LIMITS = Object.freeze({
+  announceDeadlineMs: 15_000,
   answerTimeoutMs: 50_000,
   connectDeadlineMs: 15_000,
   defaultIntervalSeconds: 120,
@@ -72,11 +73,17 @@ export type WssTrackerOptions = Readonly<{
     offer: Readonly<{ offerId: string; peerId: string; sdp: string }>
   ) => void
   onInterval?: (seconds: number) => void
+  onFailure?: (error: WssTrackerError) => void
   peerId: string
   trackerUrl: string
 }>
 
 type PendingOffer = { expiresAtMs: number; offerId: string }
+type PendingAnnounce = {
+  reject: (error: WssTrackerError) => void
+  resolve: () => void
+  timer: ReturnType<typeof setTimeout>
+}
 
 /**
  * One isolated, nonredirecting socket for a single torrent and endpoint.
@@ -94,6 +101,7 @@ export class WssTrackerEndpoint {
   readonly #infoHash: string
   readonly #now: () => number
   readonly #onAnswer: WssTrackerOptions['onAnswer']
+  readonly #onFailure: (error: WssTrackerError) => void
   readonly #onInterval: (seconds: number) => void
   readonly #onOffer: (
     offer: Readonly<{ offerId: string; peerId: string; sdp: string }>
@@ -103,8 +111,11 @@ export class WssTrackerEndpoint {
   readonly #signalTimestamps: number[] = []
   readonly #trackerUrl: string
   #closed = false
+  #didConnect = false
   #heartbeatNonce: string | null = null
   #lastInboundMs = 0
+  #failureNotified = false
+  #pendingAnnounce: PendingAnnounce | null = null
   #quarantined = false
   #socket: WssSocket | null = null
   #trackerId: string | null = null
@@ -116,6 +127,7 @@ export class WssTrackerEndpoint {
     this.#infoHash = options.infoHash
     this.#now = options.now ?? (() => Date.now())
     this.#onAnswer = options.onAnswer
+    this.#onFailure = options.onFailure ?? (() => undefined)
     this.#onInterval = options.onInterval ?? (() => undefined)
     this.#onOffer = options.onOffer ?? (() => undefined)
     this.#peerId = options.peerId
@@ -143,6 +155,7 @@ export class WssTrackerEndpoint {
     }
 
     const socket = this.#createSocket(this.#trackerUrl)
+    this.#socket = socket
     await new Promise<void>((resolve, reject) => {
       let settled = false
       const finish = (error: WssTrackerError | null): void => {
@@ -153,23 +166,33 @@ export class WssTrackerEndpoint {
         else resolve()
       }
       const timer = setTimeout(() => {
-        socket.terminate()
-        finish(new WssTrackerError('CONNECT_TIMEOUT'))
+        const error = new WssTrackerError('CONNECT_TIMEOUT')
+        try {
+          socket.terminate()
+        } finally {
+          this.#transportFailed(socket, error)
+          finish(error)
+        }
       }, WSS_TRACKER_LIMITS.connectDeadlineMs)
       timer.unref()
 
       socket.on('open', () => finish(null))
-      socket.on('error', () => finish(new WssTrackerError('CONNECT_FAILED')))
+      socket.on('error', () => {
+        const error = new WssTrackerError('CONNECT_FAILED')
+        this.#transportFailed(socket, error)
+        finish(error)
+      })
       socket.on('close', () => {
-        this.#socket = null
-        finish(new WssTrackerError('CONNECT_FAILED'))
+        const error = new WssTrackerError('CONNECT_FAILED')
+        this.#transportFailed(socket, error)
+        finish(error)
       })
       socket.on('message', (...args: unknown[]) => {
         this.#receive(args[0], args[1])
       })
     })
 
-    this.#socket = socket
+    this.#didConnect = true
     this.#lastInboundMs = this.#now()
   }
 
@@ -217,18 +240,31 @@ export class WssTrackerEndpoint {
       usable.push({ offer: { sdp, type: 'offer' }, offer_id: offer.offerId })
     }
 
-    this.#send({
-      action: 'announce',
-      downloaded: input.downloaded,
-      info_hash: this.#infoHash,
-      left: input.left,
-      numwant: usable.length,
-      offers: usable,
-      peer_id: this.#peerId,
-      uploaded: input.uploaded,
-      ...(input.event ? { event: input.event } : {}),
-      ...(this.#trackerId === null ? {} : { 'tracker id': this.#trackerId })
-    })
+    const waitForResponse =
+      input.event === 'stopped' ? null : this.#expectAnnounceResponse()
+    try {
+      this.#send({
+        action: 'announce',
+        downloaded: input.downloaded,
+        info_hash: this.#infoHash,
+        left: input.left,
+        numwant: usable.length,
+        offers: usable,
+        peer_id: this.#peerId,
+        uploaded: input.uploaded,
+        ...(input.event ? { event: input.event } : {}),
+        ...(this.#trackerId === null ? {} : { 'tracker id': this.#trackerId })
+      })
+    } catch (cause) {
+      const error =
+        cause instanceof WssTrackerError
+          ? cause
+          : new WssTrackerError('CONNECT_FAILED')
+      this.#rejectPendingAnnounce(error)
+      await waitForResponse?.catch(() => undefined)
+      throw error
+    }
+    await waitForResponse
   }
 
   /**
@@ -284,6 +320,7 @@ export class WssTrackerEndpoint {
     if (this.#closed) return
     this.#closed = true
     this.#pendingOffers.clear()
+    this.#rejectPendingAnnounce(new WssTrackerError('TRANSPORT_DISABLED'))
 
     const socket = this.#socket
     this.#socket = null
@@ -340,13 +377,21 @@ export class WssTrackerEndpoint {
     }
 
     if (message.kind === 'announce') {
-      if (message.value.failureReason !== null) return
+      if (message.value.failureReason !== null) {
+        const error = new WssTrackerError('TRACKER_FAILURE')
+        const awaitingResponse = this.#pendingAnnounce !== null
+        this.#rejectPendingAnnounce(error)
+        if (!awaitingResponse) this.#notifyFailure(error)
+        return
+      }
+      if (!this.#pendingAnnounce) return
       if (message.value.trackerId !== null) {
         this.#trackerId = message.value.trackerId
       }
       this.#onInterval(
         message.value.interval ?? WSS_TRACKER_LIMITS.defaultIntervalSeconds
       )
+      this.#resolvePendingAnnounce()
       return
     }
 
@@ -412,6 +457,10 @@ export class WssTrackerEndpoint {
   #quarantine(): void {
     this.#quarantined = true
     this.#pendingOffers.clear()
+    const error = new WssTrackerError('QUARANTINED')
+    const awaitingResponse = this.#pendingAnnounce !== null
+    this.#rejectPendingAnnounce(error)
+    if (!awaitingResponse) this.#notifyFailure(error)
     const socket = this.#socket
     this.#socket = null
     try {
@@ -419,5 +468,53 @@ export class WssTrackerEndpoint {
     } catch {
       // The endpoint stays quarantined for the rest of the activation.
     }
+  }
+
+  #expectAnnounceResponse(): Promise<void> {
+    if (this.#pendingAnnounce) {
+      throw new WssTrackerError('TRACKER_FAILURE')
+    }
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const error = new WssTrackerError('TRACKER_FAILURE')
+        this.#rejectPendingAnnounce(error)
+      }, WSS_TRACKER_LIMITS.announceDeadlineMs)
+      timer.unref()
+      this.#pendingAnnounce = { reject, resolve, timer }
+    })
+  }
+
+  #resolvePendingAnnounce(): void {
+    const pending = this.#pendingAnnounce
+    if (!pending) return
+    this.#pendingAnnounce = null
+    clearTimeout(pending.timer)
+    pending.resolve()
+  }
+
+  #rejectPendingAnnounce(error: WssTrackerError): void {
+    const pending = this.#pendingAnnounce
+    if (!pending) return
+    this.#pendingAnnounce = null
+    clearTimeout(pending.timer)
+    pending.reject(error)
+  }
+
+  #notifyFailure(error: WssTrackerError): void {
+    if (this.#closed || this.#failureNotified) return
+    this.#failureNotified = true
+    try {
+      this.#onFailure(error)
+    } catch {
+      // Lifecycle observation cannot change endpoint failure.
+    }
+  }
+
+  #transportFailed(socket: WssSocket, error: WssTrackerError): void {
+    if (this.#socket !== socket || this.#closed) return
+    this.#socket = null
+    const awaitingResponse = this.#pendingAnnounce !== null
+    this.#rejectPendingAnnounce(error)
+    if (this.#didConnect && !awaitingResponse) this.#notifyFailure(error)
   }
 }

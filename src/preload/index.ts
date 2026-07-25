@@ -7,6 +7,7 @@ import {
   DESKTOP_CHOOSE_PATH_CHANNEL,
   DESKTOP_CONTEXT_MENU_CHANNEL,
   DESKTOP_ENGINE_RESTART_CHANNEL,
+  DESKTOP_EXPORT_TORRENT_CHANNEL,
   DESKTOP_EXTERNAL_PLAYER_CHANNEL,
   DESKTOP_MENU_ACTION_CHANNEL,
   DESKTOP_OPEN_INTENT_CHANNEL,
@@ -17,6 +18,7 @@ import {
   preloadTrustProofSchema,
   PROTOCOL_VERSION,
   externalPlayerResultSchema,
+  exportTorrentResultSchema,
   menuActionEventSchema,
   openIntentEventSchema,
   restartEngineResultSchema,
@@ -27,6 +29,7 @@ import {
   type ContextMenuResult,
   type EngineCommand,
   type ExternalPlayerResult,
+  type ExportTorrentResult,
   type MenuActionEvent,
   type OpenIntentEvent,
   type SetPreferencesResult,
@@ -38,6 +41,8 @@ import {
 import { checkPayloadBudget } from '../shared/payload-budget'
 
 const INVOKE_TIMEOUT_MS = 5_000
+/** Native open/save panels may remain open while the owner makes a choice. */
+const INTERACTIVE_INVOKE_TIMEOUT_MS = 15 * 60_000
 /** A drop carries a bounded number of torrents, never a whole folder tree. */
 const MAX_DROPPED_FILES = 32
 const RESULT_BUDGET = {
@@ -85,7 +90,8 @@ function protocolError(
 
 async function invokeBounded(
   channel: string,
-  request: unknown
+  request: unknown,
+  timeoutMs = INVOKE_TIMEOUT_MS
 ): Promise<unknown> {
   let timeout: ReturnType<typeof setTimeout> | null = null
   try {
@@ -94,7 +100,7 @@ async function invokeBounded(
       new Promise<never>((_resolve, reject) => {
         timeout = setTimeout(
           () => reject(new Error('IPC request timed out')),
-          INVOKE_TIMEOUT_MS
+          timeoutMs
         )
       })
     ])
@@ -264,16 +270,20 @@ async function runTorrentCommand(
 
 /** Opens a main-owned chooser and returns only the path the user picked. */
 async function choosePath(
-  kind: 'application' | 'directory' | 'source' | 'torrent-file'
+  kind: 'application' | 'directory' | 'source' | 'subtitle' | 'torrent-file'
 ): Promise<ChoosePathResult> {
   const requestId = crypto.randomUUID()
   try {
-    const value = await invokeBounded(DESKTOP_CHOOSE_PATH_CHANNEL, {
-      protocolVersion: PROTOCOL_VERSION,
-      requestId,
-      command: 'choosePath',
-      payload: { kind }
-    })
+    const value = await invokeBounded(
+      DESKTOP_CHOOSE_PATH_CHANNEL,
+      {
+        protocolVersion: PROTOCOL_VERSION,
+        requestId,
+        command: 'choosePath',
+        payload: { kind }
+      },
+      INTERACTIVE_INVOKE_TIMEOUT_MS
+    )
     const result = choosePathResultSchema.safeParse(value)
     if (!result.success || result.data.requestId !== requestId) {
       return protocolError(
@@ -287,6 +297,36 @@ async function choosePath(
       requestId,
       'The chooser could not be opened.'
     ) as ChoosePathResult
+  }
+}
+
+/** Opens main's save dialog for one already-archived torrent. */
+async function exportTorrent(infoHash: string): Promise<ExportTorrentResult> {
+  const requestId = crypto.randomUUID()
+  try {
+    const value = await invokeBounded(
+      DESKTOP_EXPORT_TORRENT_CHANNEL,
+      {
+        protocolVersion: PROTOCOL_VERSION,
+        requestId,
+        command: 'exportTorrent',
+        payload: { infoHash }
+      },
+      INTERACTIVE_INVOKE_TIMEOUT_MS
+    )
+    const result = exportTorrentResultSchema.safeParse(value)
+    if (!result.success || result.data.requestId !== requestId) {
+      return protocolError(
+        requestId,
+        'The application returned an invalid export response.'
+      ) as ExportTorrentResult
+    }
+    return result.data
+  } catch {
+    return protocolError(
+      requestId,
+      'The torrent save dialog could not be opened.'
+    ) as ExportTorrentResult
   }
 }
 
@@ -430,6 +470,7 @@ contextBridge.exposeInMainWorld(
   'desktop',
   Object.freeze({
     choosePath,
+    exportTorrent,
     getBootstrap,
     openExternalPlayer,
     openTorrentMenu,

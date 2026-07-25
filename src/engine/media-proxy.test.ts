@@ -134,7 +134,7 @@ describe('MediaProxy', () => {
     expect(multipart.status).toBe(416)
   })
 
-  it('answers HEAD and OPTIONS without a body', async () => {
+  it('answers HEAD and trusted-app OPTIONS without a body', async () => {
     const lease = proxy.open({
       fileIndex: 0,
       infoHash: INFO_HASH,
@@ -146,11 +146,51 @@ describe('MediaProxy', () => {
     expect(head.body).toBe('')
     expect(head.headers.get('content-length')).toBe('16')
 
-    const options = await request(lease.url, { method: 'OPTIONS' })
+    const options = await request(lease.url, {
+      headers: {
+        'access-control-request-method': 'GET',
+        origin: MEDIA_PROXY_LIMITS.applicationOrigin
+      },
+      method: 'OPTIONS'
+    })
     expect(options.status).toBe(204)
+    expect(options.headers.get('access-control-allow-origin')).toBe(
+      MEDIA_PROXY_LIMITS.applicationOrigin
+    )
+    expect(options.headers.get('access-control-allow-methods')).toBe(
+      'GET, HEAD, OPTIONS'
+    )
 
     const post = await request(lease.url, { method: 'POST' })
     expect(post.status).toBe(405)
+  })
+
+  it('serves an empty asset without inventing a one-byte range', async () => {
+    let reads = 0
+    const lease = proxy.open({
+      fileIndex: 0,
+      infoHash: INFO_HASH,
+      source: source({
+        createReadStream: () => {
+          reads += 1
+          return Readable.from([])
+        },
+        length: 0
+      })
+    })
+
+    const get = await request(lease.url)
+    expect(get.status).toBe(200)
+    expect(get.body).toBe('')
+    expect(get.headers.get('content-length')).toBe('0')
+    expect(reads).toBe(0)
+
+    const range = await request(lease.url, {
+      headers: { range: 'bytes=0-0' }
+    })
+    expect(range.status).toBe(416)
+    expect(range.headers.get('content-range')).toBe('bytes */0')
+    expect(reads).toBe(0)
   })
 
   it('maps no index route and refuses a truncated path', async () => {
@@ -184,13 +224,28 @@ describe('MediaProxy', () => {
       (await request(lease.url, { headers: { origin: 'https://evil.test' } }))
         .status
     ).toBe(403)
+    const trusted = await request(lease.url, {
+      headers: { origin: MEDIA_PROXY_LIMITS.applicationOrigin }
+    })
+    expect(trusted.status).toBe(200)
+    expect(trusted.headers.get('access-control-allow-origin')).toBe(
+      MEDIA_PROXY_LIMITS.applicationOrigin
+    )
+    expect(trusted.headers.get('vary')).toBe('Origin')
+    const originless = await request(lease.url)
+    expect(originless.headers.get('access-control-allow-origin')).toBeNull()
+    const hostilePreflight = await request(lease.url, {
+      headers: {
+        'access-control-request-method': 'GET',
+        origin: 'https://evil.test'
+      },
+      method: 'OPTIONS'
+    })
+    expect(hostilePreflight.status).toBe(403)
     expect(
-      (
-        await request(lease.url, {
-          headers: { origin: MEDIA_PROXY_LIMITS.applicationOrigin }
-        })
-      ).status
-    ).toBe(200)
+      hostilePreflight.headers.get('access-control-allow-origin')
+    ).toBeNull()
+    expect((await request(lease.url, { method: 'OPTIONS' })).status).toBe(403)
     expect(await rawRequest(lease.url, { host: 'localhost:1' })).toBe(403)
     expect(await rawRequest(lease.url, { host: `127.0.0.1:${port}` })).toBe(200)
   })

@@ -1,5 +1,12 @@
 import { randomBytes, randomUUID } from 'node:crypto'
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readdir,
+  rm,
+  writeFile
+} from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { browser, expect } from '@wdio/globals'
@@ -103,6 +110,31 @@ describe('creation, preferences, and playback', () => {
     })
     expect(listed.value?.total).toBe(1)
     expect(await readdir(sourceRoot)).toEqual(['clip.bin'])
+  })
+
+  it('does not let renderer script bypass the main-owned export dialog', async () => {
+    const listed = await run({
+      command: 'list-torrents',
+      payload: { cursor: 0, limit: 50 }
+    })
+    const items = listed.value?.items as ReadonlyArray<{ infoHash: string }>
+    const destinationPath = path.join(root, 'bypassed.torrent')
+    const exported = await run({
+      command: 'export-torrent',
+      payload: {
+        destinationPath,
+        infoHash: items[0]?.infoHash
+      }
+    })
+
+    expect(exported.ok).toBe(false)
+    expect(exported.code).toBe('INVALID_REQUEST')
+    expect(
+      await access(destinationPath).then(
+        () => true,
+        () => false
+      )
+    ).toBe(false)
   })
 
   it('serves a completed file through the loopback proxy only by lease', async () => {

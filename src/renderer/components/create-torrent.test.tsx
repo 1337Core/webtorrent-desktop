@@ -18,6 +18,9 @@ let chosenSummary: { fileCount: number; totalBytes: number } | null = {
   totalBytes: 2_500
 }
 let failNext: string | null = null
+let exportFailure: string | null = null
+let exportSaved = true
+let exportedHashes: string[] = []
 
 function response(operation: EngineCommand): TorrentCommandResult {
   const envelope = {
@@ -77,6 +80,9 @@ beforeEach(() => {
   chosenPath = SOURCE
   chosenSummary = { fileCount: 3, totalBytes: 2_500 }
   failNext = null
+  exportFailure = null
+  exportSaved = true
+  exportedHashes = []
   Object.defineProperty(window, 'desktop', {
     configurable: true,
     value: {
@@ -88,6 +94,29 @@ beforeEach(() => {
           value: { path: chosenPath, summary: chosenSummary }
         })
       ),
+      exportTorrent: vi.fn((infoHash: string) => {
+        exportedHashes.push(infoHash)
+        if (exportFailure) {
+          const displayMessage = exportFailure
+          exportFailure = null
+          return Promise.resolve({
+            protocolVersion: 1 as const,
+            requestId: '00000000-0000-4000-8000-000000000003',
+            ok: false as const,
+            error: {
+              code: 'INTERNAL' as const,
+              displayMessage,
+              retryable: true
+            }
+          })
+        }
+        return Promise.resolve({
+          protocolVersion: 1 as const,
+          requestId: '00000000-0000-4000-8000-000000000003',
+          ok: true as const,
+          value: { saved: exportSaved }
+        })
+      }),
       getBootstrap: vi.fn(),
       onEngineStatus: vi.fn(() => () => undefined),
       restartEngine: vi.fn(),
@@ -124,6 +153,7 @@ describe('CreateTorrentPage', () => {
 
     await user.click(screen.getByRole('button', { name: 'Create Torrent' }))
     await waitFor(() => expect(onCreated).toHaveBeenCalledOnce())
+    expect(exportedHashes).toEqual([INFO_HASH])
 
     const created = commands.at(-1)
     expect(created).toMatchObject({
@@ -257,5 +287,76 @@ describe('CreateTorrentPage', () => {
     expect(
       await screen.findByText('A selected tracker is not supported.')
     ).toBeDefined()
+    expect(exportedHashes).toEqual([])
+  })
+
+  it('lets a completed creation retry a failed export', async () => {
+    const user = userEvent.setup()
+    const onCreated = vi.fn()
+    exportFailure = 'The torrent file could not be saved.'
+    render(<CreateTorrentPage onCancel={vi.fn()} onCreated={onCreated} ready />)
+
+    await user.click(
+      screen.getByRole('button', { name: 'Choose file or folder' })
+    )
+    await screen.findByText(SOURCE)
+    await user.click(screen.getByRole('button', { name: 'Create Torrent' }))
+
+    expect(
+      await screen.findByText('The torrent file could not be saved.')
+    ).toBeDefined()
+    expect(screen.getByText('Seeding clip.mp4.')).toBeDefined()
+    expect(onCreated).not.toHaveBeenCalled()
+
+    await user.click(
+      screen.getByRole('button', { name: 'Save Torrent File...' })
+    )
+    await waitFor(() => expect(onCreated).toHaveBeenCalledOnce())
+    expect(exportedHashes).toEqual([INFO_HASH, INFO_HASH])
+  })
+
+  it('keeps a completed creation open when the initial save is cancelled', async () => {
+    const user = userEvent.setup()
+    const onCreated = vi.fn()
+    exportSaved = false
+    render(<CreateTorrentPage onCancel={vi.fn()} onCreated={onCreated} ready />)
+
+    await user.click(
+      screen.getByRole('button', { name: 'Choose file or folder' })
+    )
+    await screen.findByText(SOURCE)
+    await user.click(screen.getByRole('button', { name: 'Create Torrent' }))
+
+    await waitFor(() => expect(exportedHashes).toEqual([INFO_HASH]))
+    expect(screen.getByText('Seeding clip.mp4.')).toBeDefined()
+    expect(
+      screen.getByRole('button', { name: 'Save Torrent File...' })
+    ).toBeDefined()
+    expect(onCreated).not.toHaveBeenCalled()
+  })
+
+  it('keeps the retry available when its save dialog is cancelled', async () => {
+    const user = userEvent.setup()
+    const onCreated = vi.fn()
+    exportFailure = 'The torrent file could not be saved.'
+    render(<CreateTorrentPage onCancel={vi.fn()} onCreated={onCreated} ready />)
+
+    await user.click(
+      screen.getByRole('button', { name: 'Choose file or folder' })
+    )
+    await screen.findByText(SOURCE)
+    await user.click(screen.getByRole('button', { name: 'Create Torrent' }))
+    await screen.findByText('The torrent file could not be saved.')
+
+    exportSaved = false
+    await user.click(
+      screen.getByRole('button', { name: 'Save Torrent File...' })
+    )
+
+    await waitFor(() => expect(exportedHashes).toEqual([INFO_HASH, INFO_HASH]))
+    expect(
+      screen.getByRole('button', { name: 'Save Torrent File...' })
+    ).toBeDefined()
+    expect(onCreated).not.toHaveBeenCalled()
   })
 })

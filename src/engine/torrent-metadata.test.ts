@@ -371,6 +371,20 @@ describe('prepareMagnet', () => {
     ).resolves.toMatchObject({ dhtEnabled: true })
   })
 
+  it('keeps a WSS-only magnet on bounded tracker staging without DHT consent', async () => {
+    const magnet = [
+      'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567',
+      'tr=wss%3A%2F%2Ftracker.example%2Fannounce'
+    ].join('&')
+
+    await expect(
+      prepareMagnet(magnet, policy, { allowDht: false })
+    ).resolves.toMatchObject({
+      dhtEnabled: false,
+      trackers: ['wss://tracker.example/announce']
+    })
+  })
+
   it('rejects pure-v2 and hybrid exact topics', async () => {
     const btmh = `urn:btmh:1220${'a'.repeat(64)}`
     await expect(

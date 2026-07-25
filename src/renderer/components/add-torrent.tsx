@@ -11,15 +11,20 @@ type PreparationFile = EngineValue<'get-preparation-files'>['items'][number]
 
 const FILE_PAGE_LIMIT = 64
 const MAGNET = /^magnet:\?/iu
+const INFO_HASH = /^[a-f\d]{40}$/iu
 /** How often the pending acquisition is checked, and how long it may run. */
 const ACQUISITION_POLL_MS = 500
 const ACQUISITION_DEADLINE_MS = 130_000
 
 const ACQUISITION_FAILURES: Readonly<Record<string, string>> = {
+  DHT_CONSENT_REQUIRED:
+    'This torrent has no usable tracker. Public DHT lookup was not allowed.',
   INPUT_INVALID: 'That magnet link could not be read.',
   INTERNAL: 'The torrent details could not be fetched.',
   METADATA_UNAVAILABLE:
-    'No peer answered with this torrent’s details. Try again later.'
+    'No peer answered with this torrent’s details. Try again later.',
+  PRIVATE_DHT_METADATA:
+    'The recovered torrent is private. Use a tracker-bearing magnet or torrent file instead.'
 }
 
 type PreparationSource = Extract<
@@ -83,40 +88,52 @@ export function AddTorrentModal({
    * command, so the acquisition is started and then polled until it settles.
    */
   const acquire = useCallback(
-    async (
-      source: Extract<PreparationSource, { kind: 'magnet' }>
-    ): Promise<void> => {
+    async (initialSource: PreparationSource): Promise<void> => {
       setAcquiring(true)
       setFailure(null)
-      const started = await runCommand({
-        command: 'start-acquisition',
-        payload: { source }
-      })
-      if (!started.ok) {
-        setAcquiring(false)
-        setFailure(started.error)
-        return
-      }
-
-      const deadline = Date.now() + ACQUISITION_DEADLINE_MS
-      while (!cancelled.current && Date.now() < deadline) {
-        await new Promise(resolve => setTimeout(resolve, ACQUISITION_POLL_MS))
-        if (cancelled.current) return
-        const polled = await runCommand({
-          command: 'get-acquisition',
-          payload: { acquisitionId: started.value.acquisitionId }
+      let source = initialSource
+      while (!cancelled.current) {
+        const started = await runCommand({
+          command: 'start-acquisition',
+          payload: { source }
         })
-        if (!polled.ok) {
+        if (!started.ok) {
           setAcquiring(false)
-          setFailure(polled.error)
+          setFailure(started.error)
           return
         }
-        if (polled.value.state === 'ready') {
-          setAcquiring(false)
-          setPreparation(polled.value.preparation)
-          return
-        }
-        if (polled.value.state === 'failed') {
+
+        const deadline = Date.now() + ACQUISITION_DEADLINE_MS
+        let retryWithDht = false
+        while (!cancelled.current && Date.now() < deadline) {
+          await new Promise(resolve => setTimeout(resolve, ACQUISITION_POLL_MS))
+          if (cancelled.current) return
+          const polled = await runCommand({
+            command: 'get-acquisition',
+            payload: { acquisitionId: started.value.acquisitionId }
+          })
+          if (!polled.ok) {
+            setAcquiring(false)
+            setFailure(polled.error)
+            return
+          }
+          if (polled.value.state === 'ready') {
+            setAcquiring(false)
+            setPreparation(polled.value.preparation)
+            return
+          }
+          if (polled.value.state !== 'failed') continue
+          if (
+            polled.value.code === 'DHT_CONSENT_REQUIRED' &&
+            !source.allowDhtExposure &&
+            window.confirm(
+              'This torrent has no usable tracker. Look up its info hash on the public DHT?'
+            )
+          ) {
+            source = { ...source, allowDhtExposure: true }
+            retryWithDht = true
+            break
+          }
           setAcquiring(false)
           setFailure({
             code: polled.value.code,
@@ -127,8 +144,8 @@ export function AddTorrentModal({
           })
           return
         }
-      }
-      if (!cancelled.current) {
+        if (retryWithDht) continue
+        if (cancelled.current) return
         setAcquiring(false)
         setFailure({
           code: 'METADATA_UNAVAILABLE',
@@ -137,6 +154,7 @@ export function AddTorrentModal({
             'The torrent details could not be fetched.',
           retryable: true
         })
+        return
       }
     },
     []
@@ -150,6 +168,15 @@ export function AddTorrentModal({
         allowPrivateNetwork: false,
         kind: 'magnet',
         magnet: address
+      })
+      return
+    }
+    if (INFO_HASH.test(address)) {
+      await acquire({
+        allowDhtExposure: false,
+        allowPrivateNetwork: false,
+        infoHash: address.toLowerCase(),
+        kind: 'info-hash'
       })
       return
     }

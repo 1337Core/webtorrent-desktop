@@ -110,6 +110,7 @@ export function App(): React.JSX.Element {
   const [focused, setFocused] = useState(true)
   const [fullScreen, setFullScreen] = useState(false)
   const [controlsHidden, setControlsHidden] = useState(false)
+  const [externalSubtitleRequest, setExternalSubtitleRequest] = useState(0)
 
   // The original root carried the window's own state as classes, and the
   // stylesheet still keys the header and content off them.
@@ -168,6 +169,12 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     if (rendererBoundaryFailed) return undefined
     return window.desktop.onMenuAction(action => {
+      if (action === 'add-subtitles') {
+        if (location === 'player' && playing !== null) {
+          setExternalSubtitleRequest(request => request + 1)
+        }
+        return
+      }
       if (action === 'add-torrent') {
         setLocation('home')
         setModalOpen(true)
@@ -175,7 +182,7 @@ export function App(): React.JSX.Element {
       }
       setLocation(action)
     })
-  }, [rendererBoundaryFailed, setLocation])
+  }, [location, playing, rendererBoundaryFailed, setLocation])
 
   useEffect(() => {
     if (rendererBoundaryFailed) return undefined
@@ -338,6 +345,7 @@ export function App(): React.JSX.Element {
         ) : null}
         {location === 'player' && playing ? (
           <MediaPlayer
+            externalSubtitleRequest={externalSubtitleRequest}
             fileIndex={playing.fileIndex}
             fileName={playing.fileName}
             infoHash={playing.infoHash}

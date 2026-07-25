@@ -112,6 +112,11 @@ describe('parseWssMessage', () => {
         })
       )
     ).toThrow(WssMessageError)
+    expect(() =>
+      parseWssMessage(
+        JSON.stringify({ action: 'scrape', info_hash: INFO_HASH })
+      )
+    ).toThrow(WssMessageError)
   })
 
   it('requires exact twenty-byte binary identities', () => {

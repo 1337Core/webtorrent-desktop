@@ -10,6 +10,7 @@ import { buildAppMenuTemplate, type AppMenuActions } from './app-menu'
 
 function actions(): AppMenuActions & Record<string, ReturnType<typeof vi.fn>> {
   return {
+    addSubtitles: vi.fn(),
     addTorrent: vi.fn(),
     createTorrent: vi.fn(),
     openPreferences: vi.fn(),
@@ -72,12 +73,16 @@ describe('buildAppMenuTemplate', () => {
     file
       .find(item => item.label === 'Create Torrent…')
       ?.click?.(undefined as never, undefined, undefined as never)
+    file
+      .find(item => item.label === 'Add Subtitles File…')
+      ?.click?.(undefined as never, undefined, undefined as never)
     submenu(template, APP_NAME)
       .find(item => item.label === 'Preferences…')
       ?.click?.(undefined as never, undefined, undefined as never)
 
     expect(wired.addTorrent).toHaveBeenCalledOnce()
     expect(wired.createTorrent).toHaveBeenCalledOnce()
+    expect(wired.addSubtitles).toHaveBeenCalledOnce()
     expect(wired.openPreferences).toHaveBeenCalledOnce()
     expect(wired.quit).not.toHaveBeenCalled()
   })

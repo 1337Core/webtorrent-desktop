@@ -1,9 +1,11 @@
+import { randomUUID } from 'node:crypto'
 import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises'
 import path from 'node:path'
+import { TORRENT_METADATA_LIMITS } from './torrent-metadata'
 
 export const TORRENT_ARCHIVE_LIMITS = {
   /** The same ceiling the metadata boundary accepts for one torrent. */
-  maxTorrentBytes: 8_000_000
+  maxTorrentBytes: TORRENT_METADATA_LIMITS.bytes
 } as const
 
 export type TorrentArchiveErrorCode = 'INVALID_INPUT' | 'IO_FAILED'
@@ -86,6 +88,40 @@ export class TorrentArchive {
       return null
     }
     return new Uint8Array(bytes)
+  }
+
+  /**
+   * Copies archived bytes to the path main received from its save dialog.
+   * The destination is replaced atomically, so a failed write cannot leave a
+   * truncated `.torrent` file behind.
+   */
+  async export(infoHash: string, destinationPath: string): Promise<boolean> {
+    if (
+      !path.isAbsolute(destinationPath) ||
+      path.normalize(destinationPath) !== destinationPath ||
+      path.dirname(destinationPath) === destinationPath
+    ) {
+      throw new TorrentArchiveError('INVALID_INPUT')
+    }
+
+    const bytes = await this.load(infoHash)
+    if (bytes === null) return false
+
+    const temporary = `${destinationPath}.${randomUUID()}.tmp`
+    try {
+      const handle = await open(temporary, 'wx', 0o600)
+      try {
+        await handle.writeFile(bytes)
+        await handle.sync()
+      } finally {
+        await handle.close()
+      }
+      await rename(temporary, destinationPath)
+      return true
+    } catch {
+      await unlink(temporary).catch(() => undefined)
+      throw new TorrentArchiveError('IO_FAILED')
+    }
   }
 
   async remove(infoHash: string): Promise<void> {

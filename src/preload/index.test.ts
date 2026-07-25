@@ -9,11 +9,15 @@ import {
 } from 'vitest'
 import {
   DESKTOP_BOOTSTRAP_CHANNEL,
+  DESKTOP_CHOOSE_PATH_CHANNEL,
+  DESKTOP_EXPORT_TORRENT_CHANNEL,
   ENGINE_STATUS_CHANNEL,
   PROTOCOL_VERSION,
   type BootstrapResult,
+  type ChoosePathResult,
   type EngineStatus,
   type EngineStatusEvent,
+  type ExportTorrentResult,
   type RestartEngineResult
 } from '../shared/contracts'
 
@@ -46,6 +50,8 @@ vi.mock('electron', () => ({
 }))
 
 type DesktopApi = {
+  choosePath: (kind: 'subtitle' | 'torrent-file') => Promise<ChoosePathResult>
+  exportTorrent: (infoHash: string) => Promise<ExportTorrentResult>
   getBootstrap: () => Promise<BootstrapResult>
   onEngineStatus: (listener: (status: EngineStatus) => void) => () => void
   restartEngine: () => Promise<RestartEngineResult>
@@ -92,6 +98,7 @@ function readyStatus(generation = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa') {
     generationId: generation,
     restartCount: 0,
     architecture: 'arm64',
+    audioMetadataParser: 'music-metadata.parseStream',
     mediaPort: 52_000,
     electronVersion: '43.2.0',
     nodeVersion: '24.18.0',
@@ -196,6 +203,7 @@ describe('preload desktop bridge', () => {
     expect(result).toMatchObject({ ok: true })
     expect(Object.keys(api).sort()).toEqual([
       'choosePath',
+      'exportTorrent',
       'getBootstrap',
       'onEngineStatus',
       'onMenuAction',
@@ -225,6 +233,28 @@ describe('preload desktop bridge', () => {
     })
   })
 
+  it('exports by info hash without exposing a destination path', async () => {
+    const api = await loadApi()
+    const infoHash = '0'.repeat(40)
+    electronMock.invoke.mockImplementation(
+      (channel: string, request: { payload: unknown; requestId: string }) => {
+        expect(channel).toBe(DESKTOP_EXPORT_TORRENT_CHANNEL)
+        expect(request.payload).toEqual({ infoHash })
+        return {
+          protocolVersion: PROTOCOL_VERSION,
+          requestId: request.requestId,
+          ok: true,
+          value: { saved: true }
+        }
+      }
+    )
+
+    await expect(api.exportTorrent(infoHash)).resolves.toMatchObject({
+      ok: true,
+      value: { saved: true }
+    })
+  })
+
   it('returns a fixed timeout error when main does not answer', async () => {
     vi.useFakeTimers()
     const api = await loadApi()
@@ -236,6 +266,84 @@ describe('preload desktop bridge', () => {
     await expect(resultPromise).resolves.toMatchObject({
       ok: false,
       error: { code: 'REQUEST_TIMEOUT', retryable: true }
+    })
+  })
+
+  it('keeps a native chooser pending beyond the ordinary five-second timeout', async () => {
+    vi.useFakeTimers()
+    const api = await loadApi()
+    electronMock.invoke.mockImplementation(
+      (
+        channel: string,
+        request: { requestId: string }
+      ): Promise<ChoosePathResult> =>
+        new Promise(resolve => {
+          expect(channel).toBe(DESKTOP_CHOOSE_PATH_CHANNEL)
+          setTimeout(
+            () =>
+              resolve({
+                protocolVersion: PROTOCOL_VERSION,
+                requestId: request.requestId,
+                ok: true,
+                value: { path: '/tmp/captions.srt', summary: null }
+              }),
+            10_000
+          )
+        })
+    )
+
+    const pending = api.choosePath('subtitle')
+    await vi.advanceTimersByTimeAsync(5_001)
+    let settled = false
+    void pending.then(() => {
+      settled = true
+    })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(4_999)
+    await expect(pending).resolves.toMatchObject({
+      ok: true,
+      value: { path: '/tmp/captions.srt' }
+    })
+  })
+
+  it('keeps a native save panel pending beyond the ordinary timeout', async () => {
+    vi.useFakeTimers()
+    const api = await loadApi()
+    electronMock.invoke.mockImplementation(
+      (
+        channel: string,
+        request: { requestId: string }
+      ): Promise<ExportTorrentResult> =>
+        new Promise(resolve => {
+          expect(channel).toBe(DESKTOP_EXPORT_TORRENT_CHANNEL)
+          setTimeout(
+            () =>
+              resolve({
+                protocolVersion: PROTOCOL_VERSION,
+                requestId: request.requestId,
+                ok: true,
+                value: { saved: true }
+              }),
+            10_000
+          )
+        })
+    )
+
+    const pending = api.exportTorrent('0'.repeat(40))
+    await vi.advanceTimersByTimeAsync(5_001)
+    let settled = false
+    void pending.then(() => {
+      settled = true
+    })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(4_999)
+    await expect(pending).resolves.toMatchObject({
+      ok: true,
+      value: { saved: true }
     })
   })
 

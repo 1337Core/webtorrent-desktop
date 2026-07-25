@@ -5,6 +5,7 @@ import {
 } from './local-torrent-reader'
 import { EgressPolicy, type RemoteTorrentFetchResult } from './network-policy'
 import {
+  PREPARATION_LIMITS,
   PreparationStore,
   PreparationStoreError,
   type PreparationSnapshot,
@@ -43,10 +44,12 @@ export type TorrentPreparationServiceErrorCode =
   | 'ABORTED'
   | 'ALREADY_EXISTS'
   | 'CAPACITY_EXCEEDED'
+  | 'DHT_CONSENT_REQUIRED'
   | 'INPUT_INVALID'
   | 'INTERNAL'
   | 'LOCAL_TORRENT_UNAVAILABLE'
   | 'METADATA_UNAVAILABLE'
+  | 'PRIVATE_DHT_METADATA'
   | 'REMOTE_CONCURRENCY_LIMIT'
   | 'REMOTE_TORRENT_UNAVAILABLE'
   | 'UNSUPPORTED'
@@ -156,6 +159,9 @@ function storeFailure(error: unknown): TorrentPreparationServiceError {
     if (error.code === 'CAPACITY_EXCEEDED') {
       return new TorrentPreparationServiceError('CAPACITY_EXCEEDED')
     }
+    if (error.code === 'INVALID_SELECTION') {
+      return new TorrentPreparationServiceError('INPUT_INVALID')
+    }
   }
   return new TorrentPreparationServiceError('INTERNAL')
 }
@@ -248,8 +254,13 @@ export class TorrentPreparationService {
         policy,
         { allowDht: source.allowDhtExposure }
       )
-    } catch {
-      throw new TorrentPreparationServiceError('INPUT_INVALID')
+    } catch (error) {
+      throw new TorrentPreparationServiceError(
+        error instanceof TorrentInputError &&
+          error.code === 'DHT_CONSENT_REQUIRED'
+          ? 'DHT_CONSENT_REQUIRED'
+          : 'INPUT_INVALID'
+      )
     }
 
     let bytes: Uint8Array
@@ -268,7 +279,13 @@ export class TorrentPreparationService {
       bytes,
       policy,
       sourcePolicy(source),
-      signal
+      signal,
+      {
+        dhtExposureUsed: prepared.dhtEnabled,
+        selection: prepared.selection,
+        warnings: prepared.warnings,
+        xsRemoved: prepared.xsRemoved
+      }
     )
   }
 
@@ -333,7 +350,13 @@ export class TorrentPreparationService {
     bytes: Uint8Array,
     policy: EgressPolicy,
     policySnapshot: PreparationSourcePolicy,
-    signal: AbortSignal
+    signal: AbortSignal,
+    staged: Readonly<{
+      dhtExposureUsed: boolean
+      selection: ReadonlyArray<number>
+      warnings: ReadonlyArray<PreparationWarning>
+      xsRemoved: boolean
+    }> | null = null
   ): Promise<PreparationSnapshot> {
     throwIfAborted(signal)
     let metadata: ValidatedTorrentMetadata
@@ -349,13 +372,46 @@ export class TorrentPreparationService {
     }
     throwIfAborted(signal)
 
+    if (staged?.dhtExposureUsed && metadata.private) {
+      throw new TorrentPreparationServiceError('PRIVATE_DHT_METADATA')
+    }
+
+    let createdPreparationId: string | null = null
     try {
-      return this.#store.create({
+      let snapshot = this.#store.create({
         metadata,
         sourcePolicy: policySnapshot,
-        warnings: additionalWarnings(metadata)
+        warnings: [
+          ...additionalWarnings(metadata),
+          ...(staged?.warnings ?? []),
+          ...(staged?.dhtExposureUsed ? (['DHT_EXPOSURE_USED'] as const) : []),
+          ...(staged?.xsRemoved ? (['XS_REMOVED'] as const) : [])
+        ]
       })
+      createdPreparationId = snapshot.preparationId
+      if (staged && staged.selection.length > 0) {
+        for (
+          let offset = 0;
+          offset < staged.selection.length;
+          offset += PREPARATION_LIMITS.selectionChanges
+        ) {
+          snapshot = this.#store.updateSelection(
+            snapshot.preparationId,
+            staged.selection
+              .slice(offset, offset + PREPARATION_LIMITS.selectionChanges)
+              .map(index => ({ index, selected: true }))
+          )
+        }
+      }
+      return snapshot
     } catch (error) {
+      if (createdPreparationId) {
+        try {
+          this.#store.discard(createdPreparationId)
+        } catch {
+          // The failed preparation is already gone.
+        }
+      }
       throw storeFailure(error)
     }
   }

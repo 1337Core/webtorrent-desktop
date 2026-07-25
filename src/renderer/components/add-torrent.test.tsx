@@ -1,5 +1,12 @@
 /** @vitest-environment jsdom */
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor
+} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type {
@@ -15,6 +22,7 @@ const ACQUISITION_ID = '00000000-0000-4000-8000-000000000020'
 
 let commands: EngineCommand[] = []
 let failNext: string | null = null
+let requireDhtConsent = false
 
 function envelope(): { protocolVersion: 1; requestId: string } {
   return {
@@ -56,6 +64,29 @@ function response(operation: EngineCommand): TorrentCommandResult {
         }
       } as TorrentCommandResult
     case 'get-acquisition':
+      if (
+        requireDhtConsent &&
+        !commands.some(
+          command =>
+            command.command === 'start-acquisition' &&
+            command.payload.source.allowDhtExposure
+        )
+      ) {
+        return {
+          ...envelope(),
+          ok: true,
+          value: {
+            ok: true,
+            result: {
+              command: 'get-acquisition',
+              value: {
+                code: 'DHT_CONSENT_REQUIRED',
+                state: 'failed'
+              }
+            }
+          }
+        } as TorrentCommandResult
+      }
       return {
         ...envelope(),
         ok: true,
@@ -196,6 +227,7 @@ function response(operation: EngineCommand): TorrentCommandResult {
 beforeEach(() => {
   commands = []
   failNext = null
+  requireDhtConsent = false
   Object.defineProperty(window, 'desktop', {
     configurable: true,
     value: {
@@ -212,6 +244,8 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.useRealTimers()
+  vi.restoreAllMocks()
   cleanup()
 })
 
@@ -473,6 +507,60 @@ describe('AddTorrentModal', () => {
       ).toBe(true)
     )
     expect(await screen.findByText('Prepared payload')).toBeTruthy()
+  })
+
+  it('asks before retrying a trackerless info hash through the DHT', async () => {
+    vi.useFakeTimers()
+    requireDhtConsent = true
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    render(
+      <AddTorrentModal
+        downloadRoot={DOWNLOAD_ROOT}
+        onCancel={vi.fn()}
+        onAdded={vi.fn()}
+        ready
+      />
+    )
+
+    fireEvent.change(
+      screen.getByLabelText('Enter torrent address or magnet link'),
+      { target: { value: INFO_HASH } }
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'OK' }))
+
+    await act(async () => {
+      await vi.runAllTimersAsync()
+    })
+
+    expect(screen.getByText('Prepared payload')).toBeTruthy()
+    expect(confirm).toHaveBeenCalledOnce()
+    const starts = commands.filter(
+      command => command.command === 'start-acquisition'
+    )
+    expect(starts).toEqual([
+      {
+        command: 'start-acquisition',
+        payload: {
+          source: {
+            allowDhtExposure: false,
+            allowPrivateNetwork: false,
+            infoHash: INFO_HASH,
+            kind: 'info-hash'
+          }
+        }
+      },
+      {
+        command: 'start-acquisition',
+        payload: {
+          source: {
+            allowDhtExposure: true,
+            allowPrivateNetwork: false,
+            infoHash: INFO_HASH,
+            kind: 'info-hash'
+          }
+        }
+      }
+    ])
   })
 
   it('ignores an intent while the engine is not ready', () => {

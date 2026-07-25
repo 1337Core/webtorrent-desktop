@@ -146,6 +146,9 @@ export function parseWssMessage(raw: string): WssInboundMessage {
   for (const key of keys) {
     if (!RECOGNIZED_KEYS.has(key)) throw new WssMessageError('FIELD_INVALID')
   }
+  if (message.action !== undefined && message.action !== 'announce') {
+    throw new WssMessageError('FIELD_INVALID')
+  }
 
   const infoHash = binaryIdentity(message.info_hash)
 

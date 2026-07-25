@@ -344,6 +344,60 @@ describe('TorrentPreparationService', () => {
     expect(acquired).toEqual([{ dhtEnabled: false, infoHash }])
   })
 
+  it('preserves staged selection and exposure warnings', async () => {
+    const bytes = singleFileTorrent('staged.txt')
+    const service = new TorrentPreparationService({
+      acquireMetadata: async () => bytes
+    })
+    const infoHash = canonicalInfoIdentity(bytes).infoHash
+
+    const snapshot = await service.open(
+      {
+        allowDhtExposure: true,
+        allowPrivateNetwork: false,
+        kind: 'magnet',
+        magnet:
+          `magnet:?xt=urn:btih:${infoHash}&so=0` +
+          '&xs=https%3A%2F%2Fsource.example%2Ffile.torrent'
+      },
+      signal()
+    )
+
+    expect(snapshot.selectedFileCount).toBe(1)
+    expect(snapshot.warnings).toEqual(
+      expect.arrayContaining(['DHT_EXPOSURE_USED', 'XS_REMOVED'])
+    )
+  })
+
+  it('refuses private metadata recovered through the public DHT', async () => {
+    const bytes = bencode.encode({
+      announce: 'https://tracker.example/announce',
+      info: {
+        length: 1,
+        name: 'private.txt',
+        'piece length': 16_384,
+        pieces: new Uint8Array(20),
+        private: 1
+      }
+    })
+    const service = new TorrentPreparationService({
+      acquireMetadata: async () => bytes
+    })
+
+    await expectServiceError(
+      service.open(
+        {
+          allowDhtExposure: true,
+          allowPrivateNetwork: false,
+          infoHash: canonicalInfoIdentity(bytes).infoHash,
+          kind: 'info-hash'
+        },
+        signal()
+      ),
+      'PRIVATE_DHT_METADATA'
+    )
+  })
+
   it('reports an acquisition that never produced metadata', async () => {
     const service = new TorrentPreparationService({
       acquireMetadata: async () => {

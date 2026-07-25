@@ -26,6 +26,12 @@ class FakeSocket extends EventEmitter implements WssSocket {
   closed = false
   terminated = false
   readonly sent: string[] = []
+  readonly #autoRespond: boolean
+
+  constructor(autoRespond: boolean) {
+    super()
+    this.#autoRespond = autoRespond
+  }
 
   close(): void {
     this.closed = true
@@ -33,6 +39,20 @@ class FakeSocket extends EventEmitter implements WssSocket {
 
   send(data: string): void {
     this.sent.push(data)
+    const frame = JSON.parse(data) as {
+      answer?: unknown
+      event?: string
+      info_hash?: string
+    }
+    if (
+      this.#autoRespond &&
+      frame.answer === undefined &&
+      frame.event !== 'stopped'
+    ) {
+      queueMicrotask(() => {
+        this.deliver({ action: 'announce', info_hash: frame.info_hash })
+      })
+    }
   }
 
   terminate(): void {
@@ -51,6 +71,7 @@ class FakeSocket extends EventEmitter implements WssSocket {
 type Harness = {
   answers: Array<{ offerId: string; peerId: string; sdp: string }>
   endpoint: WssTrackerEndpoint
+  failures: WssTrackerError[]
   intervals: number[]
   offers: Array<{ offerId: string; peerId: string; sdp: string }>
   socket: FakeSocket
@@ -59,14 +80,16 @@ type Harness = {
 function createHarness(
   options: {
     allowPrivateNetwork?: boolean
+    autoRespond?: boolean
     offerSdp?: string
     url?: string
   } = {}
 ): Harness {
-  const socket = new FakeSocket()
+  const socket = new FakeSocket(options.autoRespond ?? true)
   const answers: Harness['answers'] = []
   const offers: Harness['offers'] = []
   const intervals: number[] = []
+  const failures: WssTrackerError[] = []
   const endpoint = new WssTrackerEndpoint({
     allowPrivateNetwork: options.allowPrivateNetwork ?? false,
     createOffers: count =>
@@ -80,12 +103,13 @@ function createHarness(
     infoHash: INFO_HASH,
     now: () => Date.now(),
     onAnswer: answer => answers.push(answer),
+    onFailure: error => failures.push(error),
     onInterval: seconds => intervals.push(seconds),
     onOffer: offer => offers.push(offer),
     peerId: PEER_ID,
     trackerUrl: options.url ?? 'wss://tracker.example/announce'
   })
-  return { answers, endpoint, intervals, offers, socket }
+  return { answers, endpoint, failures, intervals, offers, socket }
 }
 
 async function connected(harness: Harness): Promise<void> {
@@ -147,6 +171,93 @@ describe('WssTrackerEndpoint', () => {
     expect(harness.endpoint.pendingOfferCount).toBe(
       WSS_TRACKER_LIMITS.maxOffersPerAnnounce
     )
+  })
+
+  it('settles an announce only after a valid response on its own socket', async () => {
+    const harness = createHarness({ autoRespond: false })
+    await connected(harness)
+    let settled = false
+
+    const pending = harness.endpoint
+      .announce({
+        downloaded: 0,
+        event: 'started',
+        left: 1_024,
+        numwant: 1,
+        uploaded: 0
+      })
+      .then(() => {
+        settled = true
+      })
+    await Promise.resolve()
+
+    harness.socket.deliver({
+      info_hash: INFO_HASH,
+      offer: { sdp: sdp(), type: 'offer' },
+      offer_id: 'remote-offer'.padEnd(20, '0'),
+      peer_id: REMOTE_PEER_ID
+    })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+
+    harness.socket.deliver({
+      action: 'announce',
+      info_hash: INFO_HASH,
+      interval: 240
+    })
+    await pending
+
+    expect(settled).toBe(true)
+    expect(harness.intervals).toEqual([240])
+  })
+
+  it('fails a pending announce on tracker failure, close, and timeout', async () => {
+    for (const fail of [
+      (harness: Harness): void =>
+        harness.socket.deliver({
+          action: 'announce',
+          'failure reason': 'denied',
+          info_hash: INFO_HASH
+        }),
+      (harness: Harness): void => {
+        harness.socket.emit('close')
+      },
+      (_harness: Harness): void => {
+        vi.advanceTimersByTime(WSS_TRACKER_LIMITS.announceDeadlineMs)
+      }
+    ]) {
+      const harness = createHarness({ autoRespond: false })
+      await connected(harness)
+      const pending = harness.endpoint.announce({
+        downloaded: 0,
+        event: 'started',
+        left: 1,
+        numwant: 0,
+        uploaded: 0
+      })
+      await Promise.resolve()
+
+      fail(harness)
+
+      await expect(pending).rejects.toBeInstanceOf(WssTrackerError)
+    }
+  })
+
+  it('reports a socket failure after a successful announce', async () => {
+    const harness = createHarness()
+    await connected(harness)
+    await harness.endpoint.announce({
+      downloaded: 0,
+      event: 'started',
+      left: 1,
+      numwant: 0,
+      uploaded: 0
+    })
+
+    harness.socket.emit('error', new Error('failed'))
+
+    expect(harness.failures).toHaveLength(1)
+    expect(harness.endpoint.connected).toBe(false)
   })
 
   it('never advertises an offer with no usable candidate', async () => {
@@ -304,28 +415,47 @@ describe('WssTrackerEndpoint', () => {
   })
 
   it('records the tracker interval and its endpoint-local identifier', async () => {
-    const harness = createHarness()
+    const harness = createHarness({ autoRespond: false })
     await connected(harness)
 
+    const first = harness.endpoint.announce({
+      downloaded: 0,
+      left: 1,
+      numwant: 0,
+      uploaded: 0
+    })
+    await Promise.resolve()
     harness.socket.deliver({
       info_hash: INFO_HASH,
       interval: 300,
       'tracker id': 'endpoint-local'
     })
+    await first
+
+    const second = harness.endpoint.announce({
+      downloaded: 0,
+      left: 1,
+      numwant: 0,
+      uploaded: 0
+    })
+    await Promise.resolve()
     harness.socket.deliver({ info_hash: INFO_HASH })
+    await second
 
     expect(harness.intervals).toEqual([
       300,
       WSS_TRACKER_LIMITS.defaultIntervalSeconds
     ])
 
-    await harness.endpoint.announce({
+    const third = harness.endpoint.announce({
       downloaded: 0,
       left: 1,
       numwant: 0,
       uploaded: 0
     })
     expect(harness.socket.sent.at(-1)).toContain('endpoint-local')
+    harness.socket.deliver({ info_hash: INFO_HASH })
+    await third
   })
 
   it('quarantines a binary frame, a wrong info hash, and a malformed frame', async () => {

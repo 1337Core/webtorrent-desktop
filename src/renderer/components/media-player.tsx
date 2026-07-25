@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { formatTime, prettyBytes } from '../lib/format'
-import { runCommand, type EngineFailure } from '../lib/engine-client'
+import {
+  runCommand,
+  type EngineFailure,
+  type EngineValue
+} from '../lib/engine-client'
 
 /** Well inside the engine's lease TTL, so playback never expires mid-file. */
 const HEARTBEAT_MS = 20_000
@@ -11,6 +15,20 @@ const STALLED_MS = 2_000
 /** How long the pointer must sit still before the controls fade out. */
 const CONTROLS_IDLE_MS = 2_000
 const PAGE_LIMIT = 64
+const AUDIO_FILE = /\.(m4a|m4b|m4p|mp3|oga|ogg|opus|wav)$/iu
+
+type EmbeddedAudioTrack = {
+  enabled: boolean
+  label: string
+  language: string
+}
+
+type EmbeddedAudioTrackList = {
+  addEventListener?: (type: string, listener: EventListener) => void
+  readonly length: number
+  removeEventListener?: (type: string, listener: EventListener) => void
+  readonly [index: number]: EmbeddedAudioTrack | undefined
+}
 
 type PlaylistEntry = Readonly<{
   fileIndex: number
@@ -23,6 +41,8 @@ export type MediaPlayerProps = Readonly<{
   infoHash: string
   /** Every playable file of the torrent, in the order the list showed them. */
   playlist?: ReadonlyArray<PlaylistEntry>
+  /** Incremented when the native File menu asks this player for subtitles. */
+  externalSubtitleRequest?: number
   onClose: () => void
   /** Mirrors the original's `hide-video-controls` class on the app root. */
   onControlsHiddenChange?: (hidden: boolean) => void
@@ -55,6 +75,7 @@ function volumeIconName(volume: number): string {
  * closed as soon as it unmounts.
  */
 export function MediaPlayer({
+  externalSubtitleRequest = 0,
   fileIndex,
   fileName,
   infoHash,
@@ -74,13 +95,33 @@ export function MediaPlayer({
   const [fileProgress, setFileProgress] = useState(0)
   const [speeds, setSpeeds] = useState({ download: 0, upload: 0 })
   const [subtitles, setSubtitles] = useState<
-    ReadonlyArray<Readonly<{ label: string; language: string; url: string }>>
+    ReadonlyArray<
+      Readonly<{
+        label: string
+        language: string
+        leaseId: string
+        url: string
+      }>
+    >
   >([])
   const [subtitleIndex, setSubtitleIndex] = useState(-1)
   const [subtitleMenuOpen, setSubtitleMenuOpen] = useState(false)
+  const [audioTrackMenuOpen, setAudioTrackMenuOpen] = useState(false)
+  const [audioTracks, setAudioTracks] = useState<
+    ReadonlyArray<
+      Readonly<{ label: string; language: string; nativeIndex: number }>
+    >
+  >([])
+  const [audioTrackIndex, setAudioTrackIndex] = useState(0)
+  const [audioInfo, setAudioInfo] =
+    useState<EngineValue<'open-audio-metadata'> | null>(null)
   const mediaRef = useRef<HTMLVideoElement | null>(null)
-  const leaseRef = useRef<string | null>(null)
+  const leaseIdsRef = useRef(new Set<string>())
+  const externalSubtitleLeaseRef = useRef<string | null>(null)
+  const externalSubtitleRequestRef = useRef(externalSubtitleRequest)
   const lastUpdateRef = useRef(0)
+  const playbackEpochRef = useRef(0)
+  const audioTrackCleanupRef = useRef<() => void>(() => undefined)
 
   const position = playlist.findIndex(entry => entry.fileIndex === fileIndex)
   const previous = position > 0 ? playlist[position - 1] : undefined
@@ -90,44 +131,65 @@ export function MediaPlayer({
       : undefined
 
   useEffect(() => {
+    const playbackEpoch = playbackEpochRef.current + 1
+    playbackEpochRef.current = playbackEpoch
+    const playbackLeaseIds = new Set<string>()
+    leaseIdsRef.current = playbackLeaseIds
     let active = true
     const open = setTimeout(() => {
+      setUrl(null)
+      setFailure(null)
+      setSubtitles([])
+      setSubtitleIndex(-1)
+      setAudioInfo(null)
+      setAudioTracks([])
       void runCommand({
         command: 'open-media',
         payload: { fileIndex, infoHash }
       }).then(outcome => {
-        if (!active) return
+        if (!active) {
+          if (outcome.ok) {
+            void runCommand({
+              command: 'close-media',
+              payload: { leaseId: outcome.value.leaseId }
+            })
+          }
+          return
+        }
         if (!outcome.ok) {
           setFailure(outcome.error)
           return
         }
-        leaseRef.current = outcome.value.leaseId
+        playbackLeaseIds.add(outcome.value.leaseId)
         setUrl(outcome.value.url)
       })
     }, 0)
 
     return () => {
       active = false
+      if (playbackEpochRef.current === playbackEpoch) {
+        playbackEpochRef.current += 1
+      }
       clearTimeout(open)
-      const leaseId = leaseRef.current
-      leaseRef.current = null
-      if (leaseId !== null) {
+      for (const leaseId of playbackLeaseIds) {
         void runCommand({ command: 'close-media', payload: { leaseId } })
       }
+      playbackLeaseIds.clear()
+      externalSubtitleLeaseRef.current = null
     }
   }, [fileIndex, infoHash])
 
   useEffect(() => {
     if (url === null) return undefined
     const timer = setInterval(() => {
-      const leaseId = leaseRef.current
-      if (leaseId === null) return
-      void runCommand({
-        command: 'heartbeat-media',
-        payload: { leaseId }
-      }).then(outcome => {
-        if (!outcome.ok) setFailure(outcome.error)
-      })
+      for (const leaseId of leaseIdsRef.current) {
+        void runCommand({
+          command: 'heartbeat-media',
+          payload: { leaseId }
+        }).then(outcome => {
+          if (!outcome.ok) setFailure(outcome.error)
+        })
+      }
     }, HEARTBEAT_MS)
     return () => {
       clearInterval(timer)
@@ -221,7 +283,19 @@ export function MediaPlayer({
         command: 'open-subtitles',
         payload: { infoHash }
       }).then(outcome => {
-        if (!active || !outcome.ok) return
+        if (!outcome.ok) return
+        if (!active) {
+          for (const track of outcome.value.tracks) {
+            void runCommand({
+              command: 'close-media',
+              payload: { leaseId: track.leaseId }
+            })
+          }
+          return
+        }
+        for (const track of outcome.value.tracks) {
+          leaseIdsRef.current.add(track.leaseId)
+        }
         setSubtitles(outcome.value.tracks)
       })
     }, 0)
@@ -230,6 +304,178 @@ export function MediaPlayer({
       clearTimeout(timer)
     }
   }, [infoHash, url])
+
+  useEffect(() => {
+    if (url === null || !AUDIO_FILE.test(fileName)) return undefined
+    let active = true
+    const timer = setTimeout(() => {
+      void runCommand({
+        command: 'open-audio-metadata',
+        payload: { fileIndex, infoHash }
+      }).then(outcome => {
+        if (!outcome.ok) return
+        const artworkLease = outcome.value.artwork?.leaseId
+        if (!active) {
+          if (artworkLease) {
+            void runCommand({
+              command: 'close-media',
+              payload: { leaseId: artworkLease }
+            })
+          }
+          return
+        }
+        if (artworkLease) leaseIdsRef.current.add(artworkLease)
+        setAudioInfo(outcome.value)
+      })
+    }, 0)
+    return () => {
+      active = false
+      clearTimeout(timer)
+    }
+  }, [fileIndex, fileName, infoHash, url])
+
+  const openExternalSubtitle = useCallback(async () => {
+    const playbackEpoch = playbackEpochRef.current
+    const chosen = await window.desktop.choosePath('subtitle')
+    if (
+      playbackEpoch !== playbackEpochRef.current ||
+      !chosen.ok ||
+      chosen.value.path === null
+    ) {
+      return
+    }
+    const outcome = await runCommand({
+      command: 'open-external-subtitle',
+      payload: {
+        infoHash,
+        mediaFileIndex: fileIndex,
+        path: chosen.value.path
+      }
+    })
+    if (!outcome.ok) {
+      setFailure(outcome.error)
+      return
+    }
+    if (playbackEpoch !== playbackEpochRef.current) {
+      void runCommand({
+        command: 'close-media',
+        payload: { leaseId: outcome.value.track.leaseId }
+      })
+      return
+    }
+    const previousLease = externalSubtitleLeaseRef.current
+    if (previousLease) {
+      leaseIdsRef.current.delete(previousLease)
+      void runCommand({
+        command: 'close-media',
+        payload: { leaseId: previousLease }
+      })
+    }
+    externalSubtitleLeaseRef.current = outcome.value.track.leaseId
+    leaseIdsRef.current.add(outcome.value.track.leaseId)
+    setSubtitles(current => {
+      const next = [
+        ...current.filter(track => track.leaseId !== previousLease),
+        outcome.value.track
+      ]
+      setSubtitleIndex(next.length - 1)
+      return next
+    })
+    setSubtitleMenuOpen(false)
+  }, [fileIndex, infoHash])
+
+  useEffect(() => {
+    if (
+      externalSubtitleRequest <= 0 ||
+      externalSubtitleRequest === externalSubtitleRequestRef.current
+    ) {
+      return
+    }
+    externalSubtitleRequestRef.current = externalSubtitleRequest
+    void openExternalSubtitle()
+  }, [externalSubtitleRequest, openExternalSubtitle])
+
+  const syncAudioTracks = useCallback((list: EmbeddedAudioTrackList) => {
+    const tracks: Array<{
+      label: string
+      language: string
+      nativeIndex: number
+    }> = []
+    let selected = 0
+    for (let index = 0; index < Math.min(list.length, 32); index += 1) {
+      const track = list[index]
+      if (!track) continue
+      if (track.enabled) selected = index
+      tracks.push({
+        label: (track.label || `Track ${index + 1}`).slice(0, 64),
+        language: (track.language || '').slice(0, 16),
+        nativeIndex: index
+      })
+    }
+    setAudioTrackIndex(selected)
+    setAudioTracks(tracks.length > 1 ? tracks : [])
+  }, [])
+
+  const bindAudioTracks = useCallback(
+    (media: HTMLVideoElement) => {
+      audioTrackCleanupRef.current()
+      audioTrackCleanupRef.current = () => undefined
+      const candidate = Reflect.get(media, 'audioTracks') as unknown
+      if (
+        typeof candidate !== 'object' ||
+        candidate === null ||
+        !('length' in candidate) ||
+        typeof candidate.length !== 'number'
+      ) {
+        setAudioTracks([])
+        return
+      }
+      const list = candidate as EmbeddedAudioTrackList
+      const refresh: EventListener = () => syncAudioTracks(list)
+      syncAudioTracks(list)
+      if (
+        typeof list.addEventListener !== 'function' ||
+        typeof list.removeEventListener !== 'function'
+      ) {
+        return
+      }
+      const events = ['addtrack', 'removetrack', 'change'] as const
+      for (const event of events) list.addEventListener(event, refresh)
+      audioTrackCleanupRef.current = () => {
+        for (const event of events) list.removeEventListener?.(event, refresh)
+      }
+    },
+    [syncAudioTracks]
+  )
+
+  const setMediaElement = useCallback((media: HTMLVideoElement | null) => {
+    if (media === null) {
+      audioTrackCleanupRef.current()
+      audioTrackCleanupRef.current = () => undefined
+    }
+    mediaRef.current = media
+  }, [])
+
+  const selectAudioTrack = useCallback((selected: number) => {
+    const media = mediaRef.current
+    if (!media) return
+    const candidate = Reflect.get(media, 'audioTracks') as unknown
+    if (
+      typeof candidate !== 'object' ||
+      candidate === null ||
+      !('length' in candidate) ||
+      typeof candidate.length !== 'number'
+    ) {
+      return
+    }
+    const list = candidate as EmbeddedAudioTrackList
+    for (let index = 0; index < list.length; index += 1) {
+      const track = list[index]
+      if (track) track.enabled = index === selected
+    }
+    setAudioTrackIndex(selected)
+    setAudioTrackMenuOpen(false)
+  }, [])
 
   // Only the chosen track shows; the rest stay loaded but hidden, as the
   // original's track handling did.
@@ -285,6 +531,7 @@ export function MediaPlayer({
         {url === null ? null : (
           // Subtitle tracks arrive with the subtitle feature; none exist yet.
           <video
+            crossOrigin="anonymous"
             data-testid="media-element"
             onClick={playPause}
             onDoubleClick={toggleFullScreen}
@@ -298,6 +545,7 @@ export function MediaPlayer({
             onLoadedMetadata={event => {
               setDuration(event.currentTarget.duration)
               setVolume(event.currentTarget.volume)
+              bindAudioTracks(event.currentTarget)
             }}
             onPause={() => setPaused(true)}
             onPlay={() => setPaused(false)}
@@ -307,7 +555,7 @@ export function MediaPlayer({
               setStalled(false)
               setCurrentTime(event.currentTarget.currentTime)
             }}
-            ref={mediaRef}
+            ref={setMediaElement}
             src={url}
           >
             {subtitles.map((track, index) => (
@@ -322,6 +570,35 @@ export function MediaPlayer({
             ))}
           </video>
         )}
+
+        {audioInfo ? (
+          <div className="media-overlay-background audio-info-background">
+            {audioInfo.artwork ? (
+              <img
+                alt=""
+                className="audio-artwork"
+                height={audioInfo.artwork.height}
+                src={audioInfo.artwork.url}
+                width={audioInfo.artwork.width}
+              />
+            ) : null}
+            <div className="audio-metadata">
+              <div className="audio-title">{audioInfo.metadata.title}</div>
+              {audioInfo.metadata.artist ? (
+                <div className="audio-artist">
+                  <label>Artist</label>
+                  {audioInfo.metadata.artist}
+                </div>
+              ) : null}
+              {audioInfo.metadata.album ? (
+                <div className="audio-album">
+                  <label>Album</label>
+                  {audioInfo.metadata.album}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
 
         {stalled || url === null ? (
           <div className="media-overlay-background">
@@ -432,13 +709,31 @@ export function MediaPlayer({
                 : ''
           }`}
           onClick={() => {
-            if (subtitles.length === 0) return
+            if (subtitles.length === 0) {
+              void openExternalSubtitle()
+              return
+            }
+            setAudioTrackMenuOpen(false)
             setSubtitleMenuOpen(open => !open)
           }}
           role="button"
         >
           closed_caption
         </i>
+
+        {audioTracks.length > 1 ? (
+          <i
+            aria-label="Audio tracks"
+            className="icon multi-audio float-right active"
+            onClick={() => {
+              setSubtitleMenuOpen(false)
+              setAudioTrackMenuOpen(open => !open)
+            }}
+            role="button"
+          >
+            library_music
+          </i>
+        ) : null}
 
         <div className="volume float-left">
           <i
@@ -491,6 +786,22 @@ export function MediaPlayer({
               </i>
               None
             </li>
+          </ul>
+        ) : null}
+
+        {audioTrackMenuOpen && audioTracks.length > 1 ? (
+          <ul className="options-list">
+            {audioTracks.map(track => (
+              <li
+                key={`${track.language}:${track.label}:${track.nativeIndex}`}
+                onClick={() => selectAudioTrack(track.nativeIndex)}
+              >
+                <i className="icon">
+                  {`radio_button_${track.nativeIndex === audioTrackIndex ? 'checked' : 'unchecked'}`}
+                </i>
+                {track.label}
+              </li>
+            ))}
           </ul>
         ) : null}
 

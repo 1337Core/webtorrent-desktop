@@ -90,6 +90,7 @@ beforeEach(() => {
                 generationId: '00000000-0000-4000-8000-000000000004',
                 restartCount: 0,
                 architecture: 'arm64',
+                audioMetadataParser: 'music-metadata.parseStream',
                 mediaPort: 52_000,
                 electronVersion: '43.2.0',
                 nodeVersion: '24.18.0',

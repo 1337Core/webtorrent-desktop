@@ -4,6 +4,7 @@ import {
   DESKTOP_CHOOSE_PATH_CHANNEL,
   DESKTOP_CONTEXT_MENU_CHANNEL,
   DESKTOP_ENGINE_RESTART_CHANNEL,
+  DESKTOP_EXPORT_TORRENT_CHANNEL,
   DESKTOP_TORRENT_COMMAND_CHANNEL,
   PROTOCOL_VERSION,
   type EngineStatusEvent,
@@ -13,10 +14,24 @@ import type { Diagnostics } from './diagnostics'
 import type { EngineSupervisor } from './engine-supervisor'
 import { registerDesktopIpc } from './desktop-ipc'
 import type { AppStateStore } from './state-store'
+import type { ExternalSubtitleGrant } from '../shared/engine-api'
 
 const requestId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const eventId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 const generationId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+const subtitleGrant: ExternalSubtitleGrant = {
+  canonicalPath: '/Users/owner/captions.vtt',
+  file: {
+    device: '1',
+    inode: '2',
+    modifiedNs: '3',
+    size: '4'
+  },
+  parentChain: [
+    { device: '1', inode: '5', path: '/Users' },
+    { device: '1', inode: '6', path: '/Users/owner' }
+  ]
+}
 
 type Handler = (event: unknown, value: unknown) => unknown
 
@@ -24,6 +39,7 @@ function createHarness(
   options: {
     chosenPath?: string
     chosenSummary?: { fileCount: number; totalBytes: number }
+    exportTorrent?: (infoHash: string) => Promise<boolean>
     openTorrentMenu?: (infoHash: string) => boolean
     stateRevision?: number
   } = {}
@@ -32,6 +48,7 @@ function createHarness(
   cleanup: () => void
   diagnostics: Diagnostics
   engineSupervisor: EngineSupervisor
+  exportTorrent: ReturnType<typeof vi.fn>
   event: unknown
   handlers: Map<string, Handler>
   onBootstrap: ReturnType<typeof vi.fn>
@@ -73,6 +90,7 @@ function createHarness(
     generationId,
     restartCount: 0,
     architecture: 'arm64',
+    audioMetadataParser: 'music-metadata.parseStream',
     mediaPort: 52_000,
     electronVersion: '43.2.0',
     nodeVersion: '24.18.0',
@@ -125,8 +143,13 @@ function createHarness(
     path: options.chosenPath ?? null,
     summary: options.chosenSummary ?? null
   }))
+  const exportTorrent = vi.fn(
+    options.exportTorrent ?? (async (_infoHash: string) => true)
+  )
   const cleanup = registerDesktopIpc({
+    captureSubtitleGrant: vi.fn(async () => subtitleGrant),
     choosePath,
+    exportTorrent,
     ...(options.openTorrentMenu
       ? { openTorrentMenu: options.openTorrentMenu }
       : {}),
@@ -144,6 +167,7 @@ function createHarness(
     cleanup,
     diagnostics,
     engineSupervisor,
+    exportTorrent,
     event,
     handlers,
     onBootstrap
@@ -339,6 +363,52 @@ describe('registerDesktopIpc', () => {
     expect(engineSupervisor.execute).not.toHaveBeenCalled()
   })
 
+  it('keeps export paths behind the dedicated main-owned capability', async () => {
+    const { engineSupervisor, event, handlers } = createHarness()
+    const handler = handlers.get(DESKTOP_TORRENT_COMMAND_CHANNEL)
+
+    const rejected = await handler?.(event, {
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: 'ffffffff-ffff-4fff-8fff-fffffffffffe',
+      command: 'torrentCommand',
+      payload: {
+        operation: {
+          command: 'export-torrent',
+          payload: {
+            destinationPath: '/Users/owner/Desktop/example.torrent',
+            infoHash: '0'.repeat(40)
+          }
+        }
+      }
+    })
+
+    expect(rejected).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_REQUEST', retryable: false }
+    })
+    expect(engineSupervisor.execute).not.toHaveBeenCalled()
+  })
+
+  it('asks main to save an existing torrent without returning the path', async () => {
+    const { event, exportTorrent, handlers } = createHarness()
+    const handler = handlers.get(DESKTOP_EXPORT_TORRENT_CHANNEL)
+    const infoHash = '0'.repeat(40)
+
+    const saved = await handler?.(event, {
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: 'ffffffff-ffff-4fff-8fff-fffffffffffd',
+      command: 'exportTorrent',
+      payload: { infoHash }
+    })
+
+    expect(saved).toMatchObject({
+      ok: true,
+      value: { saved: true }
+    })
+    expect(exportTorrent).toHaveBeenCalledWith(infoHash)
+    expect(JSON.stringify(saved)).not.toContain('/Users/')
+  })
+
   it('returns only the path the user chose', async () => {
     const { choosePath, event, handlers } = createHarness({
       chosenPath: '/Users/owner/Movies'
@@ -357,6 +427,52 @@ describe('registerDesktopIpc', () => {
       value: { path: '/Users/owner/Movies', summary: null }
     })
     expect(choosePath).toHaveBeenCalledWith('directory')
+  })
+
+  it('consumes a subtitle chooser path exactly once', async () => {
+    const { engineSupervisor, event, handlers } = createHarness({
+      chosenPath: '/Users/owner/captions.vtt'
+    })
+    const chooseHandler = handlers.get(DESKTOP_CHOOSE_PATH_CHANNEL)
+    const torrentHandler = handlers.get(DESKTOP_TORRENT_COMMAND_CHANNEL)
+
+    await chooseHandler?.(event, {
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: '11111111-1111-4111-8111-111111111113',
+      command: 'choosePath',
+      payload: { kind: 'subtitle' }
+    })
+    const operation = {
+      command: 'open-external-subtitle',
+      payload: {
+        infoHash: '0'.repeat(40),
+        mediaFileIndex: 1,
+        path: '/Users/owner/captions.vtt'
+      }
+    } as const
+    const first = await torrentHandler?.(event, {
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: '11111111-1111-4111-8111-111111111114',
+      command: 'torrentCommand',
+      payload: { operation }
+    })
+    const replay = await torrentHandler?.(event, {
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: '11111111-1111-4111-8111-111111111115',
+      command: 'torrentCommand',
+      payload: { operation }
+    })
+
+    expect(first).toMatchObject({ ok: true })
+    expect(engineSupervisor.execute).toHaveBeenCalledOnce()
+    expect(engineSupervisor.execute).toHaveBeenCalledWith({
+      ...operation,
+      payload: { ...operation.payload, grant: subtitleGrant }
+    })
+    expect(replay).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_REQUEST', retryable: false }
+    })
   })
 
   it('passes through the source measurement main took', async () => {

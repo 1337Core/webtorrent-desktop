@@ -2,6 +2,7 @@ import { Menu, type MenuItemConstructorOptions } from 'electron'
 import { APP_NAME } from '../shared/contracts'
 
 export type AppMenuActions = Readonly<{
+  addSubtitles: () => void
   addTorrent: () => void
   createTorrent: () => void
   openPreferences: () => void
@@ -78,6 +79,10 @@ export function buildAppMenuTemplate({
           accelerator: 'Command+N',
           click: actions.createTorrent,
           label: 'Create Torrent…'
+        },
+        {
+          click: actions.addSubtitles,
+          label: 'Add Subtitles File…'
         }
       ]
     },

@@ -26,7 +26,9 @@ export function createClientOptions(
     dht,
     downloadLimit: -1,
     lsd: false,
-    maxConns: profile === 'staging' ? 8 : 55,
+    // WebTorrent applies maxConns per torrent. Two staging torrents may run,
+    // so four each is the exact eight-transport aggregate ceiling.
+    maxConns: profile === 'staging' ? 4 : 55,
     natPmp: false,
     natUpnp: false,
     peerId: options.peerId ?? createPeerId(),

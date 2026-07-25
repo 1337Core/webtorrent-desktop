@@ -284,6 +284,76 @@ describe('TrackerActivation', () => {
     await activation.stop()
   })
 
+  it('awaits private stopped teardown before retiring and activating failover', async () => {
+    let finishStopped: (() => void) | null = null
+    const order: string[] = []
+    const { activation } = createActivation({
+      onRetireGeneration: () => {
+        order.push('retire')
+      },
+      private: true,
+      respond: input => {
+        if (
+          input.trackerUrl === 'https://one.test/announce' &&
+          input.event === 'started'
+        ) {
+          return Promise.reject(new TrackerHttpError('NETWORK_FAILED'))
+        }
+        if (
+          input.trackerUrl === 'https://one.test/announce' &&
+          input.event === 'stopped'
+        ) {
+          order.push('stopped')
+          return new Promise<TrackerAnnounceResponse>(resolve => {
+            finishStopped = () => {
+              order.push('stopped-finished')
+              resolve(announceResponse())
+            }
+          })
+        }
+        order.push('replacement')
+        return Promise.resolve(announceResponse())
+      },
+      tiers: [['https://one.test/announce'], ['https://two.test/announce']]
+    })
+
+    activation.start()
+    await settle()
+    expect(order).toEqual(['stopped'])
+
+    ;(finishStopped as (() => void) | null)?.()
+    await settle()
+    expect(order.slice(0, 3)).toEqual(['stopped', 'stopped-finished', 'retire'])
+    expect(order).toContain('replacement')
+
+    await activation.stop()
+  })
+
+  it('reports single-pass exhaustion only after private retirement', async () => {
+    const order: string[] = []
+    const { activation } = createActivation({
+      onExhausted: () => order.push('exhausted'),
+      onRetireGeneration: () => {
+        order.push('retired')
+      },
+      private: true,
+      respond: input => {
+        if (input.event === 'stopped') {
+          order.push('stopped')
+          return Promise.resolve(announceResponse())
+        }
+        return Promise.reject(new TrackerHttpError('NETWORK_FAILED'))
+      },
+      singlePass: true
+    })
+
+    activation.start()
+    await settle()
+
+    expect(order).toEqual(['stopped', 'retired', 'exhausted'])
+    await activation.stop()
+  })
+
   it('sends completed once and keeps announcing while seeding', async () => {
     let left = 1_024
     const { activation, calls } = createActivation({

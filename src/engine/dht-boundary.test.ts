@@ -343,6 +343,111 @@ describe('DhtBoundary', () => {
     expect(harness.boundary.activationCount).toBe(0)
   })
 
+  it('never lets one generation replace or deactivate another', async () => {
+    const harness = createHarness({ resolve: () => Promise.resolve([]) })
+    await harness.boundary.activate({
+      announcePort: 0,
+      generationId: 'staging-generation',
+      infoHash: INFO_HASH,
+      private: false
+    })
+
+    await expect(
+      harness.boundary.activate({
+        announcePort: 51_413,
+        generationId: 'committed-generation',
+        infoHash: INFO_HASH,
+        private: false
+      })
+    ).rejects.toMatchObject({ code: 'GENERATION_CONFLICT' })
+    harness.boundary.deactivate(INFO_HASH, 'committed-generation')
+    expect(harness.boundary.activationCount).toBe(1)
+    expect(harness.boundary.active).toBe(true)
+
+    harness.boundary.deactivate(INFO_HASH, 'staging-generation')
+    expect(harness.boundary.activationCount).toBe(0)
+    expect(harness.boundary.active).toBe(false)
+  })
+
+  it('recreates its socket when a scheduled cycle follows an active error', async () => {
+    const harness = createHarness()
+    const firstCycle = harness.boundary.activate({
+      announcePort: 0,
+      generationId: 'generation-1',
+      infoHash: INFO_HASH,
+      private: false
+    })
+    await vi.advanceTimersByTimeAsync(1)
+
+    const first = harness.sockets[0]
+    if (!first) throw new Error('Expected the first socket')
+    first.emit('error', new Error('socket failed'))
+    await vi.advanceTimersByTimeAsync(1)
+    await firstCycle
+
+    expect(first.closed).toBe(true)
+    expect(harness.boundary.active).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(DHT_BOUNDARY_LIMITS.failureBackoffMinMs)
+    await vi.advanceTimersByTimeAsync(1)
+
+    const replacement = harness.sockets[1]
+    if (!replacement) throw new Error('Expected a replacement socket')
+    expect(replacement.bound).toBe(true)
+    expect(replacement.sent).toHaveLength(1)
+    const query = decodeQuery(replacement.sent[0]?.message as Uint8Array)
+    replacement.deliver(peersResponse(query.transaction), {
+      address: BOOTSTRAP_ADDRESS,
+      port: 6881
+    })
+    await vi.advanceTimersByTimeAsync(1)
+
+    expect(harness.boundary.active).toBe(true)
+    expect(harness.deliveries.at(-1)?.generationId).toBe('generation-1')
+  })
+
+  it('hands an errored staging lookup to a committed generation without a stale retry', async () => {
+    const harness = createHarness()
+    const staging = harness.boundary.activate({
+      announcePort: 0,
+      generationId: 'staging-generation',
+      infoHash: INFO_HASH,
+      private: false
+    })
+    await vi.advanceTimersByTimeAsync(1)
+
+    const stagingSocket = harness.sockets[0]
+    if (!stagingSocket) throw new Error('Expected the staging socket')
+    stagingSocket.emit('error', new Error('socket failed'))
+    await vi.advanceTimersByTimeAsync(1)
+    await staging
+
+    harness.boundary.deactivate(INFO_HASH, 'staging-generation')
+    const committed = harness.boundary.activate({
+      announcePort: 51_413,
+      generationId: 'committed-generation',
+      infoHash: INFO_HASH,
+      private: false
+    })
+    await vi.advanceTimersByTimeAsync(1)
+
+    const committedSocket = harness.sockets[1]
+    if (!committedSocket) throw new Error('Expected the committed socket')
+    const query = decodeQuery(committedSocket.sent[0]?.message as Uint8Array)
+    committedSocket.deliver(peersResponse(query.transaction), {
+      address: BOOTSTRAP_ADDRESS,
+      port: 6881
+    })
+    await vi.advanceTimersByTimeAsync(1)
+    await committed
+
+    await vi.advanceTimersByTimeAsync(
+      DHT_BOUNDARY_LIMITS.failureBackoffMinMs + 1
+    )
+    expect(harness.sockets).toHaveLength(2)
+    expect(harness.deliveries.at(-1)?.generationId).toBe('committed-generation')
+  })
+
   it('settles every pending query exactly once on close', async () => {
     const harness = createHarness()
     const activation = harness.boundary.activate({

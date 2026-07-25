@@ -171,10 +171,17 @@ describe('registerApplicationProtocol', () => {
     expect(buildApplicationCsp(52_000)).toContain(
       'media-src http://127.0.0.1:52000'
     )
+    expect(buildApplicationCsp(52_000)).toContain(
+      "img-src 'self' data: http://127.0.0.1:52000"
+    )
     expect(buildApplicationCsp(52_000)).not.toContain('localhost')
 
     for (const invalid of [0, 65_536, -1, 1.5, Number.NaN]) {
       expect(buildApplicationCsp(invalid)).toContain("media-src 'none'")
+      expect(buildApplicationCsp(invalid)).toContain("img-src 'self' data:")
+      expect(buildApplicationCsp(invalid)).not.toContain(
+        'img-src http://127.0.0.1'
+      )
     }
   })
 })

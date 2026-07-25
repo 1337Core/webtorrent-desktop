@@ -1,8 +1,8 @@
 # Maintained WebTorrent Desktop fork: modernization plan
 
-Status: **approved; migration in progress**
+Status: **implementation complete; qualification in progress**
 
-Research snapshot: **2026-07-24**
+Research snapshot: **2026-07-25**
 
 Working branch: `feat/webtorrent-updated`
 
@@ -137,9 +137,11 @@ These are explicit risk reductions:
   both clients with `lsd: false`, `natUpnp: false`, and `natPmp: false`.
   Reintroduction is a separately disclosed, network-tested feature; it is not
   an implicit default inherited from WebTorrent.
-- **Automatic video-frame poster extraction is deferred.** Embedded artwork,
-  bounded image extraction, saved legacy posters, and generic media art remain.
-  A future sandboxed media worker can restore video thumbnails.
+- **Automatic video-frame poster extraction is deferred.** Playback-only
+  embedded audio artwork remains, with bounded parsing and image validation.
+  Torrent-list poster generation and legacy poster migration are deferred;
+  generic static media art remains. A future sandboxed media worker can restore
+  video thumbnails.
 - **Inherited telemetry, remote crash upload, and announcements are removed.**
   No request is sent to the original `webtorrent.io` endpoints.
 - **All non-Apple-Silicon targets are out of scope.** No Intel macOS, Windows,
@@ -243,7 +245,7 @@ Controls:
   chains. Browser-safe renderer dependencies remain bundled.
 - Main and engine typechecking use Node-conditioned ESM resolution rather than
   TypeScript's browser-oriented `Bundler` condition. Packaged contract tests
-  exercise `music-metadata.parseFile`, `chokidar`, and every externalized
+  exercise `music-metadata.parseStream`, `chokidar`, and every externalized
   engine compatibility subpath so a browser export cannot be selected
   silently.
 - Package verification derives the complete direct-runtime inventory from the
@@ -1538,10 +1540,13 @@ The parity checklist, tracked to completion:
   five columns, and the drop placeholder. Done, except the poster artwork that
   section 4.2 defers.
 - **Player** — letterboxed media, the self-drawn control bar, the stall
-  overlay, the unsupported-media modal, and the closed-caption control with
-  its track menu. Done.
+  overlay, the unsupported-media modal, the closed-caption control with its
+  torrent and owner-selected external tracks, bounded audio metadata/artwork,
+  and an audio-track control only when the qualified runtime exposes more than
+  one track. Done.
 - **Create torrent** — heading, file count and size, path attribute, advanced
-  settings, and the Cancel / Create Torrent pair. Done.
+  settings, the Cancel / Create Torrent pair, and a main-owned save dialog for
+  the generated `.torrent`. Done.
 - **Preferences** — the sections and path selectors for the settings this
   release keeps. Done.
 - **Add torrent** — the address modal with its CANCEL/OK pair. Done; the
@@ -1556,9 +1561,9 @@ The parity checklist, tracked to completion:
   carries several. Done. Dropping ordinary media to create a torrent from it
   is not ported: the create-torrent source still comes from the main-owned
   chooser, which is what measures it.
-- **Outstanding** — the two unported menu items above, dropped-media creation,
-  the poster artwork section 4.2 defers, and opening a subtitle file the owner
-  picks from outside the torrent.
+- **Deliberate parity exclusions** — the two unported context-menu items above,
+  dropped-media creation, and the torrent-list poster artwork section 4.2
+  defers. They are not missing section 4.1 behavior.
 
 ### 11.3 Renderer behavior
 
@@ -1626,7 +1631,7 @@ The parity checklist, tracked to completion:
 
 - Exact-pin every direct runtime and build dependency.
 - Keep one npm lockfile v3. Use `npm ci --ignore-scripts`, followed only by the
-  repository-owned, exact-package allowlist step described in section 9.4.
+  repository-owned, exact-package allowlist step described in section 6.2.
   Package lifecycle scripts are never granted ambient execution.
 - Require Node 24.18.0, npm 11.16.0, Darwin, and arm64 through npm
   `devEngines`, strict engine checks, and a fail-fast command guard. Do not
@@ -1653,7 +1658,7 @@ The parity checklist, tracked to completion:
 | `parse-torrent` | Exact 11.0.23 pin; direct because import and validation use it. |
 | `bencode` | Exact 4.0.1 pin for prebounded v1 decoding; app-owned canonical validation remains authoritative. |
 | `undici` | Exact 7.29.0 pin for engine-owned DNS-pinned, connected-address-verified HTTP transport; no general HTTP capability crosses the engine API. |
-| `bittorrent-protocol` | Exact 5.0.7 direct pin for the qualified pre-buffer frame guard and compatibility contract; it must resolve to the same externalized package instance WebTorrent uses. |
+| `bittorrent-protocol` | No direct pin. WebTorrent's exact locked dependency is used through the qualified compatibility boundary, and package/runtime checks require one shared instance. |
 | DHT | No direct pin. The app-owned boundary in section 9.7 uses `node:dgram` and app-owned KRPC encoding; `bittorrent-dht`, `k-rpc`, and `k-rpc-socket` remain transitive under WebTorrent, whose DHT path stays disabled. |
 | `create-torrent` | Exact 6.1.3 pin for creation; never consume its built-in announce defaults as product policy. |
 | `ws` | Exact 8.21.1 pin for the app-owned WSS tracker transport; no pooling, compression, redirects, or autonomous reconnect. |
@@ -1663,11 +1668,8 @@ The parity checklist, tracked to completion:
 | `electron-store` | Exact 11.0.2 pin, main-only, wrapped by app schema/migrations. |
 | `chokidar` | Exact 5.0.0 pin for the explicit folder-watcher feature. |
 | `music-metadata` | Exact 11.14.0 pin in engine for bounded metadata extraction. |
-| `semver` | Exact 7.8.5 pin, retained only for legacy-version and local application-version parsing. |
 | `tinyld` | Exact 1.3.4 pin for subtitle language detection. |
 | `subtitle` | Exact 4.2.2 pin for bounded SRT and a fixture-defined basic WebVTT cue subset. Reject unsupported WebVTT constructs clearly; do not claim full WebVTT conformance. |
-| `pretty-bytes` | Exact 7.1.1 pin for display formatting. |
-| `debounce` | Exact 3.0.0 pin for UI, watcher, and save coalescing only. Lifecycle-critical engine sequencing uses owned timers/queues. |
 
 The WebTorrent transitive native `node-datachannel` dependency is recorded and
 audited as if direct even though version selection currently comes through
@@ -1696,7 +1698,7 @@ and rebuilt.
 | `chokidar` | 3.5.3 | **Retain/update** to exact 5.0.0 for folder watching. |
 | `chromecasts` | 1.10.2 | **Remove.** Chromecast is deferred pending a new hardware-tested design. |
 | `create-torrent` | 5.0.9 | **Retain/update** to exact 6.1.3 as a direct engine dependency. |
-| `debounce` | 1.2.1 | **Retain/update** to exact 3.0.0 for UI/watch/save coalescing only; own lifecycle-critical timing. |
+| `debounce` | 1.2.1 | **Remove/absorb.** App-owned timers cover the few bounded coalescing cases. |
 | `dlnacasts` | 0.1.0 | **Remove.** DLNA is deferred pending a new hardware-tested design. |
 | `drag-drop` | 7.2.0 | **Remove/absorb.** Use DOM drag events and a narrow preload path capability. |
 | `es6-error` | 4.1.1 | **Remove.** Native `Error` subclasses are sufficient. |
@@ -1708,13 +1710,13 @@ and rebuilt.
 | `music-metadata` | 7.14.0 | **Retain/update** to exact 11.14.0 in the engine. |
 | `network-address` | 1.1.2 | **Remove/absorb.** A small `os.networkInterfaces()` helper is sufficient if casting returns. |
 | `parse-torrent` | 9.1.5 | **Retain/update** to exact 11.0.23 as a direct engine dependency. |
-| `prettier-bytes` | 1.0.4 | **Replace** with maintained ESM `pretty-bytes`. |
+| `prettier-bytes` | 1.0.4 | **Remove/absorb.** A small app-owned formatter covers the displayed units. |
 | `prop-types` | 15.8.1 | **Remove.** TypeScript replaces runtime PropTypes. |
 | `react` | 17.0.2 | **Retain/update** to exact 19.2.8. |
 | `react-dom` | 17.0.2 | **Retain/update** to exact 19.2.8 and `createRoot`. |
 | `rimraf` | 4.4.0 | **Remove.** Node 24 `fs.rm` covers the limited uses. |
 | `run-parallel` | 1.2.0 | **Remove.** Use structured async operations/`Promise.all`. |
-| `semver` | 7.3.8 | **Retain/update** to exact 7.8.5 for legacy and release version parsing. |
+| `semver` | 7.3.8 | **Remove direct use.** Strict owned schemas cover the persisted legacy and application versions consumed here. |
 | `simple-concat` | 1.0.1 | **Remove.** Use `node:stream/consumers` with size limits. |
 | `simple-get` | 4.0.1 | **Remove.** Use Electron `net.fetch` or bounded engine fetch. |
 | `srt-to-vtt` | 1.1.3 | **Replace** with `subtitle` for SRT and the explicitly tested basic WebVTT subset. |
@@ -1766,13 +1768,13 @@ reviewed dependency update, not an implicit “latest” lookup.
 | Packaging | `@electron-forge/cli` and auto-unpack-natives 7.11.2 plus direct `@electron/asar` 4.2.1 for verification of a local macOS arm64 `.app`; no installer maker |
 | Forge controls | Forge auto-unpack-natives plus exact direct `@electron/fuses` 2.1.3 in an owned `packageAfterCopy` hook; do not use Forge 7’s fuses plugin because its `^1.0.0` peer cannot configure Electron 43’s complete fuse wire |
 | Compilation | Standalone Vite 8.1.5 invoked by owned Forge hooks plus `@vitejs/plugin-react` 6.0.4; no Forge Vite plugin |
-| Language/types | TypeScript 6.0.3; `@types/node` 24.13.3, `@types/react` 19.2.17, `@types/react-dom` 19.2.3, `@types/semver` 7.7.1, `@types/ws` 8.18.1, and `@types/mocha` 10.0.10; Electron’s bundled declarations |
+| Language/types | TypeScript 6.0.3; `@types/node` 24.13.3, `@types/react` 19.2.17, `@types/react-dom` 19.2.3, and `@types/mocha` 10.0.10; Electron’s bundled declarations and app-owned narrow `ws` surface |
 | Runtime schemas | Zod 4.4.3 exact pin |
 | Lint | ESLint 10.7.0 flat config, `@eslint/js` 10.0.1, `typescript-eslint` 8.65.0, React Hooks 7.1.1, and `globals` 17.7.0 |
 | Formatting | Prettier 3.9.6 |
 | Dead code/deps | Knip 6.29.0 |
-| Unit/component | Vitest 4.1.10, jsdom 29.1.1, `@testing-library/react` 16.3.2, its explicit `@testing-library/dom` 10.4.1 peer, `@testing-library/user-event` 14.6.1, and `@testing-library/jest-dom` 7.0.0 |
-| Desktop E2E | Exact `webdriverio` 9.30.0 and `@wdio/cli` 9.30.0; `@wdio/local-runner`, `@wdio/mocha-framework`, `@wdio/globals`, and `@wdio/spec-reporter` 9.29.1; scoped `@wdio/electron-service` 10.1.0 and `@wdio/visual-service` 10.1.0; `tsx` 4.23.1; explicit imports with `injectGlobals: false` |
+| Unit/component | Vitest 4.1.10, jsdom 29.1.1, `@testing-library/react` 16.3.2, its explicit `@testing-library/dom` 10.4.1 peer, and `@testing-library/user-event` 14.6.1 |
+| Desktop E2E | Exact `webdriverio` 9.30.0 and `@wdio/cli` 9.30.0; `@wdio/local-runner`, `@wdio/mocha-framework`, `@wdio/globals`, and `@wdio/spec-reporter` 9.29.1; scoped `@wdio/electron-service` 10.1.0; `tsx` 4.23.1; explicit imports with `injectGlobals: false` |
 | Torrent integration | Exact `bittorrent-tracker` 11.2.3 and `fs-chunk-store` 5.0.1 as direct test-only dev dependencies plus generated local fixtures. Both also remain transitively present in WebTorrent's packaged runtime graph. Production app code constructs neither tracker client/server nor stock store; the direct stock-store import exists only in characterization tests, and production always supplies the app-owned store. |
 
 Do not install deprecated/stub `@types/electron`. WebTorrent 3,
@@ -1851,7 +1853,7 @@ Verify on the owner’s Mac:
 - Keep `node-datachannel` external to the Vite JavaScript bundle.
 - Use Forge’s native-unpack support so `.node` binaries are outside ASAR.
 - Disable Forge's native rebuild step. Package the already verified
-  Node-API-compatible arm64 prebuild from section 9.4; a packaging command must
+  Node-API-compatible arm64 prebuild from section 6.2; a packaging command must
   never invoke `node-datachannel`'s rebuild script and its source fallback.
 - Verify the binary’s architecture and Node-API load in the final packaged app,
   not only in a development checkout.
@@ -1862,12 +1864,11 @@ Verify on the owner’s Mac:
 
 ## 16. Updating the personal installation
 
-The README opens with `WebTorrent Updated`, its Apple-Silicon-only personal
-build status, and attribution to the original WebTorrent Desktop project. A
-concise difference table records the current Electron/WebTorrent stack, secure
-process split, separate app data, unsigned/ad-hoc local package, manual update
-flow, and removal of casting, uTP, LSD/NAT mapping, updater, telemetry,
-announcements, stock web seeds, and non-Apple-Silicon targets.
+The README stays intentionally simple: it identifies `WebTorrent Updated` as an
+unofficial, independently maintained personal-use fork of the original
+WebTorrent Desktop project, states the Apple-Silicon-only target and local
+ad-hoc package boundary, and gives the exact clean install, test, development,
+and package commands.
 
 Remove the inherited automatic updater and all original update endpoints. Do
 not add an update server, release feed, channel system, or signing
@@ -1898,9 +1899,9 @@ other people install.
   and
 - no signing, publishing, update, or release credentials.
 
-**Optional GitHub pull-request workflow**
+**Required GitHub pull-request workflow**
 
-- one Apple Silicon macOS job when a suitable hosted runner is available;
+- one Apple Silicon `macos-15` job;
 - the same deterministic checks that are useful outside the owner’s hardware;
 - no Windows, Linux, or Intel matrix;
 - no package publication; and
@@ -1909,7 +1910,7 @@ other people install.
 ### 17.2 GitHub Actions policy
 
 Use the current stable `actions/checkout`, `actions/setup-node`, and npm cache
-actions only where the optional workflow needs them. If diagnostics or a local
+actions only where the workflow needs them. If diagnostics or a local
 test package are uploaded, use the current `actions/upload-artifact` line
 (version 7 in this research snapshot).
 
@@ -2305,23 +2306,23 @@ the production trust store is untouched.
 The peer-admission churn boundary is covered: ten thousand admit-and-drop
 cycles leave no record held.
 
-One required behavior in section 4.1 is **not implemented**: adding a torrent
-from a magnet link or a bare info hash. The preparation service returned a
-fixed `UNSUPPORTED` for both, while the interface offers a magnet field, the
-app registers magnet handlers, and pasted magnets reach that dead path. The
-metadata acquisition this needs — bounded, bound to the requested info hash,
-at most two at once, destroying its staging torrent inside the metadata
-handler — is now implemented and unit-tested, and the preparation service
-accepts it and runs the full review path for a magnet when one is supplied.
+Adding a torrent from a magnet link or bare info hash is implemented through
+bounded asynchronous metadata acquisition. The recovered metadata stays bound
+to the requested info hash, no more than two acquisitions run at once, the
+staging torrent is destroyed inside its metadata handler, and the ordinary
+two-phase review path receives only validated torrent bytes.
 
 The staging client and its discovery adapter are now in place. Staging is not
-a long-lived participant: the client is spawned on the first acquisition,
-shared by at most two, and destroyed as soon as the last one finishes, so an
-idle engine holds no staging listener. Its announces go through the same
-mediated tracker transport an owned torrent uses, under the staging client's
-own identity, and the second refusal that sat above the preparation service is
-gone — a magnet now reaches staging and reports why it failed rather than
-claiming the operation is unknown.
+a long-lived participant: every acquisition receives a disposable client and
+identity, no more than two exist at once, and each client is destroyed when its
+acquisition finishes, so an idle engine holds no staging listener. Repeated
+HTTPS and WSS `tr=` values form one order-preserving serial chain; an endpoint
+is fully stopped and its peers, signaling, and socket retired before the next
+endpoint is constructed. Trackerless staging uses the app-owned DHT only after
+explicit consent, without announcing a staging listener. The second refusal
+that sat above the preparation service is gone — a magnet now reaches staging
+and reports a fixed failure reason instead of claiming the operation is
+unknown.
 
 Acquisition is asynchronous, because it has to be: the renderer bridge bounds
 every command to five seconds and metadata routinely needs longer.
@@ -2361,10 +2362,15 @@ Exit: required application behavior works without privileged renderer access.
 
 Progress 2026-07-25: the renderer is React 19 with strict TypeScript and typed
 capabilities, Material UI and PropTypes are gone, and the torrent list,
-two-phase add, file selection, creation, player, subtitles, preferences, row
+two-phase add, file selection, creation and torrent export, player, torrent and
+external subtitles, bounded audio metadata and artwork, preferences, row
 context menu, and error handling are reconnected behind the validated bridge.
-Casting, video posters, telemetry, and announcements are absent. The packaged
-shell exposes exactly eleven capabilities and no privileged global.
+Embedded audio-track selection is capability-gated because Electron 43 does
+not expose Chromium's experimental `audioTracks` API in the qualified runtime;
+the control appears only if a future qualified runtime exposes multiple
+tracks. Casting, video-frame posters, telemetry, and announcements are absent.
+The packaged shell exposes exactly twelve capabilities, including the
+main-owned torrent export dialog, and no privileged global.
 
 ### Milestone 6 — restore OS integrations
 
@@ -2473,7 +2479,68 @@ Decided defaults:
 The owner may later supply a different icon or approve default WSS/STUN
 endpoints. If not, the current assets and empty endpoint defaults remain.
 
-## 24. Maintenance policy after 1.0
+## 24. Session handoff — paused 2026-07-25
+
+The owner paused the review-readiness pass after the combined deterministic
+gate. The current branch is intentionally left as a draft; do not mark it
+ready, merge it, or publish an application without renewed owner direction.
+
+Completed in this snapshot:
+
+- the required read-only Apple Silicon pull-request workflow and clean,
+  script-free artifact acquisition;
+- the short personal-fork README and current dependency-audit record;
+- bounded magnet/info-hash staging with disposable clients, serial HTTPS/WSS
+  failover, consented DHT, exact peer budgets, real peer eviction, and
+  fail-closed teardown;
+- torrent creation followed by a main-owned save dialog and atomic archive
+  export;
+- external subtitles with one-use file-identity grants, bounded audio
+  metadata/artwork, correct media types and CORS, lease cleanup, and
+  runtime-gated audio-track selection; and
+- reciprocal adversarial review fixes for WSS response correlation, DHT socket
+  recovery, archive limits, chooser cancellation, packaged parser proof, and
+  the Chromium remote-debugging smoke probe.
+
+Verified after the final local edits:
+
+- `npm test`: **74 files and 766 tests passed**, including format, lint,
+  TypeScript, Knip, unit, component, local TLS, tracker, DHT, media, and
+  lifecycle checks.
+- The first live CI run at checkpoint `c145cda` passed clean install, artifact
+  acquisition, deterministic checks, and all 16 Electron E2E tests. Its package
+  stage found the invalid remote-debugging-pipe probe; that harness is fixed in
+  this snapshot but has not yet rerun on GitHub.
+
+Not rerun after the final staging/media edits:
+
+- `npm run e2e`;
+- `npm run package:check`;
+- launch of the rebuilt `.app` through Computer Use;
+- a real lawful magnet in the packaged app;
+- the post-push GitHub CI result; and
+- a final Greptile review of this snapshot.
+
+Recommended continuation order:
+
+1. Use `PATH=/opt/homebrew/opt/node@24/bin:$PATH` and confirm Node 24.18.0 /
+   npm 11.16.0.
+2. Run `npm run e2e`, then `npm run package:check`.
+3. Launch
+   `out/WebTorrent Updated-darwin-arm64/WebTorrent Updated.app` and try a
+   public-domain v1 magnet; cancel after metadata review if a large payload is
+   unnecessary.
+4. Inspect the new GitHub CI run and fix only observed regressions.
+5. Trigger at most one Greptile review, address actionable findings, and rerun
+   affected gates.
+6. Reconcile the milestone exits, exact evidence, and PR description. Keep the
+   PR in draft until the owner explicitly accepts it.
+
+Longer acceptance work remains unchanged: real legacy/trash-isolation fixtures,
+OS-level watched-folder/external-player/menu/notification/dock flows, the
+section 18.5 soak/resource suite, profile preservation, and owner acceptance.
+
+## 25. Maintenance policy after 1.0
 
 - Keep Electron on a supported major and prioritize its security patches.
 - Review WebTorrent releases and take compatible fixes deliberately.
@@ -2484,11 +2551,11 @@ endpoints. If not, the current assets and empty endpoint defaults remain.
 - Re-run packaged arm64, native WebRTC, state, and playback tests for every
   Electron, WebTorrent, native-module, or packaging change.
 - Monitor Electron support, WebTorrent security/issues, and GitHub Action
-  retirement affecting the optional workflow.
+  retirement affecting the required workflow.
 - Treat casting, video posters, uTP, LSD/automatic port mapping, public
   distribution, other platforms, and BEP 52 as separately scoped future work.
 
-## 25. Research sources
+## 26. Research sources
 
 ### Repository and ports
 
@@ -2557,7 +2624,7 @@ endpoints. If not, the current assets and empty endpoint defaults remain.
 - [WebTorrent uTP issue #2890](https://github.com/webtorrent/webtorrent/issues/2890)
 - [WebTorrent lifecycle issue #2685](https://github.com/webtorrent/webtorrent/issues/2685)
 
-### Optional CI and dependency integrity
+### CI and dependency integrity
 
 - [GitHub-hosted runners](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
 - [Artifact action v3 retirement](https://github.blog/changelog/2024-11-05-notice-of-breaking-changes-for-github-actions/)
@@ -2574,7 +2641,7 @@ endpoints. If not, the current assets and empty endpoint defaults remain.
 - [React Testing Library](https://testing-library.com/docs/react-testing-library/intro/)
 - [`music-metadata` Node export guidance](https://github.com/Borewit/music-metadata#module-resolution)
 
-## 26. Final gate
+## 27. Final gate
 
 The owner approved migration on 2026-07-24. Work proceeds through the milestone
 and acceptance gates above on `feat/webtorrent-updated`; merge and release still

@@ -1,6 +1,6 @@
 # Dependency audit record
 
-Snapshot: **2026-07-24**
+Snapshot: **2026-07-25**
 
 This record explains the audit findings accepted at the Apple Silicon
 toolchain and process-boundary baselines. It is not a blanket exception: every
@@ -14,9 +14,10 @@ same transitive advisory propagated through this chain:
 
 `webtorrent` → `torrent-discovery` → `bittorrent-tracker` → `ip@2.0.1`
 
-The Milestone 2 graph contains 191 production packages. Adding exact
-`electron-store@11.0.2` and `zod@4.4.3` introduced no additional advisory;
-the four labels below remain the complete production result.
+The qualified graph contains 220 production packages. Adding exact
+`electron-store@11.0.2`, `zod@4.4.3`, and `music-metadata@11.14.0` introduced
+no additional production advisory; the four labels below remain the complete
+production result.
 
 The underlying finding is
 [GHSA-2p57-rm9w-gvfp](https://github.com/advisories/GHSA-2p57-rm9w-gvfp),
@@ -40,26 +41,35 @@ this exception.
 
 ## Development-only graph
 
-The full audit reports 26 entries: 3 low, 22 high, and 1 critical. Apart from
-the production chain above, they are inherited by Electron Forge's CLI:
+The full audit reports 56 entries: 3 low, 15 moderate, 38 high, and no
+critical findings. Subtracting the four production labels above leaves 52
+development-only labels: 3 low, 15 moderate, and 34 high. They are inherited
+through the qualified Electron Forge and WebdriverIO toolchains:
 
 - `@electron/rebuild` → `@electron/node-gyp` / `make-fetch-happen` → `tar`;
-- Forge's prompt stack → `external-editor` → `tmp`; and
-- the Forge packages that npm marks transitively because they depend on those
-  paths.
+- Forge's packaging and prompt stacks → `glob` / `minimatch` /
+  `brace-expansion` and `external-editor` → `tmp`;
+- WebdriverIO's runner/config stack → `glob` / `minimatch`;
+- WebdriverIO's archive helper stack → `archiver` / `readdir-glob` /
+  `zip-stream`; and
+- its Mocha/EJS scaffolding paths → `serialize-javascript`, `jake`, and
+  `filelist`.
 
 Disposition: **temporarily accepted as local build-tool debt**.
 
-Forge 7.11.2 is the current qualified stable release and npm reports no
-compatible fix for the affected paths. Forge 8 is still an alpha; switching the
-packager to a major prerelease solely to reduce an audit count is rejected
-without a separate qualification. An unsafe top-level `tar`, `tmp`, or
-`@electron/rebuild` override is also rejected because it would violate declared
-version ranges without proving Forge/rebuild compatibility.
+Forge 7.11.2 and the exact WebdriverIO/Electron-service suite are the qualified
+stable lines, and npm reports no compatible complete fix for these paths.
+Several proposed remediations are incompatible major downgrades; Forge 8 is
+still an alpha. Switching the packager or E2E stack solely to reduce an audit
+count is rejected without a separate qualification. Unsafe top-level
+`tar`/`tmp`/glob overrides are also rejected because they would violate
+declared ranges without proving the build and test tools.
 
 Mitigations:
 
 - these packages are development-only and are pruned from the `.app`;
+- CI executes them on generated repository fixtures without production
+  credentials or untrusted archive/template inputs;
 - installs use the exact lockfile and an explicit install-script allowlist;
 - Forge's inherited `@electron/node-gyp` Git source is locked to commit
   `06b29aafb7708acef8b3669835c8a7857ebc92d2`; it is not a branch or floating

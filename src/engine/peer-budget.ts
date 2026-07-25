@@ -35,9 +35,15 @@ type Holder = {
   /** PEX-origin peer keys, a subset of `records`. */
   pex: Set<string>
   /** Peer keys in least-recently-admitted order. */
-  records: Set<string>
+  records: Map<string, () => void>
   scope: PeerBudgetScope
+  /** Capacity reserved immediately before a peer is handed to WebTorrent. */
+  transports: Map<string, PeerTransportLease>
 }
+
+export type PeerTransportLease = Readonly<{
+  release: () => void
+}>
 
 /**
  * The engine-wide peer-admission budget.
@@ -71,13 +77,52 @@ export class PeerBudget {
     return this.#holders.get(key)?.records.size ?? 0
   }
 
+  get reservedTransportCount(): number {
+    let total = 0
+    for (const holder of this.#holders.values()) total += holder.transports.size
+    return total
+  }
+
+  /**
+   * Reserves aggregate live-transport capacity immediately before handoff.
+   * The reservation closes the sampling race between concurrent torrents;
+   * callers release a rejected handoff immediately and accepted handoffs when
+   * their peer record or whole generation is retired.
+   */
+  reserveTransport(
+    input: Readonly<{ key: string; peer: string; scope?: PeerBudgetScope }>
+  ): PeerTransportLease | null {
+    const scope = input.scope ?? 'torrent'
+    const holder = this.#holder(input.key, scope)
+    if (holder.transports.has(input.peer)) return null
+    if (!this.#admitsTransport(scope)) return null
+
+    let released = false
+    const lease: PeerTransportLease = {
+      release: () => {
+        if (released) return
+        released = true
+        if (holder.transports.get(input.peer) === lease) {
+          holder.transports.delete(input.peer)
+        }
+      }
+    }
+    holder.transports.set(input.peer, lease)
+    return lease
+  }
+
   /**
    * Admits one peer for a holder, recording it. A peer already recorded is
    * admitted again without consuming further capacity, which keeps a repeated
    * discovery from counting twice.
    */
   admit(
-    input: Readonly<{ key: string; peer: string; scope?: PeerBudgetScope }>
+    input: Readonly<{
+      key: string
+      peer: string
+      remove?: () => void
+      scope?: PeerBudgetScope
+    }>
   ): boolean {
     const scope = input.scope ?? 'torrent'
     const holder = this.#holder(input.key, scope)
@@ -86,21 +131,29 @@ export class PeerBudget {
     if (scope === 'pex' && !this.#admitsPex(holder)) return false
     if (!this.#admitsRecord(holder, scope)) return false
 
-    holder.records.add(input.peer)
+    holder.records.set(input.peer, input.remove ?? (() => undefined))
     if (scope === 'pex') holder.pex.add(input.peer)
     return true
   }
 
   /** Drops one holder's records, returning their capacity to the engine. */
   release(key: string): void {
+    const holder = this.#holders.get(key)
+    if (!holder) return
+    for (const lease of holder.transports.values()) lease.release()
     this.#holders.delete(key)
   }
 
   /** Drops one recorded peer, typically when its transport is gone. */
   forget(key: string, peer: string): void {
     const holder = this.#holders.get(key)
+    holder?.transports.get(peer)?.release()
     holder?.records.delete(peer)
     holder?.pex.delete(peer)
+  }
+
+  has(key: string, peer: string): boolean {
+    return this.#holders.get(key)?.records.has(peer) ?? false
   }
 
   pexRecordsFor(key: string): number {
@@ -124,18 +177,33 @@ export class PeerBudget {
   #holder(key: string, scope: PeerBudgetScope): Holder {
     const existing = this.#holders.get(key)
     if (existing) return existing
-    const holder: Holder = { key, pex: new Set(), records: new Set(), scope }
+    const holder: Holder = {
+      key,
+      pex: new Set(),
+      records: new Map(),
+      scope,
+      transports: new Map()
+    }
     this.#holders.set(key, holder)
     return holder
   }
 
   #admitsTransport(scope: PeerBudgetScope): boolean {
-    if (this.#liveTransports() >= PEER_BUDGET_LIMITS.maxLiveTransports) {
+    if (
+      this.#liveTransports() + this.reservedTransportCount >=
+      PEER_BUDGET_LIMITS.maxLiveTransports
+    ) {
       return false
+    }
+    let stagingReserved = 0
+    for (const holder of this.#holders.values()) {
+      if (holder.scope === 'staging') {
+        stagingReserved += holder.transports.size
+      }
     }
     return (
       scope !== 'staging' ||
-      this.#stagingLiveTransports() <
+      this.#stagingLiveTransports() + stagingReserved <
         PEER_BUDGET_LIMITS.maxStagingLiveTransports
     )
   }
@@ -181,10 +249,18 @@ export class PeerBudget {
     if (!largest || largest.records.size === 0) return false
     if (largest === requesting && this.#holders.size > 1) return false
 
-    const oldest = largest.records.values().next().value
-    if (oldest === undefined) return false
-    largest.records.delete(oldest)
-    largest.pex.delete(oldest)
+    const oldest = largest.records.entries().next().value as
+      [string, () => void] | undefined
+    if (!oldest) return false
+    const [peer, remove] = oldest
+    try {
+      remove()
+    } catch {
+      return false
+    }
+    largest.transports.get(peer)?.release()
+    largest.records.delete(peer)
+    largest.pex.delete(peer)
     return true
   }
 }

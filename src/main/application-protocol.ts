@@ -16,11 +16,15 @@ export function buildApplicationCsp(mediaPort: number | null): string {
     mediaPort <= 65_535
       ? `http://127.0.0.1:${mediaPort}`
       : "'none'"
+  const imageSource =
+    mediaSource === "'none'"
+      ? "img-src 'self' data:"
+      : `img-src 'self' data: ${mediaSource}`
   return [
     "default-src 'none'",
     "script-src 'self'",
     "style-src 'self'",
-    "img-src 'self' data:",
+    imageSource,
     "font-src 'self'",
     "connect-src 'none'",
     `media-src ${mediaSource}`,

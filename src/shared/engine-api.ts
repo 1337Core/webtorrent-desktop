@@ -49,6 +49,26 @@ const absolutePathSchema = boundedPathSchema
             index > 0 && (segment === '' || segment === '.' || segment === '..')
         )
   )
+const decimalBigIntSchema = z.string().regex(/^(?:0|[1-9]\d{0,39})$/u)
+const subtitleFilesystemIdentitySchema = z.strictObject({
+  device: decimalBigIntSchema,
+  inode: decimalBigIntSchema
+})
+const externalSubtitleGrantSchema = z.strictObject({
+  canonicalPath: absolutePathSchema,
+  file: subtitleFilesystemIdentitySchema.extend({
+    modifiedNs: decimalBigIntSchema,
+    size: decimalBigIntSchema
+  }),
+  parentChain: z
+    .array(
+      subtitleFilesystemIdentitySchema.extend({
+        path: absolutePathSchema
+      })
+    )
+    .max(63)
+})
+export type ExternalSubtitleGrant = z.infer<typeof externalSubtitleGrantSchema>
 const magnetSchema = z
   .string()
   .min(1)
@@ -98,6 +118,7 @@ const engineCommandNameSchema = z.enum([
   'commit-preparation',
   'create-torrent',
   'discard-preparation',
+  'export-torrent',
   'get-acquisition',
   'get-preparation-files',
   'get-torrent-files',
@@ -105,6 +126,8 @@ const engineCommandNameSchema = z.enum([
   'import-legacy-torrent',
   'list-legacy-imports',
   'list-torrents',
+  'open-audio-metadata',
+  'open-external-subtitle',
   'open-media',
   'open-preparation',
   'open-subtitles',
@@ -343,8 +366,27 @@ export const engineCommandSchema = z.discriminatedUnion('command', [
         'HTTP trackers require explicit consent.'
       )
   }),
+  /**
+   * Main uses this only after its save dialog returns a destination. The
+   * renderer-facing torrent-command handler rejects it, so page script cannot
+   * manufacture an export path.
+   */
+  z.strictObject({
+    command: z.literal('export-torrent'),
+    payload: z.strictObject({
+      destinationPath: absolutePathSchema,
+      infoHash: infoHashSchema
+    })
+  }),
   z.strictObject({
     command: z.literal('open-media'),
+    payload: z.strictObject({
+      infoHash: infoHashSchema,
+      fileIndex: z.number().int().min(0).max(99_999)
+    })
+  }),
+  z.strictObject({
+    command: z.literal('open-audio-metadata'),
     payload: z.strictObject({
       infoHash: infoHashSchema,
       fileIndex: z.number().int().min(0).max(99_999)
@@ -359,6 +401,20 @@ export const engineCommandSchema = z.discriminatedUnion('command', [
     command: z.literal('open-subtitles'),
     payload: z.strictObject({
       infoHash: infoHashSchema
+    })
+  }),
+  /**
+   * Main accepts this only when `path` consumes a one-use native-chooser
+   * grant. Main attaches the chooser-time filesystem identity before sending
+   * it to the engine; page script cannot authorize an arbitrary local path.
+   */
+  z.strictObject({
+    command: z.literal('open-external-subtitle'),
+    payload: z.strictObject({
+      infoHash: infoHashSchema,
+      mediaFileIndex: z.number().int().min(0).max(99_999),
+      path: absolutePathSchema,
+      grant: externalSubtitleGrantSchema.optional()
     })
   }),
   z.strictObject({
@@ -544,7 +600,13 @@ const engineCommandSuccessSchema = z.discriminatedUnion('command', [
       }),
       z.strictObject({
         state: z.literal('failed'),
-        code: z.enum(['METADATA_UNAVAILABLE', 'INPUT_INVALID', 'INTERNAL'])
+        code: z.enum([
+          'DHT_CONSENT_REQUIRED',
+          'METADATA_UNAVAILABLE',
+          'PRIVATE_DHT_METADATA',
+          'INPUT_INVALID',
+          'INTERNAL'
+        ])
       })
     ])
   }),
@@ -652,6 +714,13 @@ const engineCommandSuccessSchema = z.discriminatedUnion('command', [
     })
   }),
   z.strictObject({
+    command: z.literal('export-torrent'),
+    value: z.strictObject({
+      exported: z.literal(true),
+      infoHash: infoHashSchema
+    })
+  }),
+  z.strictObject({
     command: z.literal('open-media'),
     value: z.strictObject({
       infoHash: infoHashSchema,
@@ -667,6 +736,51 @@ const engineCommandSuccessSchema = z.discriminatedUnion('command', [
           return port >= 1 && port <= 65_535
         }),
       expiresAtMs: z.number().int().nonnegative().safe()
+    })
+  }),
+  z.strictObject({
+    command: z.literal('open-audio-metadata'),
+    value: z.strictObject({
+      infoHash: infoHashSchema,
+      fileIndex: z.number().int().min(0).max(99_999),
+      metadata: z.strictObject({
+        album: z.string().max(256).nullable(),
+        albumArtist: z.string().max(256).nullable(),
+        artist: z.string().max(256).nullable(),
+        bitrate: z.number().finite().min(1).max(10_000_000).nullable(),
+        bitsPerSample: z.number().int().min(1).max(128).nullable(),
+        codec: z.string().max(256).nullable(),
+        container: z.string().max(256).nullable(),
+        disk: z.strictObject({
+          no: z.number().int().min(1).max(1_000_000).nullable(),
+          of: z.number().int().min(1).max(1_000_000).nullable()
+        }),
+        sampleRate: z.number().finite().min(1).max(1_000_000).nullable(),
+        title: z.string().min(1).max(256),
+        track: z.strictObject({
+          no: z.number().int().min(1).max(1_000_000).nullable(),
+          of: z.number().int().min(1).max(1_000_000).nullable()
+        }),
+        year: z.number().int().min(1_000).max(9_999).nullable()
+      }),
+      artwork: z
+        .strictObject({
+          byteLength: z
+            .number()
+            .int()
+            .min(1)
+            .max(2 * 1024 * 1024),
+          contentType: z.enum(['image/jpeg', 'image/png']),
+          height: z.number().int().min(1).max(8_192),
+          width: z.number().int().min(1).max(8_192),
+          leaseId: uuidSchema,
+          url: z
+            .string()
+            .regex(
+              /^http:\/\/127\.0\.0\.1:\d{1,5}\/v1\/media\/[A-Za-z0-9_-]{43}$/u
+            )
+        })
+        .nullable()
     })
   }),
   z.strictObject({
@@ -688,6 +802,23 @@ const engineCommandSuccessSchema = z.discriminatedUnion('command', [
           })
         )
         .max(8)
+    })
+  }),
+  z.strictObject({
+    command: z.literal('open-external-subtitle'),
+    value: z.strictObject({
+      infoHash: infoHashSchema,
+      mediaFileIndex: z.number().int().min(0).max(99_999),
+      track: z.strictObject({
+        label: z.string().min(1).max(64),
+        language: z.string().max(16),
+        leaseId: uuidSchema,
+        url: z
+          .string()
+          .regex(
+            /^http:\/\/127\.0\.0\.1:\d{1,5}\/v1\/media\/[A-Za-z0-9_-]{43}$/u
+          )
+      })
     })
   }),
   z.strictObject({
@@ -718,6 +849,7 @@ const engineCommandErrorSchema = z.strictObject({
     'METADATA_UNAVAILABLE',
     'NOT_FOUND',
     'PATH_NOT_AUTHORIZED',
+    'PRIVATE_DHT_METADATA',
     'STATE_CONFLICT',
     'TIMEOUT',
     'UNSUPPORTED'
@@ -806,6 +938,7 @@ export function engineResultMatchesOperation(
     case 'get-torrent-files':
     case 'restore-torrent':
     case 'set-torrent-selection':
+    case 'export-torrent':
       return (
         result.result.command === operation.command &&
         result.result.value.infoHash === operation.payload.infoHash
@@ -827,6 +960,7 @@ export function engineResultMatchesOperation(
         result.result.value.operationId === operation.payload.operationId
       )
     case 'open-media':
+    case 'open-audio-metadata':
       return (
         result.result.command === operation.command &&
         result.result.value.infoHash === operation.payload.infoHash &&
@@ -836,6 +970,12 @@ export function engineResultMatchesOperation(
       return (
         result.result.command === operation.command &&
         result.result.value.infoHash === operation.payload.infoHash
+      )
+    case 'open-external-subtitle':
+      return (
+        result.result.command === operation.command &&
+        result.result.value.infoHash === operation.payload.infoHash &&
+        result.result.value.mediaFileIndex === operation.payload.mediaFileIndex
       )
     case 'heartbeat-media':
     case 'close-media':

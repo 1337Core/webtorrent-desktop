@@ -974,6 +974,58 @@ describe('EngineRuntime', () => {
     expect(errorCode(result)).toBe('PATH_NOT_AUTHORIZED')
   })
 
+  it('exports archived torrent bytes to a main-approved destination', async () => {
+    const archive = {
+      export: vi.fn(async () => true)
+    }
+    const runtime = new EngineRuntime({
+      torrentArchive: archive as unknown as TorrentArchive
+    })
+    const operation: EngineCommand = {
+      command: 'export-torrent',
+      payload: {
+        destinationPath: '/Users/owner/Desktop/example.torrent',
+        infoHash: INFO_HASH
+      }
+    }
+
+    const result = await runtime.execute(operation, signal())
+
+    expectStrictResult(operation, result)
+    expect(result).toEqual({
+      ok: true,
+      result: {
+        command: 'export-torrent',
+        value: { exported: true, infoHash: INFO_HASH }
+      }
+    })
+    expect(archive.export).toHaveBeenCalledWith(
+      INFO_HASH,
+      '/Users/owner/Desktop/example.torrent'
+    )
+  })
+
+  it('reports a missing archived torrent during export', async () => {
+    const archive = {
+      export: vi.fn(async () => false)
+    }
+    const runtime = new EngineRuntime({
+      torrentArchive: archive as unknown as TorrentArchive
+    })
+    const operation: EngineCommand = {
+      command: 'export-torrent',
+      payload: {
+        destinationPath: '/Users/owner/Desktop/missing.torrent',
+        infoHash: INFO_HASH
+      }
+    }
+
+    const result = await runtime.execute(operation, signal())
+
+    expectStrictResult(operation, result)
+    expect(errorCode(result)).toBe('NOT_FOUND')
+  })
+
   it('serves media through opaque per-file leases', async () => {
     const proxy = new MediaProxy()
     await proxy.start()
@@ -1379,5 +1431,49 @@ describe('EngineRuntime', () => {
 
     expectStrictResult(operation, result)
     expect(errorCode(result)).toBe('ABORTED')
+  })
+
+  it('aborts and drains detached metadata acquisitions before close completes', async () => {
+    const started = Promise.withResolvers<void>()
+    const released = Promise.withResolvers<void>()
+    const runtime = new EngineRuntime({
+      createPreparationService: () => ({
+        open: async (_source, executionSignal) => {
+          started.resolve()
+          await new Promise<void>(resolve => {
+            executionSignal.addEventListener(
+              'abort',
+              () => {
+                released.resolve()
+                resolve()
+              },
+              { once: true }
+            )
+          })
+          throw new TorrentPreparationServiceError('ABORTED')
+        }
+      })
+    })
+    const operation: Extract<EngineCommand, { command: 'start-acquisition' }> =
+      {
+        command: 'start-acquisition',
+        payload: {
+          source: {
+            allowDhtExposure: false,
+            allowPrivateNetwork: false,
+            infoHash: INFO_HASH,
+            kind: 'info-hash'
+          }
+        }
+      }
+
+    const result = await runtime.execute(operation, signal())
+    await started.promise
+    const close = runtime.close()
+    await released.promise
+    await close
+
+    expectStrictResult(operation, result)
+    expect(result.ok).toBe(true)
   })
 })

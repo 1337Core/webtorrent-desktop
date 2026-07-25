@@ -15,6 +15,7 @@ import {
   type EngineTorrentFile
 } from './disk-torrent'
 import { EgressPolicy } from './network-policy'
+import { PeerBudget } from './peer-budget'
 import {
   validateTorrentMetadata,
   type ValidatedTorrentMetadata
@@ -50,6 +51,7 @@ class FakeTorrent extends EventEmitter implements EngineTorrent {
   uploadSpeed = 0
   uploaded = 0
   readonly destroyCalls: Array<{ destroyStore: boolean }> = []
+  readonly _peers = new Map<unknown, EventEmitter & { destroy(): void }>()
   readonly peers: string[] = []
   readonly connections: unknown[] = []
   readonly selectionCalls: string[] = []
@@ -96,9 +98,29 @@ class FakeTorrent extends EventEmitter implements EngineTorrent {
     return this.#overrides.torrentFile ?? this.#metadata.torrentBytes
   }
 
-  addPeer(peer: unknown, _source?: string): boolean {
+  addPeer(
+    peer: unknown,
+    source?: string
+  ): ReturnType<EngineTorrent['addPeer']> {
+    if (this.#overrides.addPeer) {
+      return this.#overrides.addPeer(peer as never, source)
+    }
     if (typeof peer === 'string') this.peers.push(peer)
     else this.connections.push(peer)
+    const handle = new EventEmitter() as EventEmitter & {
+      connected: boolean
+      destroy(): void
+      id: unknown
+    }
+    handle.connected = false
+    handle.id =
+      typeof peer === 'object' && peer !== null && 'id' in peer
+        ? (Reflect.get(peer, 'id') ?? peer)
+        : peer
+    handle.destroy = () => {
+      this.removePeer(peer)
+    }
+    this._peers.set(handle.id, handle)
     return true
   }
 
@@ -116,6 +138,21 @@ class FakeTorrent extends EventEmitter implements EngineTorrent {
 
   resume(): void {
     this.paused = false
+  }
+
+  removePeer(peer: unknown): void {
+    const identity =
+      typeof peer === 'object' && peer !== null && 'id' in peer
+        ? (Reflect.get(peer, 'id') ?? peer)
+        : peer
+    this._peers.delete(identity)
+    if (typeof peer === 'string') {
+      const index = this.peers.indexOf(peer)
+      if (index >= 0) this.peers.splice(index, 1)
+    } else {
+      const index = this.connections.indexOf(peer)
+      if (index >= 0) this.connections.splice(index, 1)
+    }
   }
 
   destroy(
@@ -204,7 +241,9 @@ function sessionOptions(
 }
 
 async function addReadySession(
-  input: Partial<DiskTorrentAddInput> = {},
+  input: Partial<DiskTorrentAddInput> & {
+    torrentOverrides?: Partial<EngineTorrent>
+  } = {},
   options: Partial<DiskTorrentSessionOptions> = {}
 ): Promise<DiskTorrentSession> {
   const pending = DiskTorrentSession.add(
@@ -428,6 +467,79 @@ describe('DiskTorrentSession', () => {
     // A transport with no remote address is never handed to WebTorrent.
     expect(session.admitConnection({ destroy: () => undefined })).toBe(false)
     expect(torrent.connections).toEqual([connected])
+  })
+
+  it('moves pending transport capacity to live and allows re-admit after disconnect', async () => {
+    let live = 0
+    const budget = new PeerBudget({ liveTransports: () => live })
+    const handles: EventEmitter[] = []
+    const session = await addReadySession(
+      {
+        torrentOverrides: {
+          addPeer: () => {
+            const handle = new EventEmitter() as EventEmitter & {
+              connected: boolean
+              destroy(): void
+            }
+            handle.connected = false
+            handle.destroy = () => undefined
+            handles.push(handle)
+            return handle
+          }
+        }
+      },
+      { budget }
+    )
+    session.resume()
+
+    expect(session.admitPeer('203.0.113.1:6881')).toBe(true)
+    expect(budget.reservedTransportCount).toBe(1)
+
+    live = 1
+    handles[0]?.emit('connect')
+    expect(budget.reservedTransportCount).toBe(0)
+
+    live = 0
+    handles[0]?.emit('disconnect')
+    expect(session.admitPeer('203.0.113.2:6881')).toBe(true)
+    expect(budget.reservedTransportCount).toBe(1)
+  })
+
+  it('tracks the real peer behind WebTorrent’s public boolean result', async () => {
+    let live = 0
+    const budget = new PeerBudget({ liveTransports: () => live })
+    const session = await addReadySession({}, { budget })
+    const torrent = harness.torrents[0]
+    if (!torrent) throw new Error('Expected a torrent')
+    session.resume()
+
+    const address = '203.0.113.11:6881'
+    expect(session.admitPeer(address)).toBe(true)
+    expect(budget.recordCount).toBe(1)
+    expect(budget.reservedTransportCount).toBe(1)
+
+    const peer = torrent._peers.get(address)
+    if (!peer) throw new Error('Expected a tracked peer')
+    live = 1
+    peer.emit('connect')
+    expect(budget.reservedTransportCount).toBe(0)
+
+    live = 0
+    peer.destroy()
+    expect(budget.recordCount).toBe(0)
+  })
+
+  it('forgets a new record when WebTorrent rejects its handoff', async () => {
+    const budget = new PeerBudget({ liveTransports: () => 0 })
+    const session = await addReadySession(
+      { torrentOverrides: { addPeer: () => false } },
+      { budget }
+    )
+    session.resume()
+
+    expect(session.admitPeer('203.0.113.12:6881')).toBe(false)
+    expect(budget.recordCount).toBe(0)
+    expect(budget.reservedTransportCount).toBe(0)
   })
 
   it('filters peers WebTorrent discovers for itself', async () => {

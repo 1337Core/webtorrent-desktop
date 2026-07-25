@@ -854,6 +854,20 @@ video::-webkit-media-text-track-container {
   text-overflow: ellipsis;
 }
 
+.audio-info-background {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 36px;
+}
+
+.audio-artwork {
+  width: min(38vw, 360px);
+  height: min(38vw, 360px);
+  object-fit: contain;
+  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.45);
+}
+
 .audio-metadata .audio-title {
   font-size: 32px;
 }

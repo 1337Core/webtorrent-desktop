@@ -78,6 +78,7 @@ await buildNodeEntry({
     '@thaunknown/simple-peer',
     'bencode',
     'create-torrent',
+    'music-metadata',
     'parse-torrent',
     // `subtitle` reaches an old CommonJS readable-stream that calls `require`
     // at load time, which no ES bundle can satisfy; it stays external.

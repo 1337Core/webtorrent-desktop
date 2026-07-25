@@ -48,6 +48,8 @@ export type TrackerActivationOptions = Readonly<{
   allowPrivateNetwork: boolean
   infoHash: string
   now?: () => number
+  onActivated?: (endpoint: string) => void
+  onExhausted?: () => void
   onPeers: (delivery: TrackerActivationPeers) => void
   /**
    * Private failover must destroy every peer, queued candidate, and lease of
@@ -60,6 +62,8 @@ export type TrackerActivationOptions = Readonly<{
   progress: () => TrackerActivationProgress
   random?: () => number
   sessionSeed: string
+  /** Staging tries this activation's endpoints once, without backoff. */
+  singlePass?: boolean
   tiers: ReadonlyArray<ReadonlyArray<string>>
   transport: TrackerAnnounceTransport
 }>
@@ -80,6 +84,7 @@ export type TrackerActivationUnitSnapshot = Readonly<{
 
 type EndpointState = {
   contacted: boolean
+  stopController: AbortController | null
   stoppedAttempted: boolean
   trackerId: Uint8Array | null
   url: string
@@ -205,6 +210,8 @@ export class TrackerActivation {
   readonly #infoHash: string
   readonly #infoHashBytes: Uint8Array
   readonly #now: () => number
+  readonly #onActivated: (endpoint: string) => void
+  readonly #onExhausted: () => void
   readonly #onPeers: (delivery: TrackerActivationPeers) => void
   readonly #onRetireGeneration: () => Promise<void> | void
   readonly #peerId: Uint8Array
@@ -213,6 +220,7 @@ export class TrackerActivation {
   readonly #private: boolean
   readonly #progress: () => TrackerActivationProgress
   readonly #sessionSeed: string
+  readonly #singlePass: boolean
   readonly #stopController = new AbortController()
   readonly #transport: TrackerAnnounceTransport
   readonly #units: UnitState[]
@@ -243,6 +251,8 @@ export class TrackerActivation {
     this.#infoHash = options.infoHash
     this.#infoHashBytes = infoHashBytes(options.infoHash)
     this.#now = options.now ?? (() => performance.now())
+    this.#onActivated = options.onActivated ?? (() => undefined)
+    this.#onExhausted = options.onExhausted ?? (() => undefined)
     this.#onPeers = options.onPeers
     this.#onRetireGeneration = options.onRetireGeneration ?? (() => undefined)
     this.#peerId = options.peerId.slice()
@@ -250,6 +260,7 @@ export class TrackerActivation {
     this.#private = options.private
     this.#progress = options.progress
     this.#sessionSeed = options.sessionSeed
+    this.#singlePass = options.singlePass ?? false
     this.#transport = options.transport
 
     const tiers = normalizeTiers(
@@ -305,12 +316,9 @@ export class TrackerActivation {
     }
   }
 
-  stop(): Promise<void> {
-    this.#stopPromise ??= this.#stopOnce()
-    return this.#stopPromise
-  }
-
-  async #stopOnce(): Promise<void> {
+  /** Synchronously prevents any new announce, retry, or peer delivery. */
+  freeze(): void {
+    if (this.#closed) return
     this.#closed = true
     for (const unit of this.#units) {
       unit.closed = true
@@ -318,6 +326,15 @@ export class TrackerActivation {
       unit.inFlight?.abort()
       unit.inFlight = null
     }
+  }
+
+  stop(): Promise<void> {
+    this.#stopPromise ??= this.#stopOnce()
+    return this.#stopPromise
+  }
+
+  async #stopOnce(): Promise<void> {
+    this.freeze()
 
     for (const unit of this.#units) {
       for (const endpoint of unit.endpoints) this.#attemptStopped(endpoint)
@@ -414,6 +431,11 @@ export class TrackerActivation {
     unit.failureRound = 0
     unit.succeeded = true
     this.#makeSticky(unit, endpoint)
+    try {
+      this.#onActivated(endpoint.url)
+    } catch {
+      // Lifecycle observation cannot change tracker scheduling.
+    }
 
     if (response.peers.length > 0) {
       try {
@@ -444,7 +466,22 @@ export class TrackerActivation {
   async #rotate(unit: UnitState): Promise<void> {
     this.#clearTimer(unit)
     const retiring = unit.endpoints[unit.activeIndex]
-    if (retiring) this.#attemptStopped(retiring)
+    if (retiring) {
+      const stopped = this.#attemptStopped(retiring)
+      if (stopped) {
+        let graceTimer: NodeJS.Timeout | null = null
+        const grace = new Promise<void>(resolve => {
+          graceTimer = setTimeout(
+            resolve,
+            TRACKER_ACTIVATION_LIMITS.stopGraceMs
+          )
+          graceTimer.unref()
+        })
+        await Promise.race([stopped, grace])
+        if (graceTimer) clearTimeout(graceTimer)
+        retiring.stopController?.abort()
+      }
+    }
 
     if (this.#private) {
       try {
@@ -463,6 +500,15 @@ export class TrackerActivation {
 
     unit.activeIndex = 0
     unit.failureRound += 1
+    if (this.#singlePass) {
+      unit.closed = true
+      try {
+        this.#onExhausted()
+      } catch {
+        // Lifecycle observation cannot change tracker scheduling.
+      }
+      return
+    }
     this.#schedule(unit, this.#backoffMs(unit))
   }
 
@@ -492,11 +538,13 @@ export class TrackerActivation {
    * One non-retrying best-effort attempt per endpoint. The attempted bit is set
    * before the request so later teardown never repeats it.
    */
-  #attemptStopped(endpoint: EndpointState): void {
-    if (!endpoint.contacted || endpoint.stoppedAttempted) return
+  #attemptStopped(endpoint: EndpointState): Promise<void> | null {
+    if (!endpoint.contacted || endpoint.stoppedAttempted) return null
     endpoint.stoppedAttempted = true
-    if (this.#stopController.signal.aborted) return
+    if (this.#stopController.signal.aborted) return null
 
+    const controller = new AbortController()
+    endpoint.stopController = controller
     const progress = this.#progress()
     const attempt = this.#transport
       .announce({
@@ -508,7 +556,10 @@ export class TrackerActivation {
         left: progress.left,
         peerId: this.#peerId,
         port: this.#port,
-        signal: this.#stopController.signal,
+        signal: AbortSignal.any([
+          this.#stopController.signal,
+          controller.signal
+        ]),
         ...(endpoint.trackerId ? { trackerId: endpoint.trackerId } : {}),
         trackerUrl: endpoint.url,
         uploaded: progress.uploaded
@@ -518,9 +569,13 @@ export class TrackerActivation {
         () => undefined
       )
       .finally(() => {
+        if (endpoint.stopController === controller) {
+          endpoint.stopController = null
+        }
         this.#pendingStops.delete(attempt)
       })
     this.#pendingStops.add(attempt)
+    return attempt
   }
 }
 
@@ -530,6 +585,7 @@ function createUnit(key: string, urls: readonly string[]): UnitState {
     closed: false,
     endpoints: urls.map(url => ({
       contacted: false,
+      stopController: null,
       stoppedAttempted: false,
       trackerId: null,
       url

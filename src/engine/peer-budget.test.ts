@@ -76,6 +76,80 @@ describe('PeerBudget', () => {
     )
   })
 
+  it('evicts the real oldest peer and releases its pending transport', () => {
+    const { budget: target } = budget()
+    const actual = new Map<string, Set<string>>([
+      ['busy', new Set()],
+      ['second', new Set()],
+      ['quiet', new Set()]
+    ])
+    const admit = (key: string, peer: string): boolean => {
+      actual.get(key)?.add(peer)
+      const admitted = target.admit({
+        key,
+        peer,
+        remove: () => {
+          actual.get(key)?.delete(peer)
+        }
+      })
+      if (!admitted) actual.get(key)?.delete(peer)
+      return admitted
+    }
+
+    for (
+      let index = 0;
+      index < PEER_BUDGET_LIMITS.maxRecordsPerTorrent;
+      index += 1
+    ) {
+      expect(admit('busy', `203.0.113.${index}:6000`)).toBe(true)
+      expect(admit('second', `198.51.100.${index}:7000`)).toBe(true)
+    }
+    const oldest = '203.0.113.0:6000'
+    expect(
+      target.reserveTransport({ key: 'busy', peer: oldest })
+    ).not.toBeNull()
+
+    expect(admit('quiet', '192.0.2.1:6881')).toBe(true)
+
+    expect(actual.get('busy')?.has(oldest)).toBe(false)
+    expect(target.reservedTransportCount).toBe(0)
+    expect(
+      [...actual.values()].reduce((total, peers) => total + peers.size, 0)
+    ).toBe(PEER_BUDGET_LIMITS.maxRecords)
+    expect(target.recordCount).toBe(PEER_BUDGET_LIMITS.maxRecords)
+  })
+
+  it('does not admit over the cap when real-peer eviction fails', () => {
+    const { budget: target } = budget()
+    for (
+      let index = 0;
+      index < PEER_BUDGET_LIMITS.maxRecordsPerTorrent;
+      index += 1
+    ) {
+      target.admit({
+        key: 'busy',
+        peer: `203.0.113.${index}:6000`,
+        remove: () => {
+          throw new Error('remove failed')
+        }
+      })
+      target.admit({
+        key: 'second',
+        peer: `198.51.100.${index}:7000`,
+        remove: () => undefined
+      })
+    }
+
+    expect(
+      target.admit({
+        key: 'quiet',
+        peer: '192.0.2.1:6881',
+        remove: () => undefined
+      })
+    ).toBe(false)
+    expect(target.recordCount).toBe(PEER_BUDGET_LIMITS.maxRecords)
+  })
+
   it('never funds one holder’s growth from its own records', () => {
     const { budget: target } = budget()
     fill(target, 'busy', PEER_BUDGET_LIMITS.maxRecordsPerTorrent)
@@ -122,6 +196,86 @@ describe('PeerBudget', () => {
     ).toBe(false)
     // The narrower staging limit never blocks an ordinary torrent.
     expect(target.admit({ key: 'a', peer: '203.0.113.1:6881' })).toBe(true)
+  })
+
+  it('reserves aggregate transport slots across concurrent handoffs', () => {
+    const { budget: target } = budget()
+    const leases = Array.from(
+      { length: PEER_BUDGET_LIMITS.maxLiveTransports },
+      (_, index) =>
+        target.reserveTransport({
+          key: `torrent-${index % 2}`,
+          peer: `203.0.113.${index}:6881`
+        })
+    )
+
+    expect(leases.every(Boolean)).toBe(true)
+    expect(target.reservedTransportCount).toBe(
+      PEER_BUDGET_LIMITS.maxLiveTransports
+    )
+    expect(
+      target.reserveTransport({
+        key: 'overflow',
+        peer: '198.51.100.1:6881'
+      })
+    ).toBeNull()
+
+    leases[0]?.release()
+    expect(
+      target.reserveTransport({
+        key: 'replacement',
+        peer: '198.51.100.2:6881'
+      })
+    ).not.toBeNull()
+  })
+
+  it('counts fifty live plus five pending at the exact aggregate boundary', () => {
+    const { budget: target } = budget(50)
+    for (let index = 0; index < 5; index += 1) {
+      expect(
+        target.reserveTransport({
+          key: 'pending',
+          peer: `203.0.113.${index}:6881`
+        })
+      ).not.toBeNull()
+    }
+    expect(
+      target.reserveTransport({
+        key: 'overflow',
+        peer: '198.51.100.1:6881'
+      })
+    ).toBeNull()
+  })
+
+  it('reserves no more than eight staging transports in aggregate', () => {
+    const { budget: target } = budget()
+    const leases = Array.from(
+      { length: PEER_BUDGET_LIMITS.maxStagingLiveTransports },
+      (_, index) =>
+        target.reserveTransport({
+          key: `staging-${index % 2}`,
+          peer: `203.0.113.${index}:6881`,
+          scope: 'staging'
+        })
+    )
+
+    expect(leases.every(Boolean)).toBe(true)
+    expect(
+      target.reserveTransport({
+        key: 'staging-overflow',
+        peer: '198.51.100.1:6881',
+        scope: 'staging'
+      })
+    ).toBeNull()
+
+    target.release('staging-0')
+    expect(
+      target.reserveTransport({
+        key: 'staging-replacement',
+        peer: '198.51.100.2:6881',
+        scope: 'staging'
+      })
+    ).not.toBeNull()
   })
 
   it('holds PEX discovery to its own narrower ceiling', () => {

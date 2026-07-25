@@ -11,7 +11,12 @@ export const MEDIA_PROXY_LIMITS = Object.freeze({
   applicationOrigin: 'app://bundle',
   host: '127.0.0.1',
   leaseTtlMs: 60_000,
-  maxLeases: 8,
+  /**
+   * One player can own its media stream, eight torrent subtitle tracks, one
+   * user-selected subtitle, and one bounded artwork image. Keep a little
+   * headroom without making the proxy an unbounded in-memory asset store.
+   */
+  maxLeases: 16,
   routePrefix: '/v1/media/',
   tokenBytes: 32
 })
@@ -232,15 +237,6 @@ export class MediaProxy {
 
   #handle(request: IncomingMessage, response: ServerResponse): void {
     const method = request.method ?? 'GET'
-    if (method === 'OPTIONS') {
-      response.writeHead(204, { allow: 'GET, HEAD, OPTIONS' })
-      response.end()
-      return
-    }
-    if (method !== 'GET' && method !== 'HEAD') {
-      this.#reject(response, 405)
-      return
-    }
 
     // An Origin is accepted only when it is exactly the application origin;
     // the packaged media element sends none, where the token is the authority.
@@ -256,16 +252,68 @@ export class MediaProxy {
       this.#reject(response, 403)
       return
     }
+    const corsHeaders: Record<string, string> =
+      origin === MEDIA_PROXY_LIMITS.applicationOrigin
+        ? {
+            'access-control-allow-origin': MEDIA_PROXY_LIMITS.applicationOrigin,
+            vary: 'Origin'
+          }
+        : {}
+    if (method === 'OPTIONS') {
+      if (
+        origin !== MEDIA_PROXY_LIMITS.applicationOrigin ||
+        (request.headers['access-control-request-method'] !== undefined &&
+          request.headers['access-control-request-method'] !== 'GET' &&
+          request.headers['access-control-request-method'] !== 'HEAD')
+      ) {
+        this.#reject(response, 403)
+        return
+      }
+      response.writeHead(204, {
+        ...corsHeaders,
+        'access-control-allow-methods': 'GET, HEAD, OPTIONS',
+        allow: 'GET, HEAD, OPTIONS',
+        'cache-control': 'no-store'
+      })
+      response.end()
+      return
+    }
+    if (method !== 'GET' && method !== 'HEAD') {
+      this.#reject(response, 405, corsHeaders)
+      return
+    }
 
     const record = this.#match(request.url ?? '')
     if (!record) {
-      this.#reject(response, 404)
+      this.#reject(response, 404, corsHeaders)
+      return
+    }
+
+    if (record.source.length === 0) {
+      if (request.headers.range !== undefined) {
+        response.writeHead(416, {
+          ...corsHeaders,
+          'content-range': 'bytes */0'
+        })
+        response.end()
+        return
+      }
+      response.writeHead(200, {
+        ...corsHeaders,
+        'accept-ranges': 'bytes',
+        'cache-control': 'no-store',
+        'content-length': '0',
+        'content-type': record.source.contentType,
+        'x-content-type-options': 'nosniff'
+      })
+      response.end()
       return
     }
 
     const range = this.#range(request.headers.range, record.source.length)
     if (!range) {
       response.writeHead(416, {
+        ...corsHeaders,
         'content-range': `bytes */${record.source.length}`
       })
       response.end()
@@ -273,6 +321,7 @@ export class MediaProxy {
     }
 
     const headers: Record<string, string> = {
+      ...corsHeaders,
       'accept-ranges': 'bytes',
       'cache-control': 'no-store',
       'content-length': String(range.end - range.start + 1),
@@ -355,8 +404,12 @@ export class MediaProxy {
     return { end: Math.min(end, length - 1), partial: true, start }
   }
 
-  #reject(response: ServerResponse, status: number): void {
-    response.writeHead(status, { 'cache-control': 'no-store' })
+  #reject(
+    response: ServerResponse,
+    status: number,
+    headers: Record<string, string> = {}
+  ): void {
+    response.writeHead(status, { ...headers, 'cache-control': 'no-store' })
     response.end()
   }
 }

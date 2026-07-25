@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   StagingClientPool,
   type StagingWebTorrentClient
@@ -34,12 +34,20 @@ class FakeClient extends EventEmitter implements StagingWebTorrentClient {
 
 type Harness = {
   clients: FakeClient[]
+  inboundClosed: FakeClient[]
   pool: StagingClientPool<FakeClient>
 }
 
-function harness(options: { port?: number; silent?: boolean } = {}): Harness {
+function harness(
+  options: { inboundFails?: boolean; port?: number; silent?: boolean } = {}
+): Harness {
   const clients: FakeClient[] = []
+  const inboundClosed: FakeClient[] = []
   const pool = new StagingClientPool<FakeClient>({
+    closeInbound: async client => {
+      if (options.inboundFails) throw new Error('close failed')
+      inboundClosed.push(client)
+    },
     createClient: () => {
       const client = new FakeClient(options.port ?? 51_413)
       clients.push(client)
@@ -48,27 +56,27 @@ function harness(options: { port?: number; silent?: boolean } = {}): Harness {
     },
     listenTimeoutMs: 50
   })
-  return { clients, pool }
+  return { clients, inboundClosed, pool }
 }
 
 describe('StagingClientPool', () => {
-  it('spawns one client for concurrent leases and destroys it with the last', async () => {
+  it('spawns one disposable client and identity per concurrent lease', async () => {
     const context = harness()
 
     const first = await context.pool.lease()
     const second = await context.pool.lease()
 
-    expect(context.clients).toHaveLength(1)
-    expect(first.client).toBe(second.client)
+    expect(context.clients).toHaveLength(2)
+    expect(first.client).not.toBe(second.client)
     expect(first.port).toBe(51_413)
-    expect(first.peerId).not.toBe(second.peerId)
+    expect(context.inboundClosed).toEqual([first.client, second.client])
 
     await first.release()
-    // One lease remains, so the client stays.
-    expect(context.clients[0]?.destroyed).toBe(false)
+    expect(context.clients[0]?.destroyed).toBe(true)
+    expect(context.clients[1]?.destroyed).toBe(false)
 
     await second.release()
-    expect(context.clients[0]?.destroyed).toBe(true)
+    expect(context.clients[1]?.destroyed).toBe(true)
     expect(context.pool.leaseCount).toBe(0)
     expect(context.pool.active).toBe(false)
   })
@@ -94,6 +102,41 @@ describe('StagingClientPool', () => {
     expect(context.clients).toHaveLength(1)
   })
 
+  it('marks a destroy timeout unhealthy and retains the slot until callback', async () => {
+    const destroy = {
+      finish: null as ((error?: Error) => void) | null
+    }
+    const clients: FakeClient[] = []
+    const unhealthy = vi.fn()
+    const pool = new StagingClientPool<FakeClient>({
+      createClient: () => {
+        const client = new FakeClient(51_413)
+        client.destroy = callback => {
+          client.destroyed = true
+          destroy.finish = callback ?? null
+        }
+        clients.push(client)
+        setTimeout(() => client.emit('listening'), 0)
+        return client
+      },
+      destroyTimeoutMs: 10,
+      onUnhealthy: unhealthy
+    })
+    const lease = await pool.lease()
+
+    await expect(lease.release()).rejects.toMatchObject({
+      code: 'DESTROY_TIMEOUT'
+    })
+    expect(pool.leaseCount).toBe(1)
+    expect(unhealthy).toHaveBeenCalledOnce()
+    await expect(pool.lease()).rejects.toMatchObject({ code: 'UNHEALTHY' })
+
+    if (!destroy.finish) throw new Error('Expected a destroy callback')
+    destroy.finish()
+    await vi.waitFor(() => expect(pool.leaseCount).toBe(0))
+    expect(clients[0]?.destroyed).toBe(true)
+  })
+
   it('gives up on a client that never reports a listener', async () => {
     const context = harness({ silent: true })
 
@@ -114,6 +157,7 @@ describe('StagingClientPool', () => {
     await expect(context.pool.lease()).rejects.toMatchObject({ code: 'CLOSED' })
     // A late release from the acquisition that was running is harmless.
     await expect(lease.release()).resolves.toBeUndefined()
+    expect(context.pool.leaseCount).toBe(0)
   })
 
   it('reports a client that cannot be constructed', async () => {
@@ -125,6 +169,35 @@ describe('StagingClientPool', () => {
 
     await expect(pool.lease()).rejects.toMatchObject({ code: 'SPAWN_FAILED' })
     expect(pool.active).toBe(false)
+  })
+
+  it('destroys a client whose inbound listener cannot be closed', async () => {
+    const context = harness({ inboundFails: true })
+
+    await expect(context.pool.lease()).rejects.toMatchObject({
+      code: 'INBOUND_GUARD_FAILED'
+    })
+    expect(context.clients[0]?.destroyed).toBe(true)
+    expect(context.pool.leaseCount).toBe(0)
+  })
+
+  it('bounds an inbound guard that never finishes', async () => {
+    const clients: FakeClient[] = []
+    const pool = new StagingClientPool<FakeClient>({
+      closeInbound: () => new Promise(() => undefined),
+      createClient: () => {
+        const client = new FakeClient(51_413)
+        clients.push(client)
+        setTimeout(() => client.emit('listening'), 0)
+        return client
+      },
+      inboundCloseTimeoutMs: 10
+    })
+
+    await expect(pool.lease()).rejects.toMatchObject({
+      code: 'INBOUND_GUARD_FAILED'
+    })
+    expect(clients[0]?.destroyed).toBe(true)
   })
 
   it('never leaves an unhandled error on the staging client', async () => {

@@ -5,7 +5,7 @@ import parseTorrent, { toMagnetURI, type ParsedTorrent } from 'parse-torrent'
 import type { EgressPolicy } from './network-policy'
 import { scanStrictTorrentBencode } from './strict-bencode'
 
-const TORRENT_METADATA_LIMITS = Object.freeze({
+export const TORRENT_METADATA_LIMITS = Object.freeze({
   bytes: 10_000_000,
   files: 100_000,
   magnetBytes: 65_536,
@@ -791,7 +791,21 @@ export async function prepareMagnet(
 
   const trackerResult = validateTrackerTiers([parsed.announce ?? []], policy)
   const webSeedResult = validateWebSeeds(parsed.urlList ?? [], policy)
-  const dhtEnabled = trackerResult.tiers.length === 0
+  // Unknown-privacy staging has two attributable transports: pinned HTTPS
+  // announces and the app-owned bounded WSS signaling stack. Plain HTTP stays
+  // disabled because it cannot provide either transport security or pinning.
+  const trackers = trackerResult.tiers.flat().filter(tracker => {
+    const protocol = new URL(tracker).protocol
+    return protocol === 'https:' || protocol === 'wss:'
+  })
+  const stagingWarnings = [...trackerResult.warnings]
+  if (
+    trackers.length !== trackerResult.tiers.flat().length &&
+    !stagingWarnings.includes('TRACKER_TRANSPORT_DISABLED')
+  ) {
+    stagingWarnings.push('TRACKER_TRANSPORT_DISABLED')
+  }
+  const dhtEnabled = trackers.length === 0
   if (dhtEnabled && !options.allowDht) {
     throw new TorrentInputError('DHT_CONSENT_REQUIRED')
   }
@@ -817,8 +831,8 @@ export async function prepareMagnet(
     magnet: sanitized,
     magnetUri,
     selection,
-    trackers: sanitized.announce,
-    warnings: [...trackerResult.warnings, ...webSeedResult.warnings],
+    trackers,
+    warnings: [...stagingWarnings, ...webSeedResult.warnings],
     webSeeds: webSeedResult.values,
     xsRemoved
   }

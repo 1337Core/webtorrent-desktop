@@ -8,6 +8,11 @@ type Source = Readonly<{
   totalBytes: number | null
 }>
 
+type CreatedTorrent = Readonly<{
+  infoHash: string
+  name: string
+}>
+
 export type CreateTorrentPageProps = Readonly<{
   onCancel: () => void
   onCreated: () => void
@@ -42,7 +47,7 @@ export function CreateTorrentPage({
   const [expanded, setExpanded] = useState(false)
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState<EngineFailure | null>(null)
-  const [created, setCreated] = useState<string | null>(null)
+  const [created, setCreated] = useState<CreatedTorrent | null>(null)
 
   const chooseSource = useCallback(async () => {
     const result = await window.desktop.choosePath('source')
@@ -93,13 +98,47 @@ export function CreateTorrentPage({
       setFailure(outcome.error)
       return
     }
-    setCreated(outcome.value.torrent.name)
+    const completed = {
+      infoHash: outcome.value.torrent.infoHash,
+      name: outcome.value.torrent.name
+    }
+    setCreated(completed)
     setSource(null)
     setTrackers('')
     setComment('')
     setIsPrivate(false)
+    setBusy(true)
+    const exported = await window.desktop.exportTorrent(completed.infoHash)
+    setBusy(false)
+    if (!exported.ok) {
+      setFailure({
+        code: exported.error.code,
+        displayMessage: exported.error.displayMessage,
+        retryable: exported.error.retryable
+      })
+      return
+    }
+    if (!exported.value.saved) return
     onCreated()
   }, [comment, isPrivate, onCreated, source, trackers])
+
+  const retryExport = useCallback(async () => {
+    if (created === null) return
+    setBusy(true)
+    setFailure(null)
+    const exported = await window.desktop.exportTorrent(created.infoHash)
+    setBusy(false)
+    if (!exported.ok) {
+      setFailure({
+        code: exported.error.code,
+        displayMessage: exported.error.displayMessage,
+        retryable: exported.error.retryable
+      })
+      return
+    }
+    if (!exported.value.saved) return
+    onCreated()
+  }, [created, onCreated])
 
   const torrentInfo =
     source === null
@@ -195,7 +234,7 @@ export function CreateTorrentPage({
       </div>
 
       {created ? (
-        <div className="torrent-info">{`Seeding ${created}.`}</div>
+        <div className="torrent-info">{`Seeding ${created.name}.`}</div>
       ) : null}
       {failure ? (
         <div className="error" role="alert">
@@ -207,23 +246,23 @@ export function CreateTorrentPage({
         <button
           className="control cancel"
           disabled={busy}
-          onClick={onCancel}
+          onClick={created === null ? onCancel : onCreated}
           type="button"
         >
-          Cancel
+          {created === null ? 'Cancel' : 'Done'}
         </button>
         <button
           className="control create-torrent-button"
           disabled={
             busy ||
             !ready ||
-            source === null ||
-            (isPrivate && trackers.trim() === '')
+            (created === null &&
+              (source === null || (isPrivate && trackers.trim() === '')))
           }
-          onClick={() => void create()}
+          onClick={() => void (created === null ? create() : retryExport())}
           type="button"
         >
-          Create Torrent
+          {created === null ? 'Create Torrent' : 'Save Torrent File...'}
         </button>
       </div>
     </div>

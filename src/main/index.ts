@@ -98,6 +98,7 @@ const rendererSmokeEvidenceSchema = z.strictObject({
   bufferPresent: z.literal(false),
   desktopApiKeys: z.tuple([
     z.literal('choosePath'),
+    z.literal('exportTorrent'),
     z.literal('getBootstrap'),
     z.literal('onEngineStatus'),
     z.literal('onMenuAction'),
@@ -732,7 +733,7 @@ function createMainWindow(runtime: RuntimeInfo): BrowserWindow {
    */
   const chooseUserPath = async (
     owner: BrowserWindow,
-    kind: 'application' | 'directory' | 'source' | 'torrent-file'
+    kind: 'application' | 'directory' | 'source' | 'subtitle' | 'torrent-file'
   ): Promise<{
     path: string | null
     summary: { fileCount: number; totalBytes: number } | null
@@ -745,9 +746,12 @@ function createMainWindow(runtime: RuntimeInfo): BrowserWindow {
       filters:
         kind === 'torrent-file'
           ? [{ extensions: ['torrent'], name: 'Torrent' }]
-          : [],
+          : kind === 'subtitle'
+            ? [{ extensions: ['srt', 'vtt'], name: 'Subtitles' }]
+            : [],
       properties,
-      securityScopedBookmarks: false
+      securityScopedBookmarks: false,
+      ...(kind === 'subtitle' ? { title: 'Select a Subtitle File' } : {})
     })
     if (result.canceled) return { path: null, summary: null }
     const chosen = result.filePaths[0] ?? null
@@ -792,7 +796,7 @@ function createMainWindow(runtime: RuntimeInfo): BrowserWindow {
   void torrentHandlers.handleArguments(process.argv)
 
   const sendMenuAction = (
-    action: 'add-torrent' | 'create-torrent' | 'preferences'
+    action: 'add-subtitles' | 'add-torrent' | 'create-torrent' | 'preferences'
   ): void => {
     window.webContents.mainFrame.send(DESKTOP_MENU_ACTION_CHANNEL, {
       protocolVersion: PROTOCOL_VERSION,
@@ -801,6 +805,7 @@ function createMainWindow(runtime: RuntimeInfo): BrowserWindow {
   }
   installAppMenu({
     actions: {
+      addSubtitles: () => sendMenuAction('add-subtitles'),
       addTorrent: () => sendMenuAction('add-torrent'),
       createTorrent: () => sendMenuAction('create-torrent'),
       openPreferences: () => sendMenuAction('preferences'),
@@ -854,6 +859,42 @@ function createMainWindow(runtime: RuntimeInfo): BrowserWindow {
   unregisterDesktopIpc = registerDesktopIpc({
     choosePath: kind => chooseUserPath(window, kind),
     diagnostics,
+    exportTorrent: async infoHash => {
+      const record = stateStore
+        ?.listTorrents()
+        .find(candidate => candidate.infoHash === infoHash)
+      if (!record) throw new Error('The torrent is not in the library')
+
+      const baseName = path.parse(path.basename(record.name)).name.trim()
+      const fileName = `${baseName || record.infoHash}.torrent`
+      const downloadRoot =
+        stateStore?.snapshot().preferences.downloadRoot ??
+        app.getPath('downloads')
+      const save = await dialog.showSaveDialog(window, {
+        buttonLabel: 'Save',
+        defaultPath: path.join(downloadRoot, fileName),
+        filters: [
+          { extensions: ['torrent'], name: 'Torrent Files' },
+          { extensions: ['*'], name: 'All Files' }
+        ],
+        securityScopedBookmarks: false,
+        title: 'Save Torrent File'
+      })
+      if (save.canceled || !save.filePath) return false
+
+      const result = await supervisor.execute({
+        command: 'export-torrent',
+        payload: { destinationPath: save.filePath, infoHash }
+      })
+      if (
+        !result.ok ||
+        result.result.command !== 'export-torrent' ||
+        result.result.value.exported !== true
+      ) {
+        throw new Error('The torrent engine could not export the archive')
+      }
+      return true
+    },
     ...(contextMenu
       ? { openTorrentMenu: (infoHash: string) => contextMenu.open(infoHash) }
       : {}),

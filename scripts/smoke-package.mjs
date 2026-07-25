@@ -64,9 +64,20 @@ function processExists(pid) {
 
 function expectRejectedLaunch(arguments_) {
   return new Promise((resolve, reject) => {
+    const usesRemoteDebuggingPipe = arguments_.some(
+      argument =>
+        argument === '--remote-debugging-pipe' ||
+        argument.startsWith('--remote-debugging-pipe=')
+    )
     const child = spawnCallback(executable, ['--m2-smoke', ...arguments_], {
       env: smokeEnvironment,
-      stdio: 'ignore'
+      // Chromium reserves descriptors 3 and 4 for its DevTools pipe. Supplying
+      // real pipes makes this a valid attack attempt on every host, so the
+      // observed exit proves our launch policy rejected it rather than
+      // Chromium stalling or aborting on missing descriptors first.
+      stdio: usesRemoteDebuggingPipe
+        ? ['ignore', 'ignore', 'ignore', 'pipe', 'pipe']
+        : 'ignore'
     })
     const timeout = setTimeout(() => {
       child.kill()
@@ -112,6 +123,7 @@ async function smokeDataDirectories() {
  */
 const EXPECTED_DESKTOP_API = [
   'choosePath',
+  'exportTorrent',
   'getBootstrap',
   'onEngineStatus',
   'onMenuAction',
@@ -152,6 +164,8 @@ for (const scenario of scenarios) {
     result.renderer?.requirePresent !== false ||
     result.renderer?.webRtcBlocked !== true ||
     result.renderer?.webRtcErrorName !== 'NotAllowedError' ||
+    result.engineRuntime?.audioMetadataParser !==
+      'music-metadata.parseStream' ||
     result.engineRuntime?.processType !== 'utility' ||
     result.engineRuntime?.utpEnabled !== false ||
     result.engineRuntime?.webRtcSupported !== true ||
@@ -237,7 +251,7 @@ for (const scenario of scenarios) {
 const rejectedLaunches = [
   ['--disable-web-security=1'],
   ['--no-sandbox=true'],
-  ['--remote-debugging-pipe=1'],
+  ['--remote-debugging-pipe'],
   ['--remote-debugging-port', '9222']
 ]
 const smokeDirectoriesBeforeRejectedLaunches = await smokeDataDirectories()

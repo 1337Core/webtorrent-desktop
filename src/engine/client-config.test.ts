@@ -46,7 +46,7 @@ describe('WebTorrent client configuration', () => {
   it('bounds disposable staging clients and ignores DHT for private mode', () => {
     expect(createClientOptions('staging')).toMatchObject({
       dht: false,
-      maxConns: 8,
+      maxConns: 4,
       utPex: false
     })
     expect(

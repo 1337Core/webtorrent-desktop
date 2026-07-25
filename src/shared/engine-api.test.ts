@@ -99,6 +99,13 @@ describe('engine command contracts', () => {
           filterJunkFiles: true
         }
       },
+      {
+        command: 'export-torrent',
+        payload: {
+          destinationPath: '/tmp/example.torrent',
+          infoHash
+        }
+      },
       { command: 'open-media', payload: { infoHash, fileIndex: 0 } },
       { command: 'heartbeat-media', payload: { leaseId } },
       { command: 'close-media', payload: { leaseId } }

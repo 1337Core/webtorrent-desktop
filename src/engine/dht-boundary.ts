@@ -45,7 +45,11 @@ export const DHT_BOOTSTRAP_ENDPOINTS: ReadonlyArray<
 ])
 
 export type DhtBoundaryErrorCode =
-  'BOOTSTRAP_UNAVAILABLE' | 'CLOSED' | 'PRIVATE_TORRENT' | 'QUEUE_FULL'
+  | 'BOOTSTRAP_UNAVAILABLE'
+  | 'CLOSED'
+  | 'GENERATION_CONFLICT'
+  | 'PRIVATE_TORRENT'
+  | 'QUEUE_FULL'
 
 export class DhtBoundaryError extends Error {
   readonly code: DhtBoundaryErrorCode
@@ -182,10 +186,12 @@ export class DhtBoundary {
   ): Promise<void> {
     if (this.#closed) throw new DhtBoundaryError('CLOSED')
     if (input.private) throw new DhtBoundaryError('PRIVATE_TORRENT')
-    if (
-      !this.#activations.has(input.infoHash) &&
-      this.#activations.size >= DHT_BOUNDARY_LIMITS.maxQueuedActivations
-    ) {
+    const existing = this.#activations.get(input.infoHash)
+    if (existing) {
+      if (existing.generationId === input.generationId) return
+      throw new DhtBoundaryError('GENERATION_CONFLICT')
+    }
+    if (this.#activations.size >= DHT_BOUNDARY_LIMITS.maxQueuedActivations) {
       throw new DhtBoundaryError('QUEUE_FULL')
     }
 
@@ -202,9 +208,10 @@ export class DhtBoundary {
   }
 
   /** Closes a generation: its queued work, timers, and late callbacks drop. */
-  deactivate(infoHash: string): void {
+  deactivate(infoHash: string, generationId?: string): void {
     const activation = this.#activations.get(infoHash)
     if (!activation) return
+    if (generationId && activation.generationId !== generationId) return
     if (activation.timer) clearTimeout(activation.timer)
     this.#activations.delete(infoHash)
     if (this.#activations.size === 0) this.#teardown()
@@ -321,8 +328,24 @@ export class DhtBoundary {
       return
     }
 
-    activation.running = true
     const generationId = activation.generationId
+    if (!this.#socket) {
+      try {
+        await this.#ensureSocket()
+      } catch {
+        // Socket construction is retried through the same bounded backoff as
+        // an unanswered discovery cycle.
+      }
+      if (this.#generationClosed(infoHash, generationId)) return
+      if (!this.#socket) {
+        activation.failureRound += 1
+        this.#onWarning('DHT_UNAVAILABLE')
+        this.#schedule(activation, this.#backoffMs(activation.failureRound))
+        return
+      }
+    }
+
+    activation.running = true
     const target = infoHashBytes(infoHash)
     const observed = new Map<string, CompactPeer>()
     const tokens: Array<{ node: CompactPeer; token: Uint8Array }> = []
