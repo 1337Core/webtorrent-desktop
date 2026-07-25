@@ -10,10 +10,6 @@
     "src/shared/**/*.test.ts",
     "e2e/**/*.e2e.ts"
   ],
-  "ignoreDependencies": [
-    "@thaunknown/simple-peer",
-    "@wdio/local-runner",
-    "bittorrent-tracker"
-  ],
+  "ignoreDependencies": ["@wdio/local-runner", "bittorrent-tracker"],
   "project": ["scripts/**/*.mjs", "src/**/*.ts", "src/**/*.tsx", "e2e/**/*.ts"]
 }

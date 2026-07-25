@@ -19,6 +19,14 @@ import { validateTorrentMetadata } from './torrent-metadata'
 import { TrackerActivation } from './tracker-activation'
 import { TrackerHttpRequestGate, TrackerHttpTransport } from './tracker-http'
 import { TorrentManager } from './torrent-manager'
+import {
+  PendingSignalingBudget,
+  WebrtcSignaling,
+  type SignalingPeer
+} from './webrtc-signaling'
+import { WssActivation } from './wss-activation'
+import { WssSocketFactory } from './wss-socket'
+import SimplePeer from '@thaunknown/simple-peer'
 import type { DiskTorrentSession } from './disk-torrent'
 import type { TorrentOwner } from './torrent-registry'
 
@@ -33,6 +41,27 @@ const trackerTransport = new TrackerHttpTransport({
   egress,
   requestGate: new TrackerHttpRequestGate()
 })
+
+const wssSockets = new WssSocketFactory({ policy: egress })
+const pendingSignaling = new PendingSignalingBudget()
+
+/**
+ * The engine's fixed WebRTC configuration. No tracker message contributes to
+ * it: there is no ICE server, no trickle, and one bounded ICE completion.
+ */
+const RTC_CONFIGURATION = Object.freeze({
+  iceServers: [] as ReadonlyArray<never>,
+  sdpSemantics: 'unified-plan'
+})
+
+function createSignalingPeer(initiator: boolean): SignalingPeer {
+  return new SimplePeer({
+    config: { ...RTC_CONFIGURATION },
+    iceCompleteTimeout: 5_000,
+    initiator,
+    trickle: false
+  }) as unknown as SignalingPeer
+}
 
 const clients = new Map<'private' | 'public', WebTorrent>()
 
@@ -61,6 +90,20 @@ const lifecycle = new EngineClientLifecycle({
 
 function diskOwner(owner: TorrentOwner): 'private' | 'public' {
   return owner === 'private' ? 'private' : 'public'
+}
+
+/** Tracker signaling carries the twenty raw peer-ID bytes as a JSON string. */
+function peerIdentity(peerId: Uint8Array): string {
+  return Buffer.from(peerId).toString('latin1')
+}
+
+/** The current peer identity of a live client, or null while it has none. */
+function localPeerIdentity(owner: 'private' | 'public'): string | null {
+  try {
+    return peerIdentity(lifecycle.handle(owner).peerId)
+  } catch {
+    return null
+  }
 }
 
 /** Both clients must own a live listener before any torrent may be added. */
@@ -137,9 +180,45 @@ const torrentManager = new TorrentManager({
         tiers,
         transport: trackerTransport
       })
+      const signaling = new WebrtcSignaling({
+        createPeer: ({ initiator }) => createSignalingPeer(initiator),
+        handoff: peer => session.admitConnection(peer),
+        // A peer identity belonging to either client is this engine itself.
+        isSelfPeerId: peerId =>
+          peerId === localPeerIdentity('public') ||
+          peerId === localPeerIdentity('private'),
+        pending: pendingSignaling
+      })
+      const wss = new WssActivation({
+        allowPrivateNetwork: false,
+        connectSocket: input => wssSockets.connect(input),
+        createOffers: (count, trackerUrl) =>
+          signaling.createOffers(count, trackerUrl),
+        infoHash: session.infoHash,
+        onAnswer: answer => {
+          signaling.acceptAnswer(answer)
+        },
+        onOffer: (offer, trackerUrl, respond) => {
+          signaling.acceptOffer(offer, trackerUrl, respond)
+        },
+        peerId: peerIdentity(handle.peerId),
+        progress: () => {
+          const stats = session.stats()
+          return {
+            downloaded: stats.downloaded,
+            left: Math.max(session.metadata.length - stats.downloaded, 0),
+            uploaded: stats.uploaded
+          }
+        },
+        tiers
+      })
+
       return {
         start: () => {
           activation.start()
+          void wss.start().catch(() => {
+            // A WSS-scoped failure is a warning, never a torrent failure.
+          })
           if (session.metadata.private) return
           dhtSessions.set(session.infoHash, session)
           void dht
@@ -156,7 +235,8 @@ const torrentManager = new TorrentManager({
         stop: async () => {
           dhtSessions.delete(session.infoHash)
           dht.deactivate(session.infoHash)
-          await activation.stop()
+          signaling.close()
+          await Promise.all([activation.stop(), wss.stop()])
         }
       }
     },

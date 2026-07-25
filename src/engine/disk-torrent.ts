@@ -47,8 +47,15 @@ export type EngineTorrentFile = {
   select(priority?: number): void
 }
 
+/** A connected WebRTC transport WebTorrent can adopt directly. */
+export type EngineWebRtcPeer = {
+  destroy(): void
+  id?: string
+  readonly remoteAddress?: string
+}
+
 export type EngineTorrent = {
-  addPeer(peer: string, source?: string): boolean
+  addPeer(peer: EngineWebRtcPeer | string, source?: string): boolean
   deselect(start: number, end: number): void
   destroy(
     options: { destroyStore: boolean },
@@ -339,6 +346,31 @@ export class DiskTorrentSession {
     if (!this.#peerFilter(address)) return false
     try {
       return torrent.addPeer(address, source)
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * The same gate for an already connected WebRTC transport. Its remote
+   * address is checked here exactly as a discovered address is, so a peer that
+   * signaled through a tracker cannot bypass the current torrent policy.
+   */
+  admitConnection(peer: EngineWebRtcPeer, source = 'tracker'): boolean {
+    const torrent = this.#torrent
+    if (!torrent || this.#state !== 'running') return false
+    if (
+      !this.#registry.admits(
+        this.#metadata.infoHash,
+        this.#reservation.generationId
+      )
+    ) {
+      return false
+    }
+    const address = peer.remoteAddress
+    if (typeof address !== 'string' || !this.#peerFilter(address)) return false
+    try {
+      return torrent.addPeer(peer, source)
     } catch {
       return false
     }

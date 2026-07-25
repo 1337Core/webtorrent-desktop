@@ -51,6 +51,7 @@ class FakeTorrent extends EventEmitter implements EngineTorrent {
   uploaded = 0
   readonly destroyCalls: Array<{ destroyStore: boolean }> = []
   readonly peers: string[] = []
+  readonly connections: unknown[] = []
   readonly selectionCalls: string[] = []
   #metadata: ValidatedTorrentMetadata
   #overrides: Partial<EngineTorrent>
@@ -95,8 +96,9 @@ class FakeTorrent extends EventEmitter implements EngineTorrent {
     return this.#overrides.torrentFile ?? this.#metadata.torrentBytes
   }
 
-  addPeer(peer: string): boolean {
-    this.peers.push(peer)
+  addPeer(peer: unknown): boolean {
+    if (typeof peer === 'string') this.peers.push(peer)
+    else this.connections.push(peer)
     return true
   }
 
@@ -402,6 +404,30 @@ describe('DiskTorrentSession', () => {
     await session.pause()
     expect(session.admitPeer('203.0.113.8:6881')).toBe(false)
     expect(torrent.peers).toEqual(['203.0.113.7:6881'])
+  })
+
+  it('admits a signaled connection through the same peer gate', async () => {
+    const session = await addReadySession(
+      {},
+      { peerFilter: address => address !== '10.0.0.5' }
+    )
+    const torrent = harness.torrents[0]
+    if (!torrent) throw new Error('Expected a torrent')
+    const connected = { destroy: () => undefined, remoteAddress: '203.0.113.9' }
+
+    expect(session.admitConnection(connected)).toBe(false)
+
+    session.resume()
+    expect(session.admitConnection(connected)).toBe(true)
+    expect(
+      session.admitConnection({
+        destroy: () => undefined,
+        remoteAddress: '10.0.0.5'
+      })
+    ).toBe(false)
+    // A transport with no remote address is never handed to WebTorrent.
+    expect(session.admitConnection({ destroy: () => undefined })).toBe(false)
+    expect(torrent.connections).toEqual([connected])
   })
 
   it('refuses lifecycle commands that do not match the current state', async () => {

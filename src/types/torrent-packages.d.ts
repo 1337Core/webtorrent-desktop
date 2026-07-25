@@ -93,3 +93,27 @@ declare module 'bittorrent-tracker/server' {
     } | null
   }
 }
+
+declare module '@thaunknown/simple-peer' {
+  /**
+   * The exact surface the engine's WebRTC signaling uses. Every peer is
+   * constructed with the engine's own fixed configuration; nothing here is
+   * derived from a tracker message.
+   */
+  export interface SimplePeerOptions {
+    config?: { iceServers?: readonly unknown[]; sdpSemantics?: string }
+    iceCompleteTimeout?: number
+    initiator?: boolean
+    trickle?: boolean
+  }
+
+  export default class SimplePeer {
+    constructor(options?: SimplePeerOptions)
+
+    destroy(error?: Error): void
+    id?: string
+    on(event: string, listener: (...args: unknown[]) => void): this
+    readonly remoteAddress?: string
+    signal(description: unknown): void
+  }
+}
