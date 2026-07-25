@@ -1,20 +1,23 @@
 export type HeaderProps = Readonly<{
   canGoBack: boolean
+  canGoForward: boolean
   onAdd: () => void
   onBack: () => void
+  onForward: () => void
   showAdd: boolean
   title: string
 }>
 
 /**
- * The original application header: a centered title with back navigation on
- * the left and the add-torrent control on the right. Forward navigation is
- * absent because this build has no history beyond one level.
+ * The original application header: a centered title, back and forward
+ * navigation on the left, and the add-torrent control on the right.
  */
 export function Header({
   canGoBack,
+  canGoForward,
   onAdd,
   onBack,
+  onForward,
   showAdd,
   title
 }: HeaderProps): React.JSX.Element {
@@ -31,6 +34,16 @@ export function Header({
           title="Back"
         >
           chevron_left
+        </i>
+        <i
+          aria-disabled={!canGoForward}
+          aria-label="Forward"
+          className={`icon forward ${canGoForward ? '' : 'disabled'}`}
+          onClick={() => canGoForward && onForward()}
+          role="button"
+          title="Forward"
+        >
+          chevron_right
         </i>
       </div>
       <div className="nav right float-right">

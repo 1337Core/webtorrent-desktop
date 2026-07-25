@@ -880,6 +880,11 @@ empty selection. File manifests are cursor-paged at no more than 64 files and
 most 250 distinct file changes. Commit obtains one exclusive reservation;
 pre-metadata failure may roll it back, while successful commitment consumes it.
 
+A committed torrent's selection stays editable, as it was in the original: the
+`set-torrent-selection` command carries the same bounded change list, and the
+engine folds it into the selection the session already holds before rebuilding
+the complete desired piece selection from section 9.3.
+
 Remote torrent fetches accept `https:` by default. `http:` requires an explicit
 advanced preference and confirmation. Reject embedded credentials, unexpected
 ports where policy requires it, `file:`, `data:`, `javascript:`, and all other
@@ -1499,6 +1504,28 @@ screen; do not invent a replacement layout. Where a removed feature owned part
 of a screen, that part is absent and nothing takes its place. The original
 sources remain available in this branch's history and are the reference for
 every ported screen.
+
+The parity checklist, tracked to completion:
+
+- **Shell** — header with its title, back and forward chevrons, and add
+  control; the error popover; the `view-*`, `is-focused`, `is-fullscreen`, and
+  `hide-video-controls` root classes. Done.
+- **Torrent list** — rows with the download checkbox, status line, progress
+  bar and figures, play and remove controls, the expanded file table with its
+  five columns, and the drop placeholder. Done, except the poster artwork that
+  section 4.2 defers.
+- **Player** — letterboxed media, the self-drawn control bar, the stall
+  overlay, and the unsupported-media modal. Done, except subtitle tracks and
+  the closed-caption control, which land with the subtitle work.
+- **Create torrent** — heading, file count and size, path attribute, advanced
+  settings, and the Cancel / Create Torrent pair. Done.
+- **Preferences** — the sections and path selectors for the settings this
+  release keeps. Done.
+- **Add torrent** — the address modal with its CANCEL/OK pair. Done; the
+  section 9.8 review is presented inside the same modal.
+- **Outstanding** — the right-click context menus for the list and its rows,
+  and drag-and-drop of torrent files and magnet links onto the window. Both
+  need a main-owned capability and are not yet ported.
 
 ### 11.3 Renderer behavior
 

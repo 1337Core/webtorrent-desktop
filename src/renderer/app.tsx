@@ -70,7 +70,20 @@ export function App(): React.JSX.Element {
     externalPlayer: null,
     torrentsFolder: null
   })
-  const [location, setLocation] = useState<Location>('home')
+  // The original navigated a history the header's chevrons walked, so the
+  // location is a position in that history rather than a bare value.
+  const [history, setHistory] = useState<{
+    entries: ReadonlyArray<Location>
+    index: number
+  }>({ entries: ['home'], index: 0 })
+  const location = history.entries[history.index] ?? 'home'
+  const setLocation = useCallback((next: Location) => {
+    setHistory(current => {
+      if (current.entries[current.index] === next) return current
+      const entries = [...current.entries.slice(0, current.index + 1), next]
+      return { entries, index: entries.length - 1 }
+    })
+  }, [])
   const [modalOpen, setModalOpen] = useState(false)
   const [openIntent, setOpenIntent] = useState<
     | { kind: 'magnet'; magnet: string }
@@ -157,9 +170,26 @@ export function App(): React.JSX.Element {
     setModalOpen(false)
     setOpenIntent(null)
   }, [])
-  const play = useCallback((selection: Playing) => {
-    setPlaying(selection)
-    setLocation('player')
+  const play = useCallback(
+    (selection: Playing) => {
+      setPlaying(selection)
+      setLocation('player')
+    },
+    [setLocation]
+  )
+
+  // Leaving the player drops it from the history, so the forward chevron never
+  // walks back into a page with nothing playing.
+  const leavePlayer = useCallback(() => {
+    setPlaying(null)
+    setHistory(current => {
+      const cut = current.entries.lastIndexOf('player')
+      if (cut === -1) return current
+      const entries = current.entries.slice(0, cut)
+      return entries.length === 0
+        ? { entries: ['home'], index: 0 }
+        : { entries, index: entries.length - 1 }
+    })
   }, [])
 
   // The lease belongs to the mounted player, so the page stays put while the
@@ -204,13 +234,26 @@ export function App(): React.JSX.Element {
       />
 
       <Header
-        canGoBack={location !== 'home'}
+        canGoBack={history.index > 0}
+        canGoForward={history.index < history.entries.length - 1}
         onAdd={() => setModalOpen(true)}
         onBack={() => {
-          setPlaying(null)
-          setLocation('home')
+          if (location === 'player') {
+            leavePlayer()
+            return
+          }
+          setHistory(current => ({
+            ...current,
+            index: Math.max(0, current.index - 1)
+          }))
         }}
-        showAdd={location === 'home' && ready}
+        onForward={() =>
+          setHistory(current => ({
+            ...current,
+            index: Math.min(current.entries.length - 1, current.index + 1)
+          }))
+        }
+        showAdd={location === 'home'}
         title={TITLES[location]}
       />
 
@@ -244,10 +287,7 @@ export function App(): React.JSX.Element {
             fileIndex={playing.fileIndex}
             fileName={playing.fileName}
             infoHash={playing.infoHash}
-            onClose={() => {
-              setPlaying(null)
-              setLocation('home')
-            }}
+            onClose={leavePlayer}
             onControlsHiddenChange={setControlsHidden}
             onSelectTrack={entry =>
               setPlaying(current =>
@@ -285,8 +325,7 @@ export function App(): React.JSX.Element {
                 onCancel={() => {
                   setUnsupported(null)
                   setExternalPlayerFailed(false)
-                  setPlaying(null)
-                  setLocation('home')
+                  leavePlayer()
                 }}
                 onPlayExternally={() => void playExternally()}
               />

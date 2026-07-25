@@ -221,6 +221,11 @@ export class TorrentManager {
     await this.#resume?.remove(infoHash).catch(() => undefined)
   }
 
+  /** The complete current selection, which paging never truncates. */
+  selection(infoHash: string): ReadonlyArray<number> {
+    return this.#require(infoHash).selectedIndexes
+  }
+
   updateSelection(
     infoHash: string,
     selectedIndexes: ReadonlyArray<number>

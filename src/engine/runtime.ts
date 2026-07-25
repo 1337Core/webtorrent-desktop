@@ -418,6 +418,29 @@ export class EngineRuntime {
           }
         }
       }
+      case 'set-torrent-selection': {
+        const manager = this.#requireManager()
+        // The engine rebuilds the whole selection, so the change list is
+        // folded into the selection the session already holds.
+        const selected = new Set(manager.selection(operation.payload.infoHash))
+        for (const change of operation.payload.changes) {
+          if (change.selected) selected.add(change.index)
+          else selected.delete(change.index)
+        }
+        const summary = manager.updateSelection(operation.payload.infoHash, [
+          ...selected
+        ])
+        return {
+          ok: true,
+          result: {
+            command: 'set-torrent-selection',
+            value: {
+              infoHash: summary.infoHash,
+              selectedFileCount: summary.selectedFileCount
+            }
+          }
+        }
+      }
       case 'pause-torrent': {
         const manager = this.#requireManager()
         this.#mediaProxy?.revokeTorrent(operation.payload.infoHash)

@@ -109,6 +109,7 @@ const engineCommandNameSchema = z.enum([
   'pause-torrent',
   'remove-torrent',
   'resume-torrent',
+  'set-torrent-selection',
   'update-preparation-selection'
 ])
 
@@ -237,6 +238,27 @@ export const engineCommandSchema = z.discriminatedUnion('command', [
     payload: pageRequestSchema.extend({
       infoHash: infoHashSchema
     })
+  }),
+  z.strictObject({
+    command: z.literal('set-torrent-selection'),
+    payload: z
+      .strictObject({
+        infoHash: infoHashSchema,
+        changes: z
+          .array(
+            z.strictObject({
+              index: z.number().int().min(0).max(99_999),
+              selected: z.boolean()
+            })
+          )
+          .min(1)
+          .max(250)
+      })
+      .refine(
+        value =>
+          new Set(value.changes.map(change => change.index)).size ===
+          value.changes.length
+      )
   }),
   z.strictObject({
     command: z.literal('pause-torrent'),
@@ -529,6 +551,13 @@ const engineCommandSuccessSchema = z.discriminatedUnion('command', [
     })
   }),
   z.strictObject({
+    command: z.literal('set-torrent-selection'),
+    value: z.strictObject({
+      infoHash: infoHashSchema,
+      selectedFileCount: z.number().int().min(0).max(100_000)
+    })
+  }),
+  z.strictObject({
     command: z.literal('pause-torrent'),
     value: torrentSummarySchema
   }),
@@ -679,6 +708,7 @@ export function engineResultMatchesOperation(
         result.result.value.preparationId === operation.payload.preparationId
       )
     case 'get-torrent-files':
+    case 'set-torrent-selection':
       return (
         result.result.command === operation.command &&
         result.result.value.infoHash === operation.payload.infoHash

@@ -353,6 +353,13 @@ describe('EngineRuntime', () => {
       { command: 'pause-torrent', payload: { infoHash: INFO_HASH } },
       { command: 'resume-torrent', payload: { infoHash: INFO_HASH } },
       {
+        command: 'set-torrent-selection',
+        payload: {
+          changes: [{ index: 0, selected: true }],
+          infoHash: INFO_HASH
+        }
+      },
+      {
         command: 'remove-torrent',
         payload: { deleteData: false, infoHash: INFO_HASH }
       }
@@ -363,6 +370,53 @@ describe('EngineRuntime', () => {
       expectStrictResult(operation, result)
       expect(errorCode(result)).toBe('NOT_FOUND')
     }
+  })
+
+  it('folds a selection change into the whole selection the session holds', async () => {
+    const manager = {
+      selection: vi.fn(() => [0, 2]),
+      updateSelection: vi.fn(() => ({
+        downloadSpeed: 0,
+        downloaded: 0,
+        fileCount: 4,
+        infoHash: INFO_HASH,
+        length: 40,
+        name: 'example',
+        peerCount: 0,
+        private: false,
+        progress: 0,
+        selectedFileCount: 2,
+        state: 'downloading' as const,
+        timeRemainingMs: null,
+        uploadSpeed: 0,
+        uploaded: 0
+      }))
+    }
+    const runtime = new EngineRuntime({
+      torrentManager: manager as unknown as TorrentManager
+    })
+    const operation: EngineCommand = {
+      command: 'set-torrent-selection',
+      payload: {
+        changes: [
+          { index: 1, selected: true },
+          { index: 2, selected: false }
+        ],
+        infoHash: INFO_HASH
+      }
+    }
+
+    const result = await runtime.execute(operation, signal())
+
+    expectStrictResult(operation, result)
+    expect(manager.updateSelection).toHaveBeenCalledWith(INFO_HASH, [0, 1])
+    expect(result).toEqual({
+      ok: true,
+      result: {
+        command: 'set-torrent-selection',
+        value: { infoHash: INFO_HASH, selectedFileCount: 2 }
+      }
+    })
   })
 
   it('reports an unavailable engine when no clients are attached', async () => {

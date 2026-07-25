@@ -13,6 +13,16 @@ const PLAYABLE = /\.(m4a|m4b|m4p|m4v|mkv|mov|mp3|mp4|ogg|wav|webm)$/iu
 type TorrentSummary = EngineValue<'list-torrents'>['items'][number]
 type TorrentFile = EngineValue<'get-torrent-files'>['items'][number]
 
+/** The original listed each file by name, not by its path in the torrent. */
+function basename(filePath: string): string {
+  return (
+    filePath
+      .split('/')
+      .filter(part => part !== '')
+      .at(-1) ?? filePath
+  )
+}
+
 function statusLabel(torrent: TorrentSummary): string {
   switch (torrent.state) {
     case 'checking':
@@ -92,6 +102,20 @@ export function TorrentList({
     }
   }, [active, refresh, refreshMs])
 
+  const loadFiles = useCallback(async (infoHash: string) => {
+    const outcome = await runCommand({
+      command: 'get-torrent-files',
+      payload: { cursor: 0, infoHash, limit: PAGE_LIMIT }
+    })
+    if (!mounted.current) return null
+    if (!outcome.ok) {
+      setFailure(outcome.error)
+      return null
+    }
+    setFiles(outcome.value.items)
+    return outcome.value.items
+  }, [])
+
   const select = useCallback(
     async (infoHash: string) => {
       if (selected === infoHash) {
@@ -99,19 +123,61 @@ export function TorrentList({
         setFiles([])
         return
       }
+      const loaded = await loadFiles(infoHash)
+      if (loaded === null) return
+      setSelected(infoHash)
+    },
+    [loadFiles, selected]
+  )
+
+  const selectionFor = useCallback(
+    (infoHash: string, file: TorrentFile, within = files) => ({
+      fileIndex: file.index,
+      fileName: file.path,
+      infoHash,
+      playlist: within
+        .filter(entry => PLAYABLE.test(entry.path))
+        .map(entry => ({ fileIndex: entry.index, fileName: entry.path }))
+    }),
+    [files]
+  )
+
+  // The original's play button streamed the torrent's first playable file.
+  const stream = useCallback(
+    async (infoHash: string) => {
+      const loaded = selected === infoHash ? files : await loadFiles(infoHash)
+      if (loaded === null) return
+      const first = loaded.find(file => PLAYABLE.test(file.path))
+      if (!first) {
+        setFailure({
+          code: 'UNSUPPORTED',
+          displayMessage: 'This torrent has no playable file.',
+          retryable: false
+        })
+        return
+      }
+      setSelected(infoHash)
+      onPlay(selectionFor(infoHash, first, loaded))
+    },
+    [files, loadFiles, onPlay, selected, selectionFor]
+  )
+
+  // The original's rightmost file column adds or drops a file from the
+  // transfer; the engine rebuilds the whole selection from the change.
+  const toggleFile = useCallback(
+    async (infoHash: string, index: number, isSelected: boolean) => {
       const outcome = await runCommand({
-        command: 'get-torrent-files',
-        payload: { cursor: 0, infoHash, limit: PAGE_LIMIT }
+        command: 'set-torrent-selection',
+        payload: { changes: [{ index, selected: !isSelected }], infoHash }
       })
       if (!mounted.current) return
       if (!outcome.ok) {
         setFailure(outcome.error)
         return
       }
-      setSelected(infoHash)
-      setFiles(outcome.value.items)
+      await loadFiles(infoHash)
     },
-    [selected]
+    [loadFiles]
   )
 
   const act = useCallback(
@@ -203,6 +269,18 @@ export function TorrentList({
 
             <div className="torrent-controls">
               <i
+                aria-label={`Start streaming ${torrent.name}`}
+                className="icon play"
+                onClick={event => {
+                  event.stopPropagation()
+                  void stream(torrent.infoHash)
+                }}
+                role="button"
+                title="Start streaming"
+              >
+                play_circle_outline
+              </i>
+              <i
                 aria-label={`Remove ${torrent.name}`}
                 className="icon delete"
                 onClick={event => {
@@ -223,37 +301,50 @@ export function TorrentList({
                     <tbody>
                       {files.map(file => {
                         const playable = PLAYABLE.test(file.path)
+                        const rowClass = file.selected ? '' : 'disabled'
                         return (
                           <tr
-                            className={file.selected ? '' : 'disabled'}
                             key={file.index}
                             onClick={event => {
                               event.stopPropagation()
                               if (!playable) return
-                              onPlay({
-                                fileIndex: file.index,
-                                fileName: file.path,
-                                infoHash: torrent.infoHash,
-                                playlist: files
-                                  .filter(entry => PLAYABLE.test(entry.path))
-                                  .map(entry => ({
-                                    fileIndex: entry.index,
-                                    fileName: entry.path
-                                  }))
-                              })
+                              onPlay(selectionFor(torrent.infoHash, file))
                             }}
                           >
-                            <td className="col-icon">
+                            <td className={`col-icon ${rowClass}`}>
                               <i className="icon">
                                 {playable ? 'play_arrow' : 'description'}
                               </i>
                             </td>
-                            <td className="col-name">{file.path}</td>
-                            <td className="col-progress">
-                              {`${Math.floor(100 * file.progress)}%`}
+                            <td className={`col-name ${rowClass}`}>
+                              {basename(file.path)}
                             </td>
-                            <td className="col-size">
+                            <td className={`col-progress ${rowClass}`}>
+                              {file.selected
+                                ? `${Math.floor(100 * file.progress)}%`
+                                : ''}
+                            </td>
+                            <td className={`col-size ${rowClass}`}>
                               {prettyBytes(file.length)}
+                            </td>
+                            <td
+                              className="col-select"
+                              onClick={event => {
+                                event.stopPropagation()
+                                void toggleFile(
+                                  torrent.infoHash,
+                                  file.index,
+                                  file.selected
+                                )
+                              }}
+                            >
+                              <i
+                                aria-label={`${file.selected ? 'Deselect' : 'Select'} ${basename(file.path)}`}
+                                className="icon deselect-file"
+                                role="button"
+                              >
+                                {file.selected ? 'close' : 'add'}
+                              </i>
                             </td>
                           </tr>
                         )

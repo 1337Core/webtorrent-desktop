@@ -114,6 +114,18 @@ function response(operation: EngineCommand): TorrentCommandResult {
           }
         }
       } as TorrentCommandResult
+    case 'set-torrent-selection':
+      return {
+        ...envelope,
+        ok: true,
+        value: {
+          ok: true,
+          result: {
+            command: 'set-torrent-selection',
+            value: { infoHash: INFO_HASH, selectedFileCount: 0 }
+          }
+        }
+      } as TorrentCommandResult
     case 'pause-torrent':
     case 'resume-torrent':
       return {
@@ -260,7 +272,7 @@ describe('TorrentList', () => {
 
     // Selecting the row reveals its files, exactly as the original did.
     await user.click(screen.getByText('Example payload'))
-    const file = await screen.findByText('payload/movie.mp4')
+    const file = await screen.findByText('movie.mp4')
     await user.click(file)
 
     expect(onPlay).toHaveBeenCalledWith({
@@ -270,5 +282,39 @@ describe('TorrentList', () => {
       // The player skips tracks through the torrent's playable files.
       playlist: [{ fileIndex: 0, fileName: 'payload/movie.mp4' }]
     })
+  })
+
+  it('streams the first playable file from the row play button', async () => {
+    const user = userEvent.setup()
+    render(<TorrentList active onPlay={onPlay} refreshMs={100_000} />)
+    await screen.findByText('Example payload')
+
+    await user.click(screen.getByRole('button', { name: /^Start streaming/u }))
+
+    await waitFor(() =>
+      expect(onPlay).toHaveBeenCalledWith(
+        expect.objectContaining({ fileIndex: 0, infoHash: INFO_HASH })
+      )
+    )
+  })
+
+  it('adds and drops a file from the transfer', async () => {
+    const user = userEvent.setup()
+    render(<TorrentList active onPlay={onPlay} refreshMs={100_000} />)
+    await screen.findByText('Example payload')
+
+    await user.click(screen.getByText('Example payload'))
+    await user.click(await screen.findByRole('button', { name: /^Deselect/u }))
+
+    await waitFor(() =>
+      expect(
+        commands.some(
+          command =>
+            command.command === 'set-torrent-selection' &&
+            command.payload.changes[0]?.index === 0 &&
+            command.payload.changes[0].selected === false
+        )
+      ).toBe(true)
+    )
   })
 })
