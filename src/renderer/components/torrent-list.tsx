@@ -9,6 +9,7 @@ const TORRENT_LIST_REFRESH_MS = 1_000
 const PAGE_LIMIT = 64
 
 type TorrentSummary = EngineValue<'list-torrents'>['items'][number]
+type TorrentFile = EngineValue<'get-torrent-files'>['items'][number]
 
 const STATE_LABELS: Readonly<Record<TorrentSummary['state'], string>> = {
   checking: 'Checking',
@@ -38,6 +39,13 @@ function formatRate(value: number): string {
 export type TorrentListProps = Readonly<{
   /** Disabled while the engine is not ready; the list stops polling. */
   active: boolean
+  onPlay: (
+    selection: Readonly<{
+      fileIndex: number
+      fileName: string
+      infoHash: string
+    }>
+  ) => void
   refreshMs?: number
 }>
 
@@ -48,11 +56,14 @@ export type TorrentListProps = Readonly<{
  */
 export function TorrentList({
   active,
+  onPlay,
   refreshMs = TORRENT_LIST_REFRESH_MS
 }: TorrentListProps): React.JSX.Element {
   const [torrents, setTorrents] = useState<ReadonlyArray<TorrentSummary>>([])
   const [failure, setFailure] = useState<EngineFailure | null>(null)
   const [pending, setPending] = useState<string | null>(null)
+  const [expanded, setExpanded] = useState<string | null>(null)
+  const [files, setFiles] = useState<ReadonlyArray<TorrentFile>>([])
   const mounted = useRef(true)
 
   const refresh = useCallback(async () => {
@@ -86,6 +97,28 @@ export function TorrentList({
       clearInterval(timer)
     }
   }, [active, refresh, refreshMs])
+
+  const showFiles = useCallback(
+    async (infoHash: string) => {
+      if (expanded === infoHash) {
+        setExpanded(null)
+        setFiles([])
+        return
+      }
+      const outcome = await runCommand({
+        command: 'get-torrent-files',
+        payload: { cursor: 0, infoHash, limit: PAGE_LIMIT }
+      })
+      if (!mounted.current) return
+      if (!outcome.ok) {
+        setFailure(outcome.error)
+        return
+      }
+      setExpanded(infoHash)
+      setFiles(outcome.value.items)
+    },
+    [expanded]
+  )
 
   const act = useCallback(
     async (
@@ -152,6 +185,13 @@ export function TorrentList({
               </progress>
             </div>
             <div className="torrent-actions">
+              <button
+                aria-expanded={expanded === torrent.infoHash}
+                onClick={() => void showFiles(torrent.infoHash)}
+                type="button"
+              >
+                {`Files of ${torrent.name}`}
+              </button>
               {torrent.state === 'paused' ? (
                 <button
                   disabled={pending === torrent.infoHash}
@@ -177,6 +217,26 @@ export function TorrentList({
                 {`Remove ${torrent.name}`}
               </button>
             </div>
+            {expanded === torrent.infoHash ? (
+              <ul className="file-list">
+                {files.map(file => (
+                  <li key={file.index}>
+                    <button
+                      onClick={() =>
+                        onPlay({
+                          fileIndex: file.index,
+                          fileName: file.path,
+                          infoHash: torrent.infoHash
+                        })
+                      }
+                      type="button"
+                    >
+                      {`Play ${file.path}`}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
           </li>
         ))}
       </ul>

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { BootstrapSnapshot, EngineStatus } from '../shared/contracts'
 import { AddTorrent } from './components/add-torrent'
+import { MediaPlayer } from './components/media-player'
 import { TorrentList } from './components/torrent-list'
 
 function engineLabel(status: EngineStatus): string {
@@ -37,6 +38,11 @@ export function App(): React.JSX.Element {
   )
   const [restartPending, setRestartPending] = useState(false)
   const [listRevision, setListRevision] = useState(0)
+  const [playing, setPlaying] = useState<{
+    fileIndex: number
+    fileName: string
+    infoHash: string
+  } | null>(null)
 
   useEffect(() => {
     let active = true
@@ -134,7 +140,20 @@ export function App(): React.JSX.Element {
         ready={engineStatus.state === 'ready'}
       />
 
-      <TorrentList active={engineStatus.state === 'ready'} key={listRevision} />
+      <TorrentList
+        active={engineStatus.state === 'ready'}
+        key={listRevision}
+        onPlay={setPlaying}
+      />
+
+      {playing ? (
+        <MediaPlayer
+          fileIndex={playing.fileIndex}
+          fileName={playing.fileName}
+          infoHash={playing.infoHash}
+          onClose={() => setPlaying(null)}
+        />
+      ) : null}
 
       {startupError ? (
         <p className="error" role="alert">

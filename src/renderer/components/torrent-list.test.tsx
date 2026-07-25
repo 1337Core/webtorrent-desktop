@@ -30,6 +30,7 @@ type Summary = {
 let items: Summary[] = []
 let commands: EngineCommand[] = []
 let failNext: { code: string; displayMessage: string } | null = null
+let onPlay = vi.fn()
 
 function summary(overrides: Partial<Summary> = {}): Summary {
   return {
@@ -87,6 +88,32 @@ function response(operation: EngineCommand): TorrentCommandResult {
           }
         }
       } as TorrentCommandResult
+    case 'get-torrent-files':
+      return {
+        ...envelope,
+        ok: true,
+        value: {
+          ok: true,
+          result: {
+            command: 'get-torrent-files',
+            value: {
+              infoHash: INFO_HASH,
+              items: [
+                {
+                  downloaded: 10,
+                  index: 0,
+                  length: 20,
+                  path: 'payload/movie.mp4',
+                  progress: 0.5,
+                  selected: true
+                }
+              ],
+              nextCursor: null,
+              total: 1
+            }
+          }
+        }
+      } as TorrentCommandResult
     case 'pause-torrent':
     case 'resume-torrent':
       return {
@@ -116,6 +143,7 @@ beforeEach(() => {
   items = [summary()]
   commands = []
   failNext = null
+  onPlay = vi.fn()
   Object.defineProperty(window, 'desktop', {
     configurable: true,
     value: {
@@ -137,7 +165,7 @@ afterEach(() => {
 
 describe('TorrentList', () => {
   it('renders the engine page with bounded display values', async () => {
-    render(<TorrentList active refreshMs={100_000} />)
+    render(<TorrentList active onPlay={onPlay} refreshMs={100_000} />)
 
     expect(await screen.findByText('Example payload')).toBeDefined()
     const meta = document.querySelector('.torrent-meta')?.textContent
@@ -150,20 +178,20 @@ describe('TorrentList', () => {
 
   it('shows an empty state before any torrent exists', async () => {
     items = []
-    render(<TorrentList active refreshMs={100_000} />)
+    render(<TorrentList active onPlay={onPlay} refreshMs={100_000} />)
 
     expect(await screen.findByText('No torrents yet.')).toBeDefined()
   })
 
   it('stays quiet while the engine is not ready', () => {
-    render(<TorrentList active={false} />)
+    render(<TorrentList active={false} onPlay={onPlay} />)
 
     expect(commands).toEqual([])
   })
 
   it('pauses, resumes, and removes through the engine', async () => {
     const user = userEvent.setup()
-    render(<TorrentList active refreshMs={100_000} />)
+    render(<TorrentList active onPlay={onPlay} refreshMs={100_000} />)
     await screen.findByText('Example payload')
 
     // The refresh after the action re-reads the engine page, so the fake
@@ -205,7 +233,7 @@ describe('TorrentList', () => {
 
   it('reports an engine failure without dropping the list', async () => {
     const user = userEvent.setup()
-    render(<TorrentList active refreshMs={100_000} />)
+    render(<TorrentList active onPlay={onPlay} refreshMs={100_000} />)
     await screen.findByText('Example payload')
 
     failNext = {
@@ -218,5 +246,23 @@ describe('TorrentList', () => {
       await screen.findByText('The torrent cannot change state right now.')
     ).toBeDefined()
     expect(screen.getByText('Example payload')).toBeDefined()
+  })
+
+  it('browses torrent files and hands one to the player', async () => {
+    const user = userEvent.setup()
+    render(<TorrentList active onPlay={onPlay} refreshMs={100_000} />)
+    await screen.findByText('Example payload')
+
+    await user.click(screen.getByRole('button', { name: /^Files of/u }))
+    const play = await screen.findByRole('button', {
+      name: 'Play payload/movie.mp4'
+    })
+    await user.click(play)
+
+    expect(onPlay).toHaveBeenCalledWith({
+      fileIndex: 0,
+      fileName: 'payload/movie.mp4',
+      infoHash: INFO_HASH
+    })
   })
 })
