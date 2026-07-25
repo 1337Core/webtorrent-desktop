@@ -45,6 +45,11 @@ export type ValidatedTorrentMetadata = Readonly<{
   webSeeds: ReadonlyArray<string>
 }>
 
+export type CanonicalInfoIdentity = Readonly<{
+  infoBytes: Uint8Array
+  infoHash: string
+}>
+
 export type PreparedMagnet = Readonly<{
   dhtEnabled: boolean
   infoHash: string
@@ -440,6 +445,51 @@ function copyOptionalTopLevelFields(
     }
     decodeUtf8(bytes)
     target[key] = bytes
+  }
+}
+
+/**
+ * The synchronous canonical identity of raw torrent bytes.
+ *
+ * The metadata commit barrier runs inside WebTorrent's synchronous `metadata`
+ * handler, so it cannot use the asynchronous validation path. This performs
+ * the same strict scan, canonical re-encode, and v1 hash without touching
+ * `parse-torrent`.
+ */
+export function canonicalInfoIdentity(
+  input: Uint8Array
+): CanonicalInfoIdentity {
+  if (
+    !(input instanceof Uint8Array) ||
+    input.byteLength === 0 ||
+    input.byteLength > TORRENT_METADATA_LIMITS.bytes
+  ) {
+    throw new TorrentInputError('LIMIT_EXCEEDED')
+  }
+
+  let scan
+  let root: Dictionary
+  try {
+    scan = scanStrictTorrentBencode(input)
+    root = dictionary(bencode.decode(input))
+  } catch (error) {
+    if (error instanceof TorrentInputError) throw error
+    throw new TorrentInputError('INVALID_METADATA')
+  }
+
+  const info = dictionary(field(root, 'info'))
+  const exactInfoBytes = input.subarray(scan.infoStart, scan.infoEnd)
+  const canonicalInfoBytes: Uint8Array = bencode.encode(info)
+  if (
+    exactInfoBytes.byteLength !== canonicalInfoBytes.byteLength ||
+    exactInfoBytes.some((byte, index) => byte !== canonicalInfoBytes[index])
+  ) {
+    throw new TorrentInputError('INFO_HASH_MISMATCH')
+  }
+
+  return {
+    infoBytes: exactInfoBytes.slice(),
+    infoHash: createHash('sha1').update(exactInfoBytes).digest('hex')
   }
 }
 
