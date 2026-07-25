@@ -13,7 +13,9 @@ import {
   type PreparationSnapshot
 } from './preparation-store'
 import { EngineRuntime } from './runtime'
+import { Readable } from 'node:stream'
 import { DiskTorrentError } from './disk-torrent'
+import { MediaProxy } from './media-proxy'
 import {
   TorrentCreationError,
   type TorrentCreationService
@@ -31,7 +33,6 @@ const START_TIME = 1_000_000
 const PREPARATION_ID = '00000000-0000-4000-8000-000000000001'
 const INFO_HASH = '1111111111111111111111111111111111111111'
 const OTHER_INFO_HASH = '2222222222222222222222222222222222222222'
-const LEASE_ID = '00000000-0000-4000-8000-000000000002'
 const OPERATION_ID = '00000000-0000-4000-8000-000000000003'
 
 function metadata(
@@ -610,35 +611,86 @@ describe('EngineRuntime', () => {
     expect(errorCode(result)).toBe('PATH_NOT_AUTHORIZED')
   })
 
-  it('returns fixed unsupported results for every deferred command', async () => {
-    const runtime = new EngineRuntime({ torrentManager: emptyTorrentManager() })
-    const operations = [
-      {
+  it('serves media through opaque per-file leases', async () => {
+    const proxy = new MediaProxy()
+    await proxy.start()
+    try {
+      const manager = {
+        mediaFile: vi.fn(() => ({
+          createReadStream: () => Readable.from([Buffer.alloc(4)]),
+          downloaded: 0,
+          length: 4,
+          path: 'payload/first.bin',
+          select: () => undefined
+        })),
+        revokeTorrent: vi.fn(() => 0)
+      }
+      const runtime = new EngineRuntime({
+        mediaProxy: proxy,
+        torrentManager: manager as unknown as TorrentManager
+      })
+
+      const open: EngineCommand = {
         command: 'open-media',
         payload: { fileIndex: 0, infoHash: INFO_HASH }
-      },
-      {
-        command: 'heartbeat-media',
-        payload: { leaseId: LEASE_ID }
-      },
-      {
-        command: 'close-media',
-        payload: { leaseId: LEASE_ID }
       }
-    ] satisfies EngineCommand[]
+      const opened = await runtime.execute(open, signal())
+      expectStrictResult(open, opened)
+      if (!opened.ok || opened.result.command !== 'open-media') {
+        throw new Error('Expected an opened media lease')
+      }
+      expect(opened.result.value.url).toMatch(
+        /^http:\/\/127\.0\.0\.1:\d{1,5}\/v1\/media\/[A-Za-z0-9_-]{43}$/u
+      )
 
-    for (const operation of operations) {
+      const leaseId = opened.result.value.leaseId
+      const heartbeat: EngineCommand = {
+        command: 'heartbeat-media',
+        payload: { leaseId }
+      }
+      expect(await runtime.execute(heartbeat, signal())).toMatchObject({
+        ok: true,
+        result: { command: 'heartbeat-media', value: { leaseId } }
+      })
+
+      const close: EngineCommand = {
+        command: 'close-media',
+        payload: { leaseId }
+      }
+      expect(await runtime.execute(close, signal())).toMatchObject({
+        ok: true,
+        result: { command: 'close-media', value: { closed: true } }
+      })
+      expect(errorCode(await runtime.execute(close, signal()))).toBe(
+        'NOT_FOUND'
+      )
+      expect(errorCode(await runtime.execute(heartbeat, signal()))).toBe(
+        'NOT_FOUND'
+      )
+    } finally {
+      await proxy.shutdown()
+    }
+  })
+
+  it('refuses media for a file the engine cannot serve', async () => {
+    const proxy = new MediaProxy()
+    await proxy.start()
+    try {
+      const manager = { mediaFile: vi.fn(() => null) }
+      const runtime = new EngineRuntime({
+        mediaProxy: proxy,
+        torrentManager: manager as unknown as TorrentManager
+      })
+      const operation: EngineCommand = {
+        command: 'open-media',
+        payload: { fileIndex: 3, infoHash: INFO_HASH }
+      }
+
       const result = await runtime.execute(operation, signal())
       expectStrictResult(operation, result)
-      expect(result).toEqual({
-        ok: false,
-        error: {
-          code: 'UNSUPPORTED',
-          command: operation.command,
-          displayMessage: 'This torrent operation is not available yet.',
-          retryable: false
-        }
-      })
+      expect(errorCode(result)).toBe('NOT_FOUND')
+    } finally {
+      await proxy.shutdown()
     }
   })
 

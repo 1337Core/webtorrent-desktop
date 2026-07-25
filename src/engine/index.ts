@@ -5,6 +5,7 @@ import type { EngineEvent, EngineRuntimeInfo } from '../shared/contracts'
 import { EngineClientLifecycle } from './client-lifecycle'
 import { DhtBoundary } from './dht-boundary'
 import { resolve4 } from 'node:dns/promises'
+import { MediaProxy } from './media-proxy'
 import { EgressPolicy } from './network-policy'
 import { PeerAdmissionPolicy } from './peer-admission'
 import { EngineProtocolController } from './protocol-controller'
@@ -170,6 +171,7 @@ async function startClients(): Promise<EngineRuntimeInfo> {
   }
 
   await lifecycle.start()
+  await mediaProxy.start()
   const publicClient = clients.get('public')
   const privateClient = clients.get('private')
   if (
@@ -191,9 +193,12 @@ async function startClients(): Promise<EngineRuntimeInfo> {
   }
 }
 
+const mediaProxy = new MediaProxy()
+
 let emitRuntimeEvent = (_event: EngineEvent): void => undefined
 const runtime = new EngineRuntime({
   creationService: new TorrentCreationService({ policy: egress }),
+  mediaProxy,
   emitEvent: event => emitRuntimeEvent(event),
   torrentManager
 })
@@ -213,6 +218,7 @@ const controller = new EngineProtocolController({
     try {
       await runtime.close()
     } finally {
+      await mediaProxy.shutdown()
       dht.close()
       dhtSessions.clear()
       await lifecycle.close()

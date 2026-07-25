@@ -12,6 +12,7 @@ import {
   type PreparationSnapshot
 } from './preparation-store'
 import { DiskTorrentError } from './disk-torrent'
+import { MediaProxy, MediaProxyError } from './media-proxy'
 import {
   TorrentCreationError,
   TorrentCreationService
@@ -38,6 +39,7 @@ type EngineRuntimeOptions = Readonly<{
   createPreparationService?: (store: PreparationStore) => PreparationService
   emitEvent?: (event: EngineEvent) => void
   creationService?: TorrentCreationService
+  mediaProxy?: MediaProxy
   preparationStore?: PreparationStore
   torrentManager?: TorrentManager
 }>
@@ -105,6 +107,16 @@ const PUBLIC_ERRORS = Object.freeze({
   remoteTorrentUnavailable: {
     code: 'NOT_FOUND',
     displayMessage: 'The remote torrent could not be loaded.',
+    retryable: true
+  },
+  mediaNotFound: {
+    code: 'NOT_FOUND',
+    displayMessage: 'That media stream is no longer available.',
+    retryable: false
+  },
+  mediaUnavailable: {
+    code: 'STATE_CONFLICT',
+    displayMessage: 'No more media streams can be opened right now.',
     retryable: true
   },
   creationFailed: {
@@ -230,6 +242,7 @@ export class EngineRuntime {
   readonly #preparationStore: PreparationStore
   readonly #activeExecutions = new Set<Promise<EngineCommandResult>>()
   readonly #creationService: TorrentCreationService | null
+  readonly #mediaProxy: MediaProxy | null
   readonly #torrentManager: TorrentManager | null
   #closePromise: Promise<void> | null = null
   #closed = false
@@ -237,6 +250,7 @@ export class EngineRuntime {
   constructor(options: EngineRuntimeOptions = {}) {
     this.#emitEvent = options.emitEvent ?? (() => undefined)
     this.#creationService = options.creationService ?? null
+    this.#mediaProxy = options.mediaProxy ?? null
     this.#torrentManager = options.torrentManager ?? null
     this.#preparationStore = options.preparationStore ?? new PreparationStore()
     this.#preparationService =
@@ -396,6 +410,7 @@ export class EngineRuntime {
       }
       case 'pause-torrent': {
         const manager = this.#requireManager()
+        this.#mediaProxy?.revokeTorrent(operation.payload.infoHash)
         return {
           ok: true,
           result: {
@@ -416,6 +431,7 @@ export class EngineRuntime {
       }
       case 'remove-torrent': {
         const manager = this.#requireManager()
+        this.#mediaProxy?.revokeTorrent(operation.payload.infoHash)
         await manager.remove(operation.payload.infoHash)
         this.#emit({
           event: 'torrent-removed',
@@ -433,10 +449,35 @@ export class EngineRuntime {
         return await this.#commitPreparation(operation)
       case 'create-torrent':
         return await this.#createTorrent(operation)
-      case 'close-media':
-      case 'heartbeat-media':
       case 'open-media':
-        return errorResult(operation, PUBLIC_ERRORS.unsupported)
+        return this.#openMedia(operation)
+      case 'heartbeat-media': {
+        const proxy = this.#requireMediaProxy()
+        const lease = proxy.heartbeat(operation.payload.leaseId)
+        return {
+          ok: true,
+          result: {
+            command: 'heartbeat-media',
+            value: {
+              expiresAtMs: lease.expiresAtMs,
+              leaseId: lease.leaseId
+            }
+          }
+        }
+      }
+      case 'close-media': {
+        const proxy = this.#requireMediaProxy()
+        if (!proxy.close(operation.payload.leaseId)) {
+          return errorResult(operation, PUBLIC_ERRORS.mediaNotFound)
+        }
+        return {
+          ok: true,
+          result: {
+            command: 'close-media',
+            value: { closed: true, leaseId: operation.payload.leaseId }
+          }
+        }
+      }
     }
   }
 
@@ -521,6 +562,51 @@ export class EngineRuntime {
         value: { operationId: operation.payload.operationId, torrent }
       }
     }
+  }
+
+  /**
+   * Mints one opaque per-file loopback URL. The renderer never receives a
+   * torrent index route, a raw WebTorrent server URL, or a file path.
+   */
+  #openMedia(
+    operation: Extract<EngineCommand, { command: 'open-media' }>
+  ): EngineCommandResult {
+    const manager = this.#requireManager()
+    const proxy = this.#requireMediaProxy()
+    const file = manager.mediaFile(
+      operation.payload.infoHash,
+      operation.payload.fileIndex
+    )
+    if (!file) return errorResult(operation, PUBLIC_ERRORS.mediaNotFound)
+
+    const lease = proxy.open({
+      fileIndex: operation.payload.fileIndex,
+      infoHash: operation.payload.infoHash,
+      source: {
+        contentType: 'application/octet-stream',
+        createReadStream: range =>
+          file.createReadStream({ end: range.end, start: range.start }),
+        length: file.length
+      }
+    })
+    return {
+      ok: true,
+      result: {
+        command: 'open-media',
+        value: {
+          expiresAtMs: lease.expiresAtMs,
+          fileIndex: lease.fileIndex,
+          infoHash: lease.infoHash,
+          leaseId: lease.leaseId,
+          url: lease.url
+        }
+      }
+    }
+  }
+
+  #requireMediaProxy(): MediaProxy {
+    if (!this.#mediaProxy) throw new EngineRuntimeUnavailableError()
+    return this.#mediaProxy
   }
 
   #requireManager(): TorrentManager {
@@ -620,6 +706,18 @@ export class EngineRuntime {
 
     if (error instanceof EngineRuntimeUnavailableError) {
       return errorResult(operation, PUBLIC_ERRORS.engineNotReady)
+    }
+
+    if (error instanceof MediaProxyError) {
+      switch (error.code) {
+        case 'CAPACITY_EXCEEDED':
+          return errorResult(operation, PUBLIC_ERRORS.mediaUnavailable)
+        case 'CLOSED':
+        case 'START_FAILED':
+          return errorResult(operation, PUBLIC_ERRORS.engineNotReady)
+        case 'NOT_FOUND':
+          return errorResult(operation, PUBLIC_ERRORS.mediaNotFound)
+      }
     }
 
     if (error instanceof TorrentCreationError) {

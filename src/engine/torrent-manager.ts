@@ -96,6 +96,14 @@ export class TorrentManager {
     return this.#summary(session)
   }
 
+  /** The selected file's bounded reader, or null when it cannot be served. */
+  mediaFile(
+    infoHash: string,
+    fileIndex: number
+  ): ReturnType<DiskTorrentSession['mediaFile']> {
+    return this.#require(infoHash).mediaFile(fileIndex)
+  }
+
   summary(infoHash: string): TorrentSummary {
     return this.#summary(this.#require(infoHash))
   }

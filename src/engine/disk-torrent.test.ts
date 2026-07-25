@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events'
+import { Readable } from 'node:stream'
 import path from 'node:path'
 import bencode from 'bencode'
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -10,7 +11,8 @@ import {
   type DiskTorrentAddInput,
   type DiskTorrentSessionOptions,
   type EngineAddClient,
-  type EngineTorrent
+  type EngineTorrent,
+  type EngineTorrentFile
 } from './disk-torrent'
 import { EgressPolicy } from './network-policy'
 import {
@@ -20,6 +22,20 @@ import {
 import { TorrentRegistry } from './torrent-registry'
 
 const DOWNLOAD_ROOT = path.join(path.sep, 'tmp', 'wu-downloads')
+
+function fakeFile(
+  length: number,
+  filePath: string,
+  downloaded = 0
+): EngineTorrentFile {
+  return {
+    createReadStream: () => Readable.from([Buffer.alloc(length)]),
+    downloaded,
+    length,
+    path: filePath,
+    select: () => undefined
+  }
+}
 
 class FakeTorrent extends EventEmitter implements EngineTorrent {
   destroyed = false
@@ -48,18 +64,10 @@ class FakeTorrent extends EventEmitter implements EngineTorrent {
     this.#overrides = overrides
   }
 
-  get files(): ReadonlyArray<{
-    downloaded: number
-    length: number
-    path: string
-  }> {
+  get files(): ReadonlyArray<EngineTorrentFile> {
     return (
       this.#overrides.files ??
-      this.#metadata.files.map(file => ({
-        downloaded: 0,
-        length: file.length,
-        path: file.path
-      }))
+      this.#metadata.files.map(file => fakeFile(file.length, file.path, 0))
     )
   }
 

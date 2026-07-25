@@ -1,3 +1,4 @@
+import type { Readable } from 'node:stream'
 import type { TorrentOptions } from 'webtorrent'
 import { GuardedStoreSupervisor, type GuardedStoreGrant } from './guarded-store'
 import {
@@ -38,6 +39,14 @@ export class DiskTorrentError extends Error {
 }
 
 /** The exact WebTorrent torrent surface the disk-backed session consumes. */
+export type EngineTorrentFile = {
+  createReadStream(options?: { end?: number; start?: number }): Readable
+  downloaded: number
+  length: number
+  path: string
+  select(priority?: number): void
+}
+
 export type EngineTorrent = {
   addPeer(peer: string, source?: string): boolean
   deselect(start: number, end: number): void
@@ -49,7 +58,7 @@ export type EngineTorrent = {
   done: boolean
   downloadSpeed: number
   downloaded: number
-  files: ReadonlyArray<{ downloaded: number; length: number; path: string }>
+  files: ReadonlyArray<EngineTorrentFile>
   infoHash: string
   length: number
   name: string
@@ -328,6 +337,19 @@ export class DiskTorrentSession {
     } catch {
       return false
     }
+  }
+
+  /**
+   * The selected file's byte source for the loopback media proxy. WebTorrent's
+   * own server is never exposed, so only this bounded range reader crosses the
+   * boundary.
+   */
+  mediaFile(fileIndex: number): EngineTorrentFile | null {
+    if (this.#state !== 'running' && this.#state !== 'paused') return null
+    const file = this.#torrent?.files[fileIndex]
+    const manifest = this.#metadata.files[fileIndex]
+    if (!file || !manifest || file.length !== manifest.length) return null
+    return file
   }
 
   /** Rebuilds and reapplies the complete desired selection. */
