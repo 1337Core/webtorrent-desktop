@@ -46,6 +46,8 @@ import {
 import { EngineSupervisor } from './engine-supervisor'
 import { findDangerousLaunchSwitch } from './launch-policy'
 import { installAppMenu } from './app-menu'
+import { ExternalPlayer } from './external-player'
+import { FolderWatcher } from './folder-watcher'
 import { DesktopNotifier, DockBadge, PowerSaveGuard } from './os-integration'
 import { TorrentHandlers } from './torrent-handlers'
 import { AppStateStore } from './state-store'
@@ -88,9 +90,15 @@ const rendererSmokeEvidenceSchema = z.strictObject({
   bootstrapCommitted: z.literal(true),
   bufferPresent: z.literal(false),
   desktopApiKeys: z.tuple([
+    z.literal('choosePath'),
     z.literal('getBootstrap'),
     z.literal('onEngineStatus'),
-    z.literal('restartEngine')
+    z.literal('onMenuAction'),
+    z.literal('onOpenIntent'),
+    z.literal('openExternalPlayer'),
+    z.literal('restartEngine'),
+    z.literal('runTorrentCommand'),
+    z.literal('setPreferences')
   ]),
   navigationDenied: z.literal(true),
   networkFetchDenied: z.literal(true),
@@ -681,7 +689,7 @@ function createMainWindow(runtime: RuntimeInfo): BrowserWindow {
    */
   const chooseUserPath = async (
     owner: BrowserWindow,
-    kind: 'directory' | 'source' | 'torrent-file'
+    kind: 'application' | 'directory' | 'source' | 'torrent-file'
   ): Promise<string | null> => {
     const properties: Array<'openDirectory' | 'openFile'> =
       kind === 'directory' ? ['openDirectory'] : ['openFile']
@@ -698,6 +706,14 @@ function createMainWindow(runtime: RuntimeInfo): BrowserWindow {
     if (result.canceled) return null
     return result.filePaths[0] ?? null
   }
+
+  const externalPlayer = new ExternalPlayer({
+    diagnostics,
+    getMediaPort: () => {
+      const status = engineSupervisor?.status()
+      return status?.state === 'ready' ? status.mediaPort : null
+    }
+  })
 
   const torrentHandlers = new TorrentHandlers({
     diagnostics,
@@ -743,9 +759,39 @@ function createMainWindow(runtime: RuntimeInfo): BrowserWindow {
     developer: !app.isPackaged
   })
 
+  // The watched folder is an explicit preference: enabling it starts one
+  // watcher, clearing it stops the watcher entirely.
+  const folderWatcher = new FolderWatcher({
+    diagnostics,
+    onTorrent: torrentPath => {
+      void torrentHandlers.handleFile(torrentPath)
+    }
+  })
+  const applyWatchPreference = (folder: string | null): void => {
+    if (folder === null) {
+      void folderWatcher.stop()
+      return
+    }
+    if (folderWatcher.folder === folder) return
+    void folderWatcher.watch(folder).catch(() => {
+      diagnostics.warn('folder-watch.rejected')
+    })
+  }
+  applyWatchPreference(
+    stateStore?.snapshot().preferences.torrentsFolder ?? null
+  )
+
   unregisterDesktopIpc = registerDesktopIpc({
     choosePath: kind => chooseUserPath(window, kind),
     diagnostics,
+    openExternalPlayer: async mediaUrl => {
+      const configured = stateStore?.snapshot().preferences.externalPlayer
+      if (!configured) throw new Error('No external player is configured')
+      await externalPlayer.open({ mediaUrl, playerPath: configured })
+    },
+    onPreferencesChanged: preferences => {
+      applyWatchPreference(preferences.torrentsFolder)
+    },
     engineSupervisor,
     getEngineStatusEvent: () => structuredClone(latestEngineStatusEvent),
     onBootstrap: markRendererBootstrapped,

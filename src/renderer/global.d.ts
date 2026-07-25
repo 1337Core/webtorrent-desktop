@@ -3,6 +3,7 @@ import type {
   ChoosePathResult,
   EngineCommand,
   EngineStatus,
+  ExternalPlayerResult,
   MenuActionEvent,
   OpenIntentEvent,
   RestartEngineResult,
@@ -14,9 +15,10 @@ declare global {
   interface Window {
     desktop: {
       choosePath: (
-        kind: 'directory' | 'source' | 'torrent-file'
+        kind: 'application' | 'directory' | 'source' | 'torrent-file'
       ) => Promise<ChoosePathResult>
       getBootstrap: () => Promise<BootstrapResult>
+      openExternalPlayer: (mediaUrl: string) => Promise<ExternalPlayerResult>
       onEngineStatus: (listener: (status: EngineStatus) => void) => () => void
       onMenuAction: (
         listener: (action: MenuActionEvent['action']) => void
@@ -28,7 +30,13 @@ declare global {
       runTorrentCommand: (
         operation: EngineCommand
       ) => Promise<TorrentCommandResult>
-      setDownloadRoot: (downloadRoot: string) => Promise<SetPreferencesResult>
+      setPreferences: (
+        update: Readonly<{
+          downloadRoot?: string
+          externalPlayer?: string | null
+          torrentsFolder?: string | null
+        }>
+      ) => Promise<SetPreferencesResult>
     }
   }
 }

@@ -125,7 +125,11 @@ function bootstrapSuccess(requestId: string, sequence = 0): BootstrapResult {
       state: {
         schemaVersion: 1,
         revision: 0,
-        preferences: { downloadRoot: null }
+        preferences: {
+          downloadRoot: null,
+          externalPlayer: null,
+          torrentsFolder: null
+        }
       },
       runtime: {
         appName: 'WebTorrent Updated',
@@ -165,7 +169,7 @@ afterAll(() => {
 })
 
 describe('preload desktop bridge', () => {
-  it('exposes exactly three frozen capabilities and validates bootstrap', async () => {
+  it('exposes exactly the owned frozen capabilities and validates bootstrap', async () => {
     const api = await loadApi()
     electronMock.invoke.mockImplementation(
       (
@@ -196,9 +200,10 @@ describe('preload desktop bridge', () => {
       'onEngineStatus',
       'onMenuAction',
       'onOpenIntent',
+      'openExternalPlayer',
       'restartEngine',
       'runTorrentCommand',
-      'setDownloadRoot'
+      'setPreferences'
     ])
     expect(Object.isFrozen(api)).toBe(true)
   })

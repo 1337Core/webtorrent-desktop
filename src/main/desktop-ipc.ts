@@ -6,8 +6,11 @@ import {
   DESKTOP_BOOTSTRAP_CHANNEL,
   choosePathRequestSchema,
   choosePathResultSchema,
+  externalPlayerRequestSchema,
+  externalPlayerResultSchema,
   DESKTOP_CHOOSE_PATH_CHANNEL,
   DESKTOP_ENGINE_RESTART_CHANNEL,
+  DESKTOP_EXTERNAL_PLAYER_CHANNEL,
   DESKTOP_PREFERENCES_CHANNEL,
   DESKTOP_TORRENT_COMMAND_CHANNEL,
   PROTOCOL_VERSION,
@@ -20,6 +23,7 @@ import {
   type BootstrapResult,
   type EngineStatusEvent,
   type PreloadTrustProof,
+  type AppState,
   type RestartEngineResult,
   type RuntimeInfo
 } from '../shared/contracts'
@@ -42,9 +46,13 @@ const RESULT_BUDGET = {
 const MAX_RECENT_REQUESTS = 256
 
 type DesktopIpcOptions = {
+  /** Launches the owner's chosen player; absent until one is configured. */
+  openExternalPlayer?: (mediaUrl: string) => Promise<void>
+  /** Lets main react to a saved preference, such as the watched folder. */
+  onPreferencesChanged?: (preferences: AppState['preferences']) => void
   /** Main owns the dialog; the renderer only receives the chosen path. */
   choosePath?: (
-    kind: 'directory' | 'source' | 'torrent-file'
+    kind: 'application' | 'directory' | 'source' | 'torrent-file'
   ) => Promise<string | null>
   diagnostics: Diagnostics
   engineSupervisor: EngineSupervisor
@@ -96,6 +104,8 @@ export function registerDesktopIpc(options: DesktopIpcOptions): () => void {
   const {
     choosePath,
     diagnostics,
+    onPreferencesChanged,
+    openExternalPlayer,
     engineSupervisor,
     getEngineStatusEvent,
     onBootstrap,
@@ -343,9 +353,8 @@ export function registerDesktopIpc(options: DesktopIpcOptions): () => void {
     if (duplicate) return setPreferencesResultSchema.parse(duplicate)
 
     try {
-      const state = stateStore.setDownloadRoot(
-        request.data.payload.downloadRoot
-      )
+      const state = stateStore.setPreferences(request.data.payload)
+      onPreferencesChanged?.(state.preferences)
       return setPreferencesResultSchema.parse({
         protocolVersion: PROTOCOL_VERSION,
         requestId: request.data.requestId,
@@ -364,8 +373,62 @@ export function registerDesktopIpc(options: DesktopIpcOptions): () => void {
     }
   })
 
+  frameIpc.handle(
+    DESKTOP_EXTERNAL_PLAYER_CHANNEL,
+    async (event, value: unknown) => {
+      const rejected = authorize(event, value)
+      if (rejected) return externalPlayerResultSchema.parse(rejected)
+
+      const request = externalPlayerRequestSchema.safeParse(value)
+      if (!request.success) {
+        return externalPlayerResultSchema.parse(
+          errorResult(
+            candidateRequestId(value),
+            'INVALID_REQUEST',
+            'The application received an invalid player request.',
+            false
+          )
+        )
+      }
+
+      const duplicate = rememberRequest(request.data.requestId)
+      if (duplicate) return externalPlayerResultSchema.parse(duplicate)
+
+      if (!openExternalPlayer) {
+        return externalPlayerResultSchema.parse(
+          errorResult(
+            request.data.requestId,
+            'INVALID_REQUEST',
+            'No external player is configured.',
+            false
+          )
+        )
+      }
+
+      try {
+        await openExternalPlayer(request.data.payload.mediaUrl)
+      } catch {
+        return externalPlayerResultSchema.parse(
+          errorResult(
+            request.data.requestId,
+            'INTERNAL',
+            'The external player could not be started.',
+            false
+          )
+        )
+      }
+      return externalPlayerResultSchema.parse({
+        protocolVersion: PROTOCOL_VERSION,
+        requestId: request.data.requestId,
+        ok: true,
+        value: { launched: true }
+      })
+    }
+  )
+
   return () => {
     frameIpc.removeHandler(DESKTOP_BOOTSTRAP_CHANNEL)
+    frameIpc.removeHandler(DESKTOP_EXTERNAL_PLAYER_CHANNEL)
     frameIpc.removeHandler(DESKTOP_CHOOSE_PATH_CHANNEL)
     frameIpc.removeHandler(DESKTOP_PREFERENCES_CHANNEL)
     frameIpc.removeHandler(DESKTOP_ENGINE_RESTART_CHANNEL)

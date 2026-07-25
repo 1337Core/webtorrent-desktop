@@ -26,6 +26,7 @@ export const menuActionEventSchema = z.strictObject({
 export type MenuActionEvent = z.infer<typeof menuActionEventSchema>
 
 export const DESKTOP_OPEN_INTENT_CHANNEL = 'desktop:open-intent:v1'
+export const DESKTOP_EXTERNAL_PLAYER_CHANNEL = 'desktop:external-player:v1'
 
 /** A validated open request from the OS, still unvalidated as a torrent. */
 export const openIntentEventSchema = z.strictObject({
@@ -65,7 +66,11 @@ const windowBoundsSchema = z.strictObject({
 
 const preferencesSchema = z.strictObject({
   /** The user's chosen download root; absent until main resolves one. */
-  downloadRoot: z.string().min(1).max(4_096).nullable().default(null)
+  downloadRoot: z.string().min(1).max(4_096).nullable().default(null),
+  /** A user-selected media player; absent until the owner picks one. */
+  externalPlayer: z.string().min(1).max(4_096).nullable().default(null),
+  /** A watched folder for `.torrent` files; the feature is off by default. */
+  torrentsFolder: z.string().min(1).max(4_096).nullable().default(null)
 })
 
 /**
@@ -113,7 +118,11 @@ export const DEFAULT_APP_STATE: AppState = {
   schemaVersion: 1,
   revision: 0,
   library: { torrents: [] },
-  preferences: { downloadRoot: null },
+  preferences: {
+    downloadRoot: null,
+    externalPlayer: null,
+    torrentsFolder: null
+  },
   window: {
     main: {
       normalBounds: null
@@ -411,7 +420,7 @@ export const choosePathRequestSchema = z.strictObject({
   requestId: requestIdSchema,
   command: z.literal('choosePath'),
   payload: z.strictObject({
-    kind: z.enum(['directory', 'source', 'torrent-file'])
+    kind: z.enum(['application', 'directory', 'source', 'torrent-file'])
   })
 })
 
@@ -438,9 +447,16 @@ export const setPreferencesRequestSchema = z.strictObject({
   protocolVersion: protocolVersionSchema,
   requestId: requestIdSchema,
   command: z.literal('setPreferences'),
-  payload: z.strictObject({
-    downloadRoot: z.string().min(1).max(4_096)
-  })
+  payload: z
+    .strictObject({
+      downloadRoot: z.string().min(1).max(4_096).optional(),
+      externalPlayer: z.string().min(1).max(4_096).nullable().optional(),
+      torrentsFolder: z.string().min(1).max(4_096).nullable().optional()
+    })
+    .refine(
+      value => Object.keys(value).length > 0,
+      'A preferences update must change something.'
+    )
 })
 
 export const setPreferencesResultSchema = z.discriminatedUnion('ok', [
@@ -459,6 +475,34 @@ export const setPreferencesResultSchema = z.discriminatedUnion('ok', [
 ])
 
 export type SetPreferencesResult = z.infer<typeof setPreferencesResultSchema>
+
+export const externalPlayerRequestSchema = z.strictObject({
+  protocolVersion: protocolVersionSchema,
+  requestId: requestIdSchema,
+  command: z.literal('openExternalPlayer'),
+  payload: z.strictObject({
+    mediaUrl: z
+      .string()
+      .regex(/^http:\/\/127\.0\.0\.1:\d{1,5}\/v1\/media\/[A-Za-z0-9_-]{43}$/u)
+  })
+})
+
+export const externalPlayerResultSchema = z.discriminatedUnion('ok', [
+  z.strictObject({
+    protocolVersion: protocolVersionSchema,
+    requestId: requestIdSchema,
+    ok: z.literal(true),
+    value: z.strictObject({ launched: z.literal(true) })
+  }),
+  z.strictObject({
+    protocolVersion: protocolVersionSchema,
+    requestId: requestIdSchema.nullable(),
+    ok: z.literal(false),
+    error: desktopErrorSchema
+  })
+])
+
+export type ExternalPlayerResult = z.infer<typeof externalPlayerResultSchema>
 
 export function isEngineStatus(value: unknown): value is EngineStatus {
   return engineStatusSchema.safeParse(value).success

@@ -165,19 +165,53 @@ export class AppStateStore {
    * renderer never supplies a path of its own.
    */
   setDownloadRoot(root: string): AppState {
-    if (
-      typeof root !== 'string' ||
-      !path.isAbsolute(root) ||
-      root.includes('\0') ||
-      path.normalize(root) !== root
-    ) {
-      throw new Error('Download root must be an absolute, normalized path')
+    return this.setPreferences({ downloadRoot: root })
+  }
+
+  /**
+   * Applies a bounded preference change. Every path must be absolute and
+   * normalized; clearing an optional path is explicit.
+   */
+  setPreferences(
+    update: Readonly<{
+      downloadRoot?: string
+      externalPlayer?: string | null
+      torrentsFolder?: string | null
+    }>
+  ): AppState {
+    const next = { ...this.#state.preferences }
+    for (const [key, value] of Object.entries(update) as Array<
+      ['downloadRoot' | 'externalPlayer' | 'torrentsFolder', string | null]
+    >) {
+      if (value === null) {
+        if (key === 'downloadRoot') {
+          throw new Error('The download root cannot be cleared')
+        }
+        next[key] = null
+        continue
+      }
+      if (
+        typeof value !== 'string' ||
+        !path.isAbsolute(value) ||
+        value.includes('\0') ||
+        path.normalize(value) !== value
+      ) {
+        throw new Error('Preference paths must be absolute and normalized')
+      }
+      next[key] = value
     }
-    if (this.#state.preferences.downloadRoot === root) return this.snapshot()
+
+    if (
+      next.downloadRoot === this.#state.preferences.downloadRoot &&
+      next.externalPlayer === this.#state.preferences.externalPlayer &&
+      next.torrentsFolder === this.#state.preferences.torrentsFolder
+    ) {
+      return this.snapshot()
+    }
 
     this.#persist({
       ...this.#state,
-      preferences: { ...this.#state.preferences, downloadRoot: root },
+      preferences: next,
       revision: this.#state.revision + 1
     })
     return this.snapshot()

@@ -5,6 +5,7 @@ import {
   choosePathResultSchema,
   DESKTOP_CHOOSE_PATH_CHANNEL,
   DESKTOP_ENGINE_RESTART_CHANNEL,
+  DESKTOP_EXTERNAL_PLAYER_CHANNEL,
   DESKTOP_MENU_ACTION_CHANNEL,
   DESKTOP_OPEN_INTENT_CHANNEL,
   DESKTOP_PREFERENCES_CHANNEL,
@@ -13,6 +14,7 @@ import {
   engineStatusEventSchema,
   preloadTrustProofSchema,
   PROTOCOL_VERSION,
+  externalPlayerResultSchema,
   menuActionEventSchema,
   openIntentEventSchema,
   restartEngineResultSchema,
@@ -21,6 +23,7 @@ import {
   type BootstrapResult,
   type ChoosePathResult,
   type EngineCommand,
+  type ExternalPlayerResult,
   type MenuActionEvent,
   type OpenIntentEvent,
   type SetPreferencesResult,
@@ -256,7 +259,7 @@ async function runTorrentCommand(
 
 /** Opens a main-owned chooser and returns only the path the user picked. */
 async function choosePath(
-  kind: 'directory' | 'source' | 'torrent-file'
+  kind: 'application' | 'directory' | 'source' | 'torrent-file'
 ): Promise<ChoosePathResult> {
   const requestId = crypto.randomUUID()
   try {
@@ -282,9 +285,13 @@ async function choosePath(
   }
 }
 
-/** Records a chosen download folder; main validates and persists it. */
-async function setDownloadRoot(
-  downloadRoot: string
+/** Records chosen preference paths; main validates and persists them. */
+async function setPreferences(
+  update: Readonly<{
+    downloadRoot?: string
+    externalPlayer?: string | null
+    torrentsFolder?: string | null
+  }>
 ): Promise<SetPreferencesResult> {
   const requestId = crypto.randomUUID()
   try {
@@ -292,7 +299,7 @@ async function setDownloadRoot(
       protocolVersion: PROTOCOL_VERSION,
       requestId,
       command: 'setPreferences',
-      payload: { downloadRoot }
+      payload: update
     })
     const result = setPreferencesResultSchema.safeParse(value)
     if (!result.success || result.data.requestId !== requestId) {
@@ -305,7 +312,7 @@ async function setDownloadRoot(
   } catch {
     return protocolError(
       requestId,
-      'The download folder could not be saved.'
+      'The preference could not be saved.'
     ) as SetPreferencesResult
   }
 }
@@ -340,14 +347,43 @@ function onOpenIntent(
   }
 }
 
+/** Hands one already-minted media URL to the owner's configured player. */
+async function openExternalPlayer(
+  mediaUrl: string
+): Promise<ExternalPlayerResult> {
+  const requestId = crypto.randomUUID()
+  try {
+    const value = await invokeBounded(DESKTOP_EXTERNAL_PLAYER_CHANNEL, {
+      protocolVersion: PROTOCOL_VERSION,
+      requestId,
+      command: 'openExternalPlayer',
+      payload: { mediaUrl }
+    })
+    const result = externalPlayerResultSchema.safeParse(value)
+    if (!result.success || result.data.requestId !== requestId) {
+      return protocolError(
+        requestId,
+        'The application returned an invalid player response.'
+      ) as ExternalPlayerResult
+    }
+    return result.data
+  } catch {
+    return protocolError(
+      requestId,
+      'The external player could not be started.'
+    ) as ExternalPlayerResult
+  }
+}
+
 contextBridge.exposeInMainWorld(
   'desktop',
   Object.freeze({
     choosePath,
     getBootstrap,
+    openExternalPlayer,
     restartEngine,
     runTorrentCommand,
-    setDownloadRoot,
+    setPreferences,
     onEngineStatus,
     onMenuAction,
     onOpenIntent

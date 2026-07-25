@@ -151,7 +151,11 @@ describe('renderer IPC contracts', () => {
           state: {
             schemaVersion: 1,
             revision: 0,
-            preferences: { downloadRoot: null }
+            preferences: {
+              downloadRoot: null,
+              externalPlayer: null,
+              torrentsFolder: null
+            }
           },
           runtime: {
             appName: 'WebTorrent Updated',

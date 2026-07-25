@@ -8,12 +8,12 @@ const CHOSEN = '/Users/owner/Movies'
 
 let chosenPath: string | null = CHOSEN
 let saveFails = false
-let setDownloadRoot: ReturnType<typeof vi.fn>
+let setPreferences: ReturnType<typeof vi.fn>
 
 beforeEach(() => {
   chosenPath = CHOSEN
   saveFails = false
-  setDownloadRoot = vi.fn((downloadRoot: string) =>
+  setPreferences = vi.fn((update: { downloadRoot?: string }) =>
     Promise.resolve(
       saveFails
         ? {
@@ -30,7 +30,13 @@ beforeEach(() => {
             protocolVersion: 1,
             requestId: '00000000-0000-4000-8000-000000000003',
             ok: true,
-            value: { preferences: { downloadRoot } }
+            value: {
+              preferences: {
+                downloadRoot: update.downloadRoot ?? null,
+                externalPlayer: null,
+                torrentsFolder: null
+              }
+            }
           }
     )
   )
@@ -49,7 +55,7 @@ beforeEach(() => {
       onEngineStatus: vi.fn(() => () => undefined),
       restartEngine: vi.fn(),
       runTorrentCommand: vi.fn(),
-      setDownloadRoot
+      setPreferences
     },
     writable: true
   })
@@ -63,15 +69,28 @@ describe('Preferences', () => {
   it('saves a folder chosen in the main-owned dialog', async () => {
     const user = userEvent.setup()
     const onChanged = vi.fn()
-    render(<Preferences downloadRoot={null} onChanged={onChanged} />)
+    render(
+      <Preferences
+        onChanged={onChanged}
+        preferences={{
+          downloadRoot: null,
+          externalPlayer: null,
+          torrentsFolder: null
+        }}
+      />
+    )
 
     expect(screen.getByText('No download folder yet.')).toBeDefined()
     await user.click(
       screen.getByRole('button', { name: 'Change download folder' })
     )
 
-    await waitFor(() => expect(onChanged).toHaveBeenCalledWith(CHOSEN))
-    expect(setDownloadRoot).toHaveBeenCalledWith(CHOSEN)
+    await waitFor(() =>
+      expect(onChanged).toHaveBeenCalledWith(
+        expect.objectContaining({ downloadRoot: CHOSEN })
+      )
+    )
+    expect(setPreferences).toHaveBeenCalledWith({ downloadRoot: CHOSEN })
   })
 
   it('changes nothing when the chooser is cancelled', async () => {
@@ -80,8 +99,12 @@ describe('Preferences', () => {
     chosenPath = null
     render(
       <Preferences
-        downloadRoot="/Users/owner/Downloads"
         onChanged={onChanged}
+        preferences={{
+          downloadRoot: '/Users/owner/Downloads',
+          externalPlayer: null,
+          torrentsFolder: null
+        }}
       />
     )
 
@@ -94,14 +117,23 @@ describe('Preferences', () => {
         screen.getByRole('button', { name: 'Change download folder' })
       ).toHaveProperty('disabled', false)
     )
-    expect(setDownloadRoot).not.toHaveBeenCalled()
+    expect(setPreferences).not.toHaveBeenCalled()
     expect(onChanged).not.toHaveBeenCalled()
   })
 
   it('reports a rejected folder', async () => {
     const user = userEvent.setup()
     saveFails = true
-    render(<Preferences downloadRoot={null} onChanged={vi.fn()} />)
+    render(
+      <Preferences
+        onChanged={vi.fn()}
+        preferences={{
+          downloadRoot: null,
+          externalPlayer: null,
+          torrentsFolder: null
+        }}
+      />
+    )
 
     await user.click(
       screen.getByRole('button', { name: 'Change download folder' })

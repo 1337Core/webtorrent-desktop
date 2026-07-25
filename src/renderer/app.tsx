@@ -40,7 +40,11 @@ export function App(): React.JSX.Element {
   )
   const [restartPending, setRestartPending] = useState(false)
   const [listRevision, setListRevision] = useState(0)
-  const [downloadRoot, setDownloadRoot] = useState<string | null>(null)
+  const [preferences, setPreferences] = useState<{
+    downloadRoot: string | null
+    externalPlayer: string | null
+    torrentsFolder: string | null
+  }>({ downloadRoot: null, externalPlayer: null, torrentsFolder: null })
   const [openIntent, setOpenIntent] = useState<
     | { kind: 'magnet'; magnet: string }
     | { kind: 'torrent-file'; torrentPath: string }
@@ -92,7 +96,7 @@ export function App(): React.JSX.Element {
       }
 
       setBootstrap(result.value)
-      setDownloadRoot(result.value.state.preferences.downloadRoot)
+      setPreferences(result.value.state.preferences)
       setEngineStatus(result.value.engineStatusEvent.status)
     })
 
@@ -164,11 +168,11 @@ export function App(): React.JSX.Element {
       </section>
 
       <div data-focused-section={focused ?? undefined}>
-        <Preferences downloadRoot={downloadRoot} onChanged={setDownloadRoot} />
+        <Preferences onChanged={setPreferences} preferences={preferences} />
       </div>
 
       <AddTorrent
-        downloadRoot={downloadRoot}
+        downloadRoot={preferences.downloadRoot}
         intent={openIntent}
         onAdded={() => {
           setOpenIntent(null)
