@@ -8,9 +8,15 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import createTorrent from 'create-torrent'
 import WebTorrent from 'webtorrent'
 import { createClientOptions } from './client-config'
+import SimplePeer from '@thaunknown/simple-peer'
 import { MediaProxy } from './media-proxy'
 import { EgressPolicy } from './network-policy'
 import { TorrentManager } from './torrent-manager'
+import {
+  PendingSignalingBudget,
+  WebrtcSignaling,
+  type SignalingPeer
+} from './webrtc-signaling'
 import { validateTorrentMetadata } from './torrent-metadata'
 import type { DiskTorrentSession, EngineAddClient } from './disk-torrent'
 
@@ -111,6 +117,20 @@ function payloadName(index: number): string {
   return `payload-${index}.bin`
 }
 
+/**
+ * A peer built exactly like the engine's, except that its transport is pinned
+ * to loopback. Production supplies no bind address, so this fixture reaches
+ * only the machine it runs on and needs no network at all.
+ */
+function createLoopbackPeer(initiator: boolean): SignalingPeer {
+  return new SimplePeer({
+    config: { bindAddress: '127.0.0.1', iceServers: [] },
+    iceCompleteTimeout: 3_000,
+    initiator,
+    trickle: false
+  }) as unknown as SignalingPeer
+}
+
 beforeEach(() => {
   created.length = 0
 })
@@ -135,7 +155,8 @@ type Downloader = {
 async function downloaderFor(
   fixture: Fixture,
   metadata: Awaited<ReturnType<typeof validateTorrentMetadata>>,
-  selectedIndexes: ReadonlyArray<number>
+  selectedIndexes: ReadonlyArray<number>,
+  overrides: Readonly<{ peerFilter?: (address: string) => boolean }> = {}
 ): Promise<Downloader> {
   const destinationRoot = path.join(fixture.root, 'download')
   await mkdir(destinationRoot, { recursive: true })
@@ -155,7 +176,8 @@ async function downloaderFor(
       },
       // The fixture reaches exactly the one ephemeral loopback endpoint the
       // test created. Production policy still rejects loopback entirely.
-      peerFilter: address => address === fixture.allowedPeer
+      peerFilter:
+        overrides.peerFilter ?? (address => address === fixture.allowedPeer)
     }
   })
 
@@ -408,6 +430,87 @@ describe('engine transfer', () => {
         expect(index.status).toBe(404)
       } finally {
         await proxy.shutdown()
+        await downloader.manager.closeAll()
+      }
+    },
+    TRANSFER_TIMEOUT_MS
+  )
+
+  it(
+    'transfers a torrent to a peer that arrived over native WebRTC',
+    async () => {
+      const fixture = await seedLocally()
+      const metadata = await validateTorrentMetadata(
+        fixture.torrentBytes,
+        new EgressPolicy()
+      )
+      const downloader = await downloaderFor(fixture, metadata, [0], {
+        // A WebRTC transport reports its remote address without a port.
+        peerFilter: address => address === '127.0.0.1'
+      })
+
+      const signaling = new WebrtcSignaling({
+        createPeer: ({ initiator }) => createLoopbackPeer(initiator),
+        handoff: peer => downloader.session().admitConnection(peer),
+        isSelfPeerId: () => false,
+        pending: new PendingSignalingBudget()
+      })
+
+      // The remote half of the exchange: the peer a tracker would introduce.
+      const remote = createLoopbackPeer(false) as SignalingPeer & {
+        on: (event: string, listener: (...args: unknown[]) => void) => unknown
+      }
+      remote.id = randomBytes(20).toString('hex')
+      const seederTorrent = fixture.seeder.torrents[0]
+      if (!seederTorrent) throw new Error('The seeder holds no torrent')
+      remote.on('connect', () => {
+        seederTorrent.addPeer(remote as never, 'tracker' as never)
+      })
+
+      try {
+        const [offer] = await signaling.createOffers(1, 'fixture://loopback')
+        if (!offer) throw new Error('No offer was generated')
+
+        const answer = await new Promise<string>((resolve, reject) => {
+          const timer = setTimeout(
+            () => reject(new Error('The remote peer never answered')),
+            TRANSFER_TIMEOUT_MS
+          )
+          remote.on('signal', (...args: unknown[]) => {
+            const description = args[0] as { sdp?: string; type?: string }
+            if (description.type !== 'answer' || !description.sdp) return
+            clearTimeout(timer)
+            resolve(description.sdp)
+          })
+          remote.signal({ sdp: offer.sdp, type: 'offer' })
+        })
+
+        signaling.acceptAnswer({
+          offerId: offer.offerId,
+          peerId: randomBytes(20).toString('latin1'),
+          sdp: answer
+        })
+
+        await waitFor(
+          () => downloader.session().stats().numPeers > 0,
+          'The signaled peer never reached the torrent'
+        )
+        await waitFor(
+          () => downloader.manager.summary(metadata.infoHash).progress >= 1,
+          'The WebRTC transfer never completed'
+        )
+
+        const downloaded = await readFile(
+          path.join(downloader.destinationRoot, payloadName(0))
+        )
+        expect(
+          Buffer.from(downloaded).equals(
+            Buffer.from(fixture.payloads[0] as Uint8Array)
+          )
+        ).toBe(true)
+      } finally {
+        signaling.close()
+        remote.destroy()
         await downloader.manager.closeAll()
       }
     },

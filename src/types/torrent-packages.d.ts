@@ -101,7 +101,15 @@ declare module '@thaunknown/simple-peer' {
    * derived from a tracker message.
    */
   export interface SimplePeerOptions {
-    config?: { iceServers?: readonly unknown[]; sdpSemantics?: string }
+    config?: {
+      /**
+       * Pins the transport to one local address. The engine never sets it;
+       * only loopback test fixtures do.
+       */
+      bindAddress?: string
+      iceServers?: readonly unknown[]
+      sdpSemantics?: string
+    }
     iceCompleteTimeout?: number
     initiator?: boolean
     trickle?: boolean

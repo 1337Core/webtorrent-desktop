@@ -2281,10 +2281,14 @@ disabled.
 What remains in this milestone is evidence, not implementation. A deterministic
 TCP transfer, partial selection, pause, removal, and loopback playback are now
 proven against a local peer with a fixture allow-set that production policy
-still rejects. The browser-WebRTC transfer stays unproven: native peers connect
-in the packaged Electron runtime rather than under the Node test runner, so that
-evidence belongs to the end-to-end suite. The wider section 18.2 boundary,
-DHT, tracker, and hostile-race coverage is also still outstanding.
+still rejects, and a torrent also transfers to a peer that arrived through the
+engine's own WebRTC signaling and handoff over the native `node-datachannel`
+path. Both halves of the interoperability gate therefore have deterministic
+coverage; what the fixtures cannot show is a real browser peer reached through
+a public tracker, which stays an owner-machine check.
+
+The wider section 18.2 boundary, DHT, tracker, and hostile-race coverage is
+still outstanding.
 
 ### Milestone 4 — storage, resume, and legacy import
 
