@@ -247,7 +247,9 @@ for (const requiredMarker of [
 // must carry the release value.
 if (!/automationBuild:\s*false/u.test(mainBundle)) {
   throw new Error(
-    'Packaged main bundle does not prove that remote debugging is refused'
+    'Packaged main bundle does not prove that remote debugging is refused. ' +
+      'An automation build from `npm run e2e` fails here by design; run ' +
+      '`npm run package` before verifying a release artifact.'
   )
 }
 for (const requiredMarker of [
