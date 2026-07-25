@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   DESKTOP_BOOTSTRAP_CHANNEL,
   DESKTOP_ENGINE_RESTART_CHANNEL,
+  DESKTOP_TORRENT_COMMAND_CHANNEL,
   PROTOCOL_VERSION,
   type EngineStatusEvent,
   type RuntimeInfo
@@ -70,6 +71,13 @@ function createHarness(options: { stateRevision?: number } = {}): {
     webTorrentVersion: '3.0.16'
   } as const
   const engineSupervisor = {
+    execute: vi.fn(async () => ({
+      ok: true,
+      result: {
+        command: 'list-torrents',
+        value: { items: [], nextCursor: null, total: 0 }
+      }
+    })),
     restart: vi.fn(() => true),
     status: vi.fn(() => readyStatus)
   } as unknown as EngineSupervisor
@@ -92,6 +100,7 @@ function createHarness(options: { stateRevision?: number } = {}): {
     snapshot: () => ({
       schemaVersion: 1,
       revision: options.stateRevision ?? 4,
+      library: { torrents: [] },
       preferences: {},
       window: { main: { normalBounds: null } }
     })
@@ -260,6 +269,50 @@ describe('registerDesktopIpc', () => {
       ok: false,
       error: { code: 'ENGINE_UNAVAILABLE', retryable: true }
     })
+  })
+
+  it('forwards a validated torrent command and returns its engine result', async () => {
+    const { engineSupervisor, event, handlers } = createHarness()
+    const handler = handlers.get(DESKTOP_TORRENT_COMMAND_CHANNEL)
+
+    const accepted = await handler?.(event, {
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      command: 'torrentCommand',
+      payload: {
+        operation: {
+          command: 'list-torrents',
+          payload: { cursor: 0, limit: 50 }
+        }
+      }
+    })
+
+    expect(accepted).toMatchObject({
+      ok: true,
+      value: { ok: true, result: { command: 'list-torrents' } }
+    })
+    expect(engineSupervisor.execute).toHaveBeenCalledWith({
+      command: 'list-torrents',
+      payload: { cursor: 0, limit: 50 }
+    })
+  })
+
+  it('refuses a torrent command that is not in the engine contract', async () => {
+    const { engineSupervisor, event, handlers } = createHarness()
+    const handler = handlers.get(DESKTOP_TORRENT_COMMAND_CHANNEL)
+
+    const rejected = await handler?.(event, {
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+      command: 'torrentCommand',
+      payload: { operation: { command: 'delete-everything', payload: {} } }
+    })
+
+    expect(rejected).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_REQUEST', retryable: false }
+    })
+    expect(engineSupervisor.execute).not.toHaveBeenCalled()
   })
 
   it('removes both private frame handlers during cleanup', () => {

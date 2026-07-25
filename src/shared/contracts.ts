@@ -12,6 +12,7 @@ export const PROTOCOL_VERSION = 1 as const
 export const DESKTOP_BOOTSTRAP_CHANNEL = 'desktop:bootstrap:v1'
 export const DESKTOP_ENGINE_RESTART_CHANNEL = 'desktop:engine-restart:v1'
 export const ENGINE_STATUS_CHANNEL = 'desktop:engine-status:v1'
+export const DESKTOP_TORRENT_COMMAND_CHANNEL = 'desktop:torrent-command:v1'
 export const ENGINE_MESSAGE_BUDGET = {
   maxBytes: 128 * 1024,
   maxDepth: 16,
@@ -340,6 +341,30 @@ export const restartEngineResultSchema = z.discriminatedUnion('ok', [
 ])
 
 export type RestartEngineResult = z.infer<typeof restartEngineResultSchema>
+
+export const torrentCommandRequestSchema = z.strictObject({
+  protocolVersion: protocolVersionSchema,
+  requestId: requestIdSchema,
+  command: z.literal('torrentCommand'),
+  payload: z.strictObject({ operation: engineCommandSchema })
+})
+
+export const torrentCommandResultSchema = z.discriminatedUnion('ok', [
+  z.strictObject({
+    protocolVersion: protocolVersionSchema,
+    requestId: requestIdSchema,
+    ok: z.literal(true),
+    value: engineCommandResultSchema
+  }),
+  z.strictObject({
+    protocolVersion: protocolVersionSchema,
+    requestId: requestIdSchema.nullable(),
+    ok: z.literal(false),
+    error: desktopErrorSchema
+  })
+])
+
+export type TorrentCommandResult = z.infer<typeof torrentCommandResultSchema>
 
 export function isEngineStatus(value: unknown): value is EngineStatus {
   return engineStatusSchema.safeParse(value).success

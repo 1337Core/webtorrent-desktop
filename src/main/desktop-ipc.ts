@@ -5,9 +5,12 @@ import {
   bootstrapResultSchema,
   DESKTOP_BOOTSTRAP_CHANNEL,
   DESKTOP_ENGINE_RESTART_CHANNEL,
+  DESKTOP_TORRENT_COMMAND_CHANNEL,
   PROTOCOL_VERSION,
   restartEngineRequestSchema,
   restartEngineResultSchema,
+  torrentCommandRequestSchema,
+  torrentCommandResultSchema,
   type BootstrapResult,
   type EngineStatusEvent,
   type PreloadTrustProof,
@@ -237,8 +240,48 @@ export function registerDesktopIpc(options: DesktopIpcOptions): () => void {
     })
   })
 
+  /**
+   * Torrent commands cross one validated channel. Main never forwards an
+   * arbitrary payload: the operation is parsed against the engine contract
+   * here, and the engine result is parsed again before it reaches the
+   * renderer.
+   */
+  frameIpc.handle(
+    DESKTOP_TORRENT_COMMAND_CHANNEL,
+    async (event, value: unknown) => {
+      const rejected = authorize(event, value)
+      if (rejected) return torrentCommandResultSchema.parse(rejected)
+
+      const request = torrentCommandRequestSchema.safeParse(value)
+      if (!request.success) {
+        return torrentCommandResultSchema.parse(
+          errorResult(
+            candidateRequestId(value),
+            'INVALID_REQUEST',
+            'The application received an invalid torrent command.',
+            false
+          )
+        )
+      }
+
+      const duplicate = rememberRequest(request.data.requestId)
+      if (duplicate) return torrentCommandResultSchema.parse(duplicate)
+
+      const result = await engineSupervisor.execute(
+        request.data.payload.operation
+      )
+      return torrentCommandResultSchema.parse({
+        protocolVersion: PROTOCOL_VERSION,
+        requestId: request.data.requestId,
+        ok: true,
+        value: result
+      })
+    }
+  )
+
   return () => {
     frameIpc.removeHandler(DESKTOP_BOOTSTRAP_CHANNEL)
     frameIpc.removeHandler(DESKTOP_ENGINE_RESTART_CHANNEL)
+    frameIpc.removeHandler(DESKTOP_TORRENT_COMMAND_CHANNEL)
   }
 }

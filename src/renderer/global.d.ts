@@ -1,7 +1,9 @@
 import type {
   BootstrapResult,
+  EngineCommand,
   EngineStatus,
-  RestartEngineResult
+  RestartEngineResult,
+  TorrentCommandResult
 } from '../shared/contracts'
 
 declare global {
@@ -10,6 +12,9 @@ declare global {
       getBootstrap: () => Promise<BootstrapResult>
       onEngineStatus: (listener: (status: EngineStatus) => void) => () => void
       restartEngine: () => Promise<RestartEngineResult>
+      runTorrentCommand: (
+        operation: EngineCommand
+      ) => Promise<TorrentCommandResult>
     }
   }
 }

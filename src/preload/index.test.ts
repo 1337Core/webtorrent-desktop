@@ -192,7 +192,8 @@ describe('preload desktop bridge', () => {
     expect(Object.keys(api).sort()).toEqual([
       'getBootstrap',
       'onEngineStatus',
-      'restartEngine'
+      'restartEngine',
+      'runTorrentCommand'
     ])
     expect(Object.isFrozen(api)).toBe(true)
   })

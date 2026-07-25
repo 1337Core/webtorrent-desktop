@@ -3,12 +3,16 @@ import {
   bootstrapResultSchema,
   DESKTOP_BOOTSTRAP_CHANNEL,
   DESKTOP_ENGINE_RESTART_CHANNEL,
+  DESKTOP_TORRENT_COMMAND_CHANNEL,
   ENGINE_STATUS_CHANNEL,
   engineStatusEventSchema,
   preloadTrustProofSchema,
   PROTOCOL_VERSION,
   restartEngineResultSchema,
+  torrentCommandResultSchema,
   type BootstrapResult,
+  type EngineCommand,
+  type TorrentCommandResult,
   type EngineStatusEvent,
   type EngineStatus,
   type RestartEngineResult
@@ -199,11 +203,51 @@ function onEngineStatus(listener: (status: EngineStatus) => void): () => void {
   }
 }
 
+/**
+ * The renderer's only torrent capability. It carries a validated engine
+ * command and returns a validated engine result; no path, handle, or raw
+ * transport ever crosses this boundary.
+ */
+async function runTorrentCommand(
+  operation: EngineCommand
+): Promise<TorrentCommandResult> {
+  const requestId = crypto.randomUUID()
+  try {
+    const value = await invokeBounded(DESKTOP_TORRENT_COMMAND_CHANNEL, {
+      protocolVersion: PROTOCOL_VERSION,
+      requestId,
+      command: 'torrentCommand',
+      payload: { operation }
+    })
+    if (!checkPayloadBudget(value, RESULT_BUDGET).ok) {
+      return protocolError(
+        requestId,
+        'The torrent response exceeded its fixed size limit.'
+      ) as TorrentCommandResult
+    }
+
+    const result = torrentCommandResultSchema.safeParse(value)
+    if (!result.success || result.data.requestId !== requestId) {
+      return protocolError(
+        requestId,
+        'The application returned an invalid torrent response.'
+      ) as TorrentCommandResult
+    }
+    return result.data
+  } catch {
+    return protocolError(
+      requestId,
+      'The torrent command could not be completed.'
+    ) as TorrentCommandResult
+  }
+}
+
 contextBridge.exposeInMainWorld(
   'desktop',
   Object.freeze({
     getBootstrap,
     restartEngine,
+    runTorrentCommand,
     onEngineStatus
   })
 )
