@@ -37,6 +37,19 @@ npm run package:check
 The packaged application is written to `out/`. It is an ad-hoc-signed local
 build; there is no public installer, notarization, or automatic updater.
 
+The soak and resource suite runs separately, because a full run takes the
+better part of an hour:
+
+```sh
+npm run soak
+```
+
+It drives two hundred torrent lifecycle cycles, a thirty-minute sustained
+transfer-and-seek run over TCP and native WebRTC, and twenty-five supervised
+engine restarts, checking memory, descriptor, socket, and shutdown budgets
+throughout. Like every other suite, it uses generated local fixtures and
+reaches no public swarm.
+
 The migration decisions and acceptance gates are documented in
 [plan.md](./plan.md).
 

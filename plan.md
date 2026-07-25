@@ -1,6 +1,7 @@
 # Maintained WebTorrent Desktop fork: modernization plan
 
-Status: **implementation complete; qualification in progress**
+Status: **implementation complete; every deterministic gate green; owner
+qualification outstanding**
 
 Research snapshot: **2026-07-25**
 
@@ -2415,6 +2416,21 @@ personal profile preserved across the swap.
 
 Exit: completion gates pass and the owner accepts the migrated app.
 
+Progress 2026-07-25: the deterministic half of section 18.5 is implemented and
+runs as its own gate, `npm run soak`, outside `npm test` because a faithful run
+takes the better part of an hour. `npm run soak:engine` drives the warm-up,
+the two hundred lifecycle cycles, and the thirty-minute sustained
+transfer-and-seek run across both TCP and native WebRTC, applying the recorded
+caps to an idle checkpoint taken after every cycle. `npm run soak:restarts`
+drives twenty-five supervised stop-and-start cycles through the real
+supervisor and utility engine.
+
+One process plays both the engine and its local peer in the engine soak, so
+each sample covers strictly more retained state than the shipped utility
+process holds and the caps are applied conservatively. What remains is the
+milestone's own workload: two hours of lawful real v1 torrents on the owner's
+Mac, which no fixture can stand in for.
+
 ## 21. Branch and giant pull-request strategy
 
 The work is intentionally isolated from `master` on the
@@ -2479,13 +2495,56 @@ Decided defaults:
 The owner may later supply a different icon or approve default WSS/STUN
 endpoints. If not, the current assets and empty endpoint defaults remain.
 
-## 24. Session handoff — paused 2026-07-25
+## 24. Session handoff — review readiness, 2026-07-25
 
-The owner paused the review-readiness pass after the combined deterministic
-gate. The current branch is intentionally left as a draft; do not mark it
-ready, merge it, or publish an application without renewed owner direction.
+The branch remains a draft. Do not mark it ready, merge it, or publish an
+application without explicit owner direction.
 
-Completed in this snapshot:
+### 24.1 Current snapshot
+
+Every deterministic gate now passes at the branch head, on the owner's Mac and
+again on the required `macos-15` pull-request job:
+
+- `npm test`: **74 files and 768 tests passed** — format, lint, TypeScript,
+  Knip, unit, component, local TLS, tracker, DHT, media, and lifecycle checks.
+- `npm run e2e`: **4 specs and 17 tests passed** against the packaged
+  automation build.
+- `npm run package:check`: package, `verify:package`, `smoke:package`, and
+  `qualify:install` all pass. The verified artifact is arm64, carries bundle ID
+  `local.webtorrent-updated.desktop`, 5,192 ASAR entries, 16 Mach-O binaries,
+  and the reviewed `node-datachannel` hash; the three supervision scenarios
+  report `ready`, `ready`, and contained `stopped`; and the install
+  qualification copies the app outside the checkout, launches it, replaces the
+  bundle, and launches it again.
+- GitHub CI: the run at `856cb5c` passed clean install, artifact acquisition,
+  deterministic checks, native Electron E2E, and the package stage. The
+  remote-debugging-pipe probe that failed the earlier run is fixed and green.
+
+The interrupted `package:check` and the unobserved CI result recorded in the
+previous handoff are both resolved: they were rerun from the beginning and
+passed.
+
+The section 18.5 soak suite is implemented and runs as its own gate. See the
+Milestone 8 progress note for what it covers and what it deliberately does
+not.
+
+### 24.2 What still requires the owner
+
+These cannot be closed by any fixture, and none of them block review:
+
+- real use of the installed application: macOS handlers, playback, the watched
+  folder, the external player, menus, notifications, and dock behavior;
+- a lawful public v1 magnet in the packaged app, and a real browser peer
+  reached through a public tracker;
+- a personal profile preserved across a manual bundle replacement;
+- real legacy fixtures for the import path, beyond the synthetic profile the
+  end-to-end suite already proves byte-identical;
+- the two-hour Milestone 8 soak with real torrents; and
+- owner acceptance of the migrated app.
+
+### 24.3 Earlier snapshot
+
+Completed before the review-readiness pass:
 
 - the required read-only Apple Silicon pull-request workflow and clean,
   script-free artifact acquisition;
@@ -2502,56 +2561,22 @@ Completed in this snapshot:
   recovery, archive limits, chooser cancellation, packaged parser proof, and
   the Chromium remote-debugging smoke probe.
 
-Verified after the final local edits:
+Also verified in that snapshot: the focused staging-client suite passed
+**12 tests**, and a real WebTorrent teardown probe confirmed that the guarded
+listener is released normally despite the upstream `ERR_SERVER_NOT_RUNNING`
+destroy callback.
 
-- `npm test`: **74 files and 766 tests passed**, including format, lint,
-  TypeScript, Knip, unit, component, local TLS, tracker, DHT, media, and
-  lifecycle checks.
-- `npm run e2e`: **4 specs and 17 tests passed** after adding the torrent-export
-  bridge capability to the inventory and normalizing WebTorrent's expected
-  `ERR_SERVER_NOT_RUNNING` destroy callback when the staging inbound guard has
-  already closed its listener.
-- the focused staging-client suite passed **12 tests**, and a real WebTorrent
-  teardown probe confirmed that the guarded listener is released normally
-  despite the upstream callback.
-- The first live CI run at checkpoint `c145cda` passed clean install, artifact
-  acquisition, deterministic checks, and all 16 Electron E2E tests. Its package
-  stage found the invalid remote-debugging-pipe probe; that harness is fixed in
-  this snapshot but has not yet rerun on GitHub.
-
-Not rerun after the final staging/media edits:
-
-- `npm run package:check` was started but interrupted during `postPackage` when
-  the owner reiterated the pause; this is not a passing result and must be
-  rerun from the beginning;
-- launch of the rebuilt `.app` through Computer Use;
-- a real lawful magnet in the packaged app;
-- the post-push GitHub CI result; and
-- a final Greptile review of this snapshot.
-
-Post-handoff closure: work briefly resumed after this handoff was first written.
-Only the two narrowly scoped fixes above and their regression tests were kept.
-No further review, CI polling, packaging, application launch, or acceptance work
-was performed after the owner reiterated the pause.
-
-Recommended continuation order:
+### 24.4 Working notes for the next session
 
 1. Use `PATH=/opt/homebrew/opt/node@24/bin:$PATH` and confirm Node 24.18.0 /
-   npm 11.16.0.
-2. Run `npm run e2e`, then `npm run package:check`.
-3. Launch
-   `out/WebTorrent Updated-darwin-arm64/WebTorrent Updated.app` and try a
-   public-domain v1 magnet; cancel after metadata review if a large payload is
-   unnecessary.
-4. Inspect the new GitHub CI run and fix only observed regressions.
-5. Trigger at most one Greptile review, address actionable findings, and rerun
-   affected gates.
-6. Reconcile the milestone exits, exact evidence, and PR description. Keep the
-   PR in draft until the owner explicitly accepts it.
-
-Longer acceptance work remains unchanged: real legacy/trash-isolation fixtures,
-OS-level watched-folder/external-player/menu/notification/dock flows, the
-section 18.5 soak/resource suite, profile preservation, and owner acceptance.
+   npm 11.16.0. Every script asserts this itself and fails closed.
+2. `npm test`, `npm run e2e`, and `npm run package:check` are the fast gates;
+   `npm run soak` is the long one and is not part of them.
+3. To launch what was built:
+   `out/WebTorrent Updated-darwin-arm64/WebTorrent Updated.app`. A
+   public-domain v1 magnet can be cancelled after metadata review rather than
+   downloading a large payload.
+4. Keep the pull request in draft until the owner explicitly accepts it.
 
 ## 25. Maintenance policy after 1.0
 
