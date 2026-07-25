@@ -20,7 +20,11 @@ const generationId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
 type Handler = (event: unknown, value: unknown) => unknown
 
 function createHarness(
-  options: { chosenPath?: string; stateRevision?: number } = {}
+  options: {
+    chosenPath?: string
+    chosenSummary?: { fileCount: number; totalBytes: number }
+    stateRevision?: number
+  } = {}
 ): {
   choosePath: ReturnType<typeof vi.fn>
   cleanup: () => void
@@ -115,7 +119,10 @@ function createHarness(
     })
   } as unknown as AppStateStore
   const onBootstrap = vi.fn()
-  const choosePath = vi.fn(async () => options.chosenPath ?? null)
+  const choosePath = vi.fn(async () => ({
+    path: options.chosenPath ?? null,
+    summary: options.chosenSummary ?? null
+  }))
   const cleanup = registerDesktopIpc({
     choosePath,
     diagnostics,
@@ -342,9 +349,32 @@ describe('registerDesktopIpc', () => {
 
     expect(chosen).toMatchObject({
       ok: true,
-      value: { path: '/Users/owner/Movies' }
+      value: { path: '/Users/owner/Movies', summary: null }
     })
     expect(choosePath).toHaveBeenCalledWith('directory')
+  })
+
+  it('passes through the source measurement main took', async () => {
+    const { event, handlers } = createHarness({
+      chosenPath: '/Users/owner/Movies',
+      chosenSummary: { fileCount: 4, totalBytes: 9_000 }
+    })
+    const handler = handlers.get(DESKTOP_CHOOSE_PATH_CHANNEL)
+
+    const chosen = await handler?.(event, {
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: '11111111-1111-4111-8111-111111111112',
+      command: 'choosePath',
+      payload: { kind: 'source' }
+    })
+
+    expect(chosen).toMatchObject({
+      ok: true,
+      value: {
+        path: '/Users/owner/Movies',
+        summary: { fileCount: 4, totalBytes: 9_000 }
+      }
+    })
   })
 
   it('refuses a chooser request with an unknown kind', async () => {

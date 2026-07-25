@@ -1,7 +1,15 @@
 import { useCallback, useState } from 'react'
+import { prettyBytes } from '../lib/format'
 import { runCommand, type EngineFailure } from '../lib/engine-client'
 
-export type CreateTorrentProps = Readonly<{
+type Source = Readonly<{
+  fileCount: number | null
+  path: string
+  totalBytes: number | null
+}>
+
+export type CreateTorrentPageProps = Readonly<{
+  onCancel: () => void
   onCreated: () => void
   ready: boolean
 }>
@@ -10,18 +18,28 @@ function operationId(): string {
   return crypto.randomUUID()
 }
 
+function basename(value: string): string {
+  const parts = value.split('/').filter(part => part !== '')
+  return parts.at(-1) ?? value
+}
+
 /**
- * Creates a torrent from a file or folder the user picks in a main-owned
- * chooser. The renderer never enumerates the filesystem and never proposes a
- * path of its own; the engine revalidates whatever comes back.
+ * The original create-torrent screen: the chosen name as the heading, the file
+ * count and size beneath it, the path attribute, the advanced settings behind
+ * "Show advanced settings...", and the Cancel / Create Torrent pair. The source
+ * still comes from the main-owned chooser, so the renderer never enumerates
+ * the filesystem and never proposes a path of its own.
  */
-export function CreateTorrent({
+export function CreateTorrentPage({
+  onCancel,
   onCreated,
   ready
-}: CreateTorrentProps): React.JSX.Element {
-  const [sourcePath, setSourcePath] = useState<string | null>(null)
-  const [tracker, setTracker] = useState('')
+}: CreateTorrentPageProps): React.JSX.Element {
+  const [source, setSource] = useState<Source | null>(null)
+  const [trackers, setTrackers] = useState('')
+  const [comment, setComment] = useState('')
   const [isPrivate, setIsPrivate] = useState(false)
+  const [expanded, setExpanded] = useState(false)
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState<EngineFailure | null>(null)
   const [created, setCreated] = useState<string | null>(null)
@@ -36,12 +54,22 @@ export function CreateTorrent({
       })
       return
     }
-    if (result.value.path !== null) setSourcePath(result.value.path)
+    if (result.value.path === null) return
+    setSource({
+      fileCount: result.value.summary?.fileCount ?? null,
+      path: result.value.path,
+      totalBytes: result.value.summary?.totalBytes ?? null
+    })
   }, [])
 
   const create = useCallback(async () => {
-    if (sourcePath === null) return
-    const endpoint = tracker.trim()
+    if (source === null) return
+    const announceTiers = trackers
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line !== '')
+      .map(line => [line])
+    const description = comment.trim()
     setBusy(true)
     setFailure(null)
     setCreated(null)
@@ -51,12 +79,13 @@ export function CreateTorrent({
       payload: {
         allowHttpTrackers: false,
         allowPrivateNetwork: false,
-        announceTiers: endpoint === '' ? [] : [[endpoint]],
-        destinationRoot: sourcePath,
+        announceTiers,
+        destinationRoot: source.path,
         filterJunkFiles: true,
         operationId: operationId(),
         private: isPrivate,
-        sourcePath
+        sourcePath: source.path,
+        ...(description === '' ? {} : { comment: description })
       }
     })
     setBusy(false)
@@ -65,68 +94,138 @@ export function CreateTorrent({
       return
     }
     setCreated(outcome.value.torrent.name)
-    setSourcePath(null)
-    setTracker('')
+    setSource(null)
+    setTrackers('')
+    setComment('')
     setIsPrivate(false)
     onCreated()
-  }, [isPrivate, onCreated, sourcePath, tracker])
+  }, [comment, isPrivate, onCreated, source, trackers])
+
+  const torrentInfo =
+    source === null
+      ? null
+      : source.fileCount === null || source.totalBytes === null
+        ? source.path
+        : `${source.fileCount} files, ${prettyBytes(source.totalBytes)}`
 
   return (
-    <section aria-labelledby="create-torrent-heading">
-      <h2 id="create-torrent-heading">Create a torrent</h2>
+    <div className="create-torrent">
+      <h1>
+        {source === null
+          ? 'Create torrent'
+          : `Create torrent ${basename(source.path)}`}
+      </h1>
 
-      <div className="torrent-actions">
-        <button
-          disabled={busy}
-          onClick={() => void chooseSource()}
-          type="button"
-        >
-          Choose file or folder
-        </button>
-        <span className="torrent-meta">
-          {sourcePath ?? 'Nothing selected yet.'}
-        </span>
+      {source === null ? (
+        <p className="torrent-info">
+          Select the file or folder to share. Hidden files, starting with a .
+          character, are not included.
+        </p>
+      ) : (
+        <div className="torrent-info">{torrentInfo}</div>
+      )}
+
+      <div className="torrent-attribute">
+        <label>Path:</label>
+        <div>
+          {source === null ? (
+            <button
+              className="control"
+              disabled={busy}
+              onClick={() => void chooseSource()}
+              type="button"
+            >
+              Choose file or folder
+            </button>
+          ) : (
+            source.path
+          )}
+        </div>
       </div>
 
-      <label htmlFor="create-tracker">Tracker (optional)</label>
-      <input
-        id="create-tracker"
-        name="create-tracker"
-        onChange={event => setTracker(event.target.value)}
-        placeholder="https://tracker.example/announce"
-        type="url"
-        value={tracker}
-      />
+      <div className="show-more">
+        {expanded ? (
+          <div className="create-torrent-advanced">
+            <div className="torrent-attribute">
+              <label htmlFor="torrent-is-private">Private:</label>
+              <div>
+                <input
+                  checked={isPrivate}
+                  className="torrent-is-private control"
+                  id="torrent-is-private"
+                  onChange={event => setIsPrivate(event.target.checked)}
+                  type="checkbox"
+                />
+              </div>
+            </div>
+            <div className="torrent-attribute">
+              <label htmlFor="torrent-trackers">Trackers:</label>
+              <div>
+                <textarea
+                  className="torrent-trackers control"
+                  id="torrent-trackers"
+                  onChange={event => setTrackers(event.target.value)}
+                  rows={2}
+                  value={trackers}
+                />
+              </div>
+            </div>
+            <div className="torrent-attribute">
+              <label htmlFor="torrent-comment">Comment:</label>
+              <div>
+                <textarea
+                  className="torrent-comment control"
+                  id="torrent-comment"
+                  onChange={event => setComment(event.target.value)}
+                  placeholder="Optionally describe your torrent..."
+                  rows={2}
+                  value={comment}
+                />
+              </div>
+            </div>
+          </div>
+        ) : null}
+        <button
+          className="control"
+          onClick={() => setExpanded(current => !current)}
+          type="button"
+        >
+          {expanded ? 'Hide advanced settings...' : 'Show advanced settings...'}
+        </button>
+      </div>
 
-      <label htmlFor="create-private">
-        <input
-          checked={isPrivate}
-          id="create-private"
-          onChange={event => setIsPrivate(event.target.checked)}
-          type="checkbox"
-        />
-        {' Private torrent'}
-      </label>
-
-      <button
-        disabled={
-          busy ||
-          !ready ||
-          sourcePath === null ||
-          (isPrivate && tracker.trim() === '')
-        }
-        onClick={() => void create()}
-        type="button"
-      >
-        Create and seed
-      </button>
-
-      {created ? <p className="summary">{`Seeding ${created}.`}</p> : null}
-      {failure ? (
-        <p className="error" role="alert">
-          {failure.displayMessage}
-        </p>
+      {created ? (
+        <div className="torrent-info">{`Seeding ${created}.`}</div>
       ) : null}
-    </section>
+      {failure ? (
+        <div className="error" role="alert">
+          {failure.displayMessage}
+        </div>
+      ) : null}
+
+      <div className="float-right">
+        <button
+          className="control cancel"
+          disabled={busy}
+          onClick={onCancel}
+          type="button"
+        >
+          Cancel
+        </button>
+        <button
+          className="control create-torrent-button"
+          disabled={
+            busy ||
+            !ready ||
+            source === null ||
+            (isPrivate && trackers.trim() === '')
+          }
+          onClick={() => void create()}
+          type="button"
+        >
+          Create Torrent
+        </button>
+      </div>
+    </div>
   )
 }

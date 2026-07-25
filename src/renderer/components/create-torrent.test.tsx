@@ -6,13 +6,17 @@ import type {
   EngineCommand,
   TorrentCommandResult
 } from '../../shared/contracts'
-import { CreateTorrent } from './create-torrent'
+import { CreateTorrentPage } from './create-torrent'
 
 const INFO_HASH = '0123456789abcdef0123456789abcdef01234567'
 const SOURCE = '/Users/owner/Movies/clip.mp4'
 
 let commands: EngineCommand[] = []
 let chosenPath: string | null = SOURCE
+let chosenSummary: { fileCount: number; totalBytes: number } | null = {
+  fileCount: 3,
+  totalBytes: 2_500
+}
 let failNext: string | null = null
 
 function response(operation: EngineCommand): TorrentCommandResult {
@@ -71,6 +75,7 @@ function response(operation: EngineCommand): TorrentCommandResult {
 beforeEach(() => {
   commands = []
   chosenPath = SOURCE
+  chosenSummary = { fileCount: 3, totalBytes: 2_500 }
   failNext = null
   Object.defineProperty(window, 'desktop', {
     configurable: true,
@@ -80,7 +85,7 @@ beforeEach(() => {
           protocolVersion: 1,
           requestId: '00000000-0000-4000-8000-000000000002',
           ok: true,
-          value: { path: chosenPath }
+          value: { path: chosenPath, summary: chosenSummary }
         })
       ),
       getBootstrap: vi.fn(),
@@ -99,22 +104,25 @@ afterEach(() => {
   cleanup()
 })
 
-describe('CreateTorrent', () => {
+describe('CreateTorrentPage', () => {
   it('creates from a chosen source and seeds in place', async () => {
     const user = userEvent.setup()
     const onCreated = vi.fn()
-    render(<CreateTorrent onCreated={onCreated} ready />)
+    render(<CreateTorrentPage onCancel={vi.fn()} onCreated={onCreated} ready />)
 
     expect(
-      screen.getByRole('button', { name: 'Create and seed' })
+      screen.getByRole('button', { name: 'Create Torrent' })
     ).toHaveProperty('disabled', true)
 
     await user.click(
       screen.getByRole('button', { name: 'Choose file or folder' })
     )
     expect(await screen.findByText(SOURCE)).toBeDefined()
+    // The original showed the file count and total size under the heading.
+    expect(screen.getByText('3 files, 2.5 kB')).toBeDefined()
+    expect(screen.getByText('Create torrent clip.mp4')).toBeDefined()
 
-    await user.click(screen.getByRole('button', { name: 'Create and seed' }))
+    await user.click(screen.getByRole('button', { name: 'Create Torrent' }))
     await waitFor(() => expect(onCreated).toHaveBeenCalledOnce())
 
     const created = commands.at(-1)
@@ -133,19 +141,22 @@ describe('CreateTorrent', () => {
     expect(await screen.findByText('Seeding clip.mp4.')).toBeDefined()
   })
 
-  it('sends a typed tracker as one tier', async () => {
+  it('sends each advanced tracker line as one tier', async () => {
     const user = userEvent.setup()
-    render(<CreateTorrent onCreated={vi.fn()} ready />)
+    render(<CreateTorrentPage onCancel={vi.fn()} onCreated={vi.fn()} ready />)
 
     await user.click(
       screen.getByRole('button', { name: 'Choose file or folder' })
     )
     await screen.findByText(SOURCE)
+    await user.click(
+      screen.getByRole('button', { name: 'Show advanced settings...' })
+    )
     await user.type(
-      screen.getByLabelText('Tracker (optional)'),
+      screen.getByLabelText('Trackers:'),
       'https://tracker.example/announce'
     )
-    await user.click(screen.getByRole('button', { name: 'Create and seed' }))
+    await user.click(screen.getByRole('button', { name: 'Create Torrent' }))
 
     await waitFor(() =>
       expect(commands.at(-1)).toMatchObject({
@@ -156,44 +167,92 @@ describe('CreateTorrent', () => {
     )
   })
 
-  it('requires a tracker before a private torrent can be created', async () => {
+  it('sends the advanced comment when one is typed', async () => {
     const user = userEvent.setup()
-    render(<CreateTorrent onCreated={vi.fn()} ready />)
+    render(<CreateTorrentPage onCancel={vi.fn()} onCreated={vi.fn()} ready />)
 
     await user.click(
       screen.getByRole('button', { name: 'Choose file or folder' })
     )
     await screen.findByText(SOURCE)
-    await user.click(screen.getByLabelText(/Private torrent/u))
+    await user.click(
+      screen.getByRole('button', { name: 'Show advanced settings...' })
+    )
+    await user.type(screen.getByLabelText('Comment:'), 'Home video')
+    await user.click(screen.getByRole('button', { name: 'Create Torrent' }))
+
+    await waitFor(() =>
+      expect(commands.at(-1)).toMatchObject({
+        payload: { comment: 'Home video' }
+      })
+    )
+  })
+
+  it('requires a tracker before a private torrent can be created', async () => {
+    const user = userEvent.setup()
+    render(<CreateTorrentPage onCancel={vi.fn()} onCreated={vi.fn()} ready />)
+
+    await user.click(
+      screen.getByRole('button', { name: 'Choose file or folder' })
+    )
+    await screen.findByText(SOURCE)
+    await user.click(
+      screen.getByRole('button', { name: 'Show advanced settings...' })
+    )
+    await user.click(screen.getByLabelText('Private:'))
 
     expect(
-      screen.getByRole('button', { name: 'Create and seed' })
+      screen.getByRole('button', { name: 'Create Torrent' })
     ).toHaveProperty('disabled', true)
   })
 
   it('keeps its state when the chooser is cancelled', async () => {
     const user = userEvent.setup()
     chosenPath = null
-    render(<CreateTorrent onCreated={vi.fn()} ready />)
+    chosenSummary = null
+    render(<CreateTorrentPage onCancel={vi.fn()} onCreated={vi.fn()} ready />)
 
     await user.click(
       screen.getByRole('button', { name: 'Choose file or folder' })
     )
 
-    expect(screen.getByText('Nothing selected yet.')).toBeDefined()
+    expect(screen.getByText('Create torrent')).toBeDefined()
     expect(commands).toEqual([])
+  })
+
+  it('leaves the screen when the original Cancel button is used', async () => {
+    const user = userEvent.setup()
+    const onCancel = vi.fn()
+    render(<CreateTorrentPage onCancel={onCancel} onCreated={vi.fn()} ready />)
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    expect(onCancel).toHaveBeenCalledOnce()
+    expect(commands).toEqual([])
+  })
+
+  it('shows the path alone when main could not measure the source', async () => {
+    const user = userEvent.setup()
+    chosenSummary = null
+    render(<CreateTorrentPage onCancel={vi.fn()} onCreated={vi.fn()} ready />)
+
+    await user.click(
+      screen.getByRole('button', { name: 'Choose file or folder' })
+    )
+
+    await waitFor(() => expect(screen.getAllByText(SOURCE)).toHaveLength(2))
   })
 
   it('surfaces a rejected creation', async () => {
     const user = userEvent.setup()
-    render(<CreateTorrent onCreated={vi.fn()} ready />)
+    render(<CreateTorrentPage onCancel={vi.fn()} onCreated={vi.fn()} ready />)
 
     await user.click(
       screen.getByRole('button', { name: 'Choose file or folder' })
     )
     await screen.findByText(SOURCE)
     failNext = 'A selected tracker is not supported.'
-    await user.click(screen.getByRole('button', { name: 'Create and seed' }))
+    await user.click(screen.getByRole('button', { name: 'Create Torrent' }))
 
     expect(
       await screen.findByText('A selected tracker is not supported.')

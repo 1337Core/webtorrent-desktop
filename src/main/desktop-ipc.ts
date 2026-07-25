@@ -50,10 +50,16 @@ type DesktopIpcOptions = {
   openExternalPlayer?: (mediaUrl: string) => Promise<void>
   /** Lets main react to a saved preference, such as the watched folder. */
   onPreferencesChanged?: (preferences: AppState['preferences']) => void
-  /** Main owns the dialog; the renderer only receives the chosen path. */
+  /**
+   * Main owns the dialog; the renderer only receives the chosen path and, for
+   * a creation source, the file count and total size main measured itself.
+   */
   choosePath?: (
     kind: 'application' | 'directory' | 'source' | 'torrent-file'
-  ) => Promise<string | null>
+  ) => Promise<{
+    path: string | null
+    summary: { fileCount: number; totalBytes: number } | null
+  }>
   diagnostics: Diagnostics
   engineSupervisor: EngineSupervisor
   getEngineStatusEvent: () => EngineStatusEvent
@@ -323,12 +329,12 @@ export function registerDesktopIpc(options: DesktopIpcOptions): () => void {
 
       const chosen = choosePath
         ? await choosePath(request.data.payload.kind)
-        : null
+        : { path: null, summary: null }
       return choosePathResultSchema.parse({
         protocolVersion: PROTOCOL_VERSION,
         requestId: request.data.requestId,
         ok: true,
-        value: { path: chosen }
+        value: { path: chosen.path, summary: chosen.summary }
       })
     }
   )

@@ -153,7 +153,18 @@ These are explicit risk reductions:
 
 ### 4.3 Deliberate non-goals
 
+**Owner instruction, 2026-07-25: the interface does not change.** The
+migrated application presents the same interface as the original WebTorrent
+Desktop — same layout, same navigation, same screens, same visual identity —
+and adds no new user-facing feature. The migration replaces the technology
+underneath the interface, not the interface. Reproducing an original screen is
+required work; introducing a new screen, control, or affordance is not
+permitted without an explicit amendment. The only visible differences are the
+intentional removals already listed in section 4.2, which appear as absent
+controls rather than as replacements.
+
 - no visual redesign during migration;
+- no new user-facing feature, screen, control, or affordance;
 - no search, catalog, RSS, remote-control, account, sync, or library feature;
 - no browser extension;
 - no App Store submission or public distribution pipeline;
@@ -1479,6 +1490,15 @@ Replace it with local accessible primitives:
 
 Use existing CSS plus a small set of CSS custom properties for light/dark theme
 tokens. Preserve the current visual identity; this is not a redesign.
+
+Interface parity is a completion gate, not a preference. The original
+renderer's structure is the specification: the same header and navigation, the
+same torrent-list rows and their controls, the same create-torrent and
+preferences screens, and the same stylesheet-derived look. Port each original
+screen; do not invent a replacement layout. Where a removed feature owned part
+of a screen, that part is absent and nothing takes its place. The original
+sources remain available in this branch's history and are the reference for
+every ported screen.
 
 ### 11.3 Renderer behavior
 

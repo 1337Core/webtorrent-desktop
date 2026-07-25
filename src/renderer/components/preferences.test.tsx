@@ -2,7 +2,7 @@
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Preferences } from './preferences'
+import { PreferencesPage } from './preferences'
 
 const CHOSEN = '/Users/owner/Movies'
 
@@ -48,7 +48,7 @@ beforeEach(() => {
           protocolVersion: 1,
           requestId: '00000000-0000-4000-8000-000000000002',
           ok: true,
-          value: { path: chosenPath }
+          value: { path: chosenPath, summary: null }
         })
       ),
       getBootstrap: vi.fn(),
@@ -65,12 +65,12 @@ afterEach(() => {
   cleanup()
 })
 
-describe('Preferences', () => {
+describe('PreferencesPage', () => {
   it('saves a folder chosen in the main-owned dialog', async () => {
     const user = userEvent.setup()
     const onChanged = vi.fn()
     render(
-      <Preferences
+      <PreferencesPage
         onChanged={onChanged}
         preferences={{
           downloadRoot: null,
@@ -80,9 +80,12 @@ describe('Preferences', () => {
       />
     )
 
-    expect(screen.getByText('No download folder yet.')).toBeDefined()
+    expect(screen.getByLabelText('Download location:')).toHaveProperty(
+      'value',
+      ''
+    )
     await user.click(
-      screen.getByRole('button', { name: 'Change download folder' })
+      screen.getByRole('button', { name: 'Change Download location' })
     )
 
     await waitFor(() =>
@@ -98,7 +101,7 @@ describe('Preferences', () => {
     const onChanged = vi.fn()
     chosenPath = null
     render(
-      <Preferences
+      <PreferencesPage
         onChanged={onChanged}
         preferences={{
           downloadRoot: '/Users/owner/Downloads',
@@ -109,12 +112,12 @@ describe('Preferences', () => {
     )
 
     await user.click(
-      screen.getByRole('button', { name: 'Change download folder' })
+      screen.getByRole('button', { name: 'Change Download location' })
     )
 
     await waitFor(() =>
       expect(
-        screen.getByRole('button', { name: 'Change download folder' })
+        screen.getByRole('button', { name: 'Change Download location' })
       ).toHaveProperty('disabled', false)
     )
     expect(setPreferences).not.toHaveBeenCalled()
@@ -125,7 +128,7 @@ describe('Preferences', () => {
     const user = userEvent.setup()
     saveFails = true
     render(
-      <Preferences
+      <PreferencesPage
         onChanged={vi.fn()}
         preferences={{
           downloadRoot: null,
@@ -136,7 +139,7 @@ describe('Preferences', () => {
     )
 
     await user.click(
-      screen.getByRole('button', { name: 'Change download folder' })
+      screen.getByRole('button', { name: 'Change Download location' })
     )
 
     expect(

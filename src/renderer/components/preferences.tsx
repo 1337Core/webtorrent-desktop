@@ -6,20 +6,91 @@ type PreferenceValues = Readonly<{
   torrentsFolder: string | null
 }>
 
-export type PreferencesProps = Readonly<{
+export type PreferencesPageProps = Readonly<{
   onChanged: (preferences: PreferenceValues) => void
   preferences: PreferenceValues
 }>
 
+type PathRowProps = Readonly<{
+  busy: boolean
+  onChange: () => void
+  onClear?: () => void
+  title: string
+  value: string | null
+}>
+
 /**
- * The only preference the first release exposes. The folder always comes from
- * the main-owned chooser and main validates it before persisting, so the
- * renderer never stores a path of its own.
+ * The original path selector: a label, the current value in a disabled field,
+ * and a Change button that opens the main-owned dialog.
  */
-export function Preferences({
+function PathSelector({
+  busy,
+  onChange,
+  onClear,
+  title,
+  value
+}: PathRowProps): React.JSX.Element {
+  const id = title.replaceAll(' ', '-').toLowerCase()
+  return (
+    <div className="path-selector">
+      <div className="label">
+        <label htmlFor={id}>{`${title}:`}</label>
+      </div>
+      <input
+        className="control"
+        disabled
+        id={id}
+        readOnly
+        value={value ?? ''}
+      />
+      <button
+        aria-label={`Change ${title}`}
+        className="control"
+        disabled={busy}
+        onClick={onChange}
+        type="button"
+      >
+        Change
+      </button>
+      {onClear && value !== null ? (
+        <button
+          aria-label={`Clear ${title}`}
+          className="control"
+          disabled={busy}
+          onClick={onClear}
+          type="button"
+        >
+          Clear
+        </button>
+      ) : null}
+    </div>
+  )
+}
+
+function PreferencesSection({
+  children,
+  title
+}: Readonly<{
+  children: React.ReactNode
+  title: string
+}>): React.JSX.Element {
+  return (
+    <div className="preferences-section">
+      <h2>{title}</h2>
+      {children}
+    </div>
+  )
+}
+
+/**
+ * The original preferences screen, section by section, carrying the settings
+ * this release keeps. Every path comes from the main-owned chooser and main
+ * validates it before persisting, so the renderer never stores one of its own.
+ */
+export function PreferencesPage({
   onChanged,
   preferences
-}: PreferencesProps): React.JSX.Element {
+}: PreferencesPageProps): React.JSX.Element {
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState<string | null>(null)
 
@@ -74,75 +145,56 @@ export function Preferences({
   )
 
   return (
-    <section aria-labelledby="preferences-heading">
-      <h2 id="preferences-heading">Preferences</h2>
-      <div className="torrent-actions">
-        <button
-          disabled={busy}
-          onClick={() =>
-            void choose('directory', downloadRoot => ({ downloadRoot }))
-          }
-          type="button"
-        >
-          Change download folder
-        </button>
-        <span className="torrent-meta">
-          {preferences.downloadRoot ?? 'No download folder yet.'}
-        </span>
-      </div>
+    <div className="preferences">
+      <PreferencesSection title="Folders">
+        <div className="preference">
+          <PathSelector
+            busy={busy}
+            onChange={() =>
+              void choose('directory', downloadRoot => ({ downloadRoot }))
+            }
+            title="Download location"
+            value={preferences.downloadRoot}
+          />
+        </div>
+        <div className="preference">
+          <PathSelector
+            busy={busy}
+            onChange={() =>
+              void choose('directory', torrentsFolder => ({ torrentsFolder }))
+            }
+            onClear={() => void clear({ torrentsFolder: null })}
+            title="Folder to watch"
+            value={preferences.torrentsFolder}
+          />
+          <p>New .torrent files in this folder are added immediately.</p>
+        </div>
+      </PreferencesSection>
 
-      <div className="torrent-actions">
-        <button
-          disabled={busy}
-          onClick={() =>
-            void choose('directory', torrentsFolder => ({ torrentsFolder }))
-          }
-          type="button"
-        >
-          Watch a folder for torrents
-        </button>
-        <span className="torrent-meta">
-          {preferences.torrentsFolder ?? 'No folder is watched.'}
-        </span>
-        {preferences.torrentsFolder === null ? null : (
-          <button
-            disabled={busy}
-            onClick={() => void clear({ torrentsFolder: null })}
-            type="button"
-          >
-            Stop watching
-          </button>
-        )}
-      </div>
+      <PreferencesSection title="Playback">
+        <div className="preference">
+          <p>
+            {preferences.externalPlayer === null
+              ? 'Torrent media files play in WebTorrent.'
+              : 'Torrent media files play in the chosen player if WebTorrent cannot play them.'}
+          </p>
+          <PathSelector
+            busy={busy}
+            onChange={() =>
+              void choose('application', externalPlayer => ({ externalPlayer }))
+            }
+            onClear={() => void clear({ externalPlayer: null })}
+            title="External player"
+            value={preferences.externalPlayer}
+          />
+        </div>
+      </PreferencesSection>
 
-      <div className="torrent-actions">
-        <button
-          disabled={busy}
-          onClick={() =>
-            void choose('application', externalPlayer => ({ externalPlayer }))
-          }
-          type="button"
-        >
-          Choose an external player
-        </button>
-        <span className="torrent-meta">
-          {preferences.externalPlayer ?? 'No external player is configured.'}
-        </span>
-        {preferences.externalPlayer === null ? null : (
-          <button
-            disabled={busy}
-            onClick={() => void clear({ externalPlayer: null })}
-            type="button"
-          >
-            Clear player
-          </button>
-        )}
-      </div>
       {failure ? (
-        <p className="error" role="alert">
+        <div className="error" role="alert">
           {failure}
-        </p>
+        </div>
       ) : null}
-    </section>
+    </div>
   )
 }

@@ -49,6 +49,7 @@ import { installAppMenu } from './app-menu'
 import { ExternalPlayer } from './external-player'
 import { FolderWatcher } from './folder-watcher'
 import { DesktopNotifier, DockBadge, PowerSaveGuard } from './os-integration'
+import { measureSource } from './source-summary'
 import { TorrentHandlers } from './torrent-handlers'
 import { AppStateStore } from './state-store'
 import { TRUSTED_RENDERER_URL } from './trusted-renderer'
@@ -690,7 +691,10 @@ function createMainWindow(runtime: RuntimeInfo): BrowserWindow {
   const chooseUserPath = async (
     owner: BrowserWindow,
     kind: 'application' | 'directory' | 'source' | 'torrent-file'
-  ): Promise<string | null> => {
+  ): Promise<{
+    path: string | null
+    summary: { fileCount: number; totalBytes: number } | null
+  }> => {
     const properties: Array<'openDirectory' | 'openFile'> =
       kind === 'directory' ? ['openDirectory'] : ['openFile']
     if (kind === 'source') properties.push('openDirectory')
@@ -703,8 +707,13 @@ function createMainWindow(runtime: RuntimeInfo): BrowserWindow {
       properties,
       securityScopedBookmarks: false
     })
-    if (result.canceled) return null
-    return result.filePaths[0] ?? null
+    if (result.canceled) return { path: null, summary: null }
+    const chosen = result.filePaths[0] ?? null
+    if (chosen === null) return { path: null, summary: null }
+    return {
+      path: chosen,
+      summary: kind === 'source' ? await measureSource(chosen) : null
+    }
   }
 
   const externalPlayer = new ExternalPlayer({

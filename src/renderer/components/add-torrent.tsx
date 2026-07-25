@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { prettyBytes } from '../lib/format'
 import {
   runCommand,
   type EngineFailure,
@@ -18,7 +19,7 @@ const WARNING_LABELS: Readonly<Record<string, string>> = {
   XS_REMOVED: 'An exact-source parameter was removed.'
 }
 
-export type AddTorrentProps = Readonly<{
+export type AddTorrentModalProps = Readonly<{
   /** Absent until main has resolved the download root. */
   downloadRoot: string | null
   /** A validated open request from Finder or a magnet link. */
@@ -27,20 +28,23 @@ export type AddTorrentProps = Readonly<{
     | { kind: 'torrent-file'; torrentPath: string }
   > | null
   onAdded: () => void
+  onCancel: () => void
   ready: boolean
 }>
 
 /**
- * The two-phase add. A remote `.torrent` is prepared first so its name, size,
- * and warnings can be reviewed, and only an explicit confirmation commits it
- * to disk. Nothing is written before that.
+ * The original "open torrent address" modal. Its shape is unchanged — a label,
+ * one address field, and the CANCEL/OK pair — but OK now runs the two-phase
+ * add from section 9.8: the manifest is prepared and shown in the same modal,
+ * and only the second OK commits it to disk.
  */
-export function AddTorrent({
+export function AddTorrentModal({
   downloadRoot,
   intent = null,
   onAdded,
+  onCancel,
   ready
-}: AddTorrentProps): React.JSX.Element {
+}: AddTorrentModalProps): React.JSX.Element {
   const [url, setUrl] = useState('')
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState<EngineFailure | null>(null)
@@ -159,18 +163,22 @@ export function AddTorrent({
     [preparation, selected]
   )
 
-  const discard = useCallback(async () => {
-    if (!preparation) return
-    setBusy(true)
-    await runCommand({
-      command: 'discard-preparation',
-      payload: { preparationId: preparation.preparationId }
-    })
-    setBusy(false)
-    setPreparation(null)
-    setFiles([])
-    setSelected(new Set())
-  }, [preparation])
+  // CANCEL always leaves the engine clean: an open preparation is discarded
+  // rather than left holding its reservation.
+  const cancel = useCallback(async () => {
+    if (preparation) {
+      setBusy(true)
+      await runCommand({
+        command: 'discard-preparation',
+        payload: { preparationId: preparation.preparationId }
+      })
+      setBusy(false)
+      setPreparation(null)
+      setFiles([])
+      setSelected(new Set())
+    }
+    onCancel()
+  }, [onCancel, preparation])
 
   const commit = useCallback(async () => {
     if (!preparation || downloadRoot === null) return
@@ -196,89 +204,98 @@ export function AddTorrent({
   }, [downloadRoot, onAdded, preparation])
 
   return (
-    <section aria-labelledby="add-torrent-heading">
-      <h2 id="add-torrent-heading">Add a torrent</h2>
-
+    <form
+      className="open-torrent-address-modal"
+      onSubmit={event => {
+        event.preventDefault()
+        if (preparation) void commit()
+        else void prepare()
+      }}
+    >
       {preparation ? (
         <div className="preparation">
-          <p className="torrent-name">{preparation.name}</p>
-          <p className="torrent-meta">
-            {`${preparation.fileCount} files · ${preparation.length} bytes${
-              preparation.private ? ' · private' : ''
-            }`}
+          <p>
+            <label>{preparation.name}</label>
           </p>
-          {preparation.warnings.length > 0 ? (
-            <ul className="warnings">
-              {preparation.warnings.map(warning => (
-                <li key={warning}>{WARNING_LABELS[warning] ?? warning}</li>
-              ))}
-            </ul>
-          ) : null}
+          <div className="torrent-info">
+            {`${preparation.fileCount} files, ${prettyBytes(preparation.length)}${
+              preparation.private ? ', private' : ''
+            }`}
+          </div>
+          {preparation.warnings.map(warning => (
+            <div className="torrent-info" key={warning}>
+              {WARNING_LABELS[warning] ?? warning}
+            </div>
+          ))}
           {files.length > 0 ? (
-            <ul className="file-list">
+            <div className="file-list">
               {files.map(file => (
-                <li key={file.index}>
-                  <label>
+                <div key={file.index}>
+                  <label className="control checkbox">
                     <input
                       checked={selected.has(file.index)}
                       onChange={() => void toggleFile(file)}
                       type="checkbox"
                     />
-                    {` ${file.path} (${file.length} bytes)`}
+                    <span>{`${file.path} (${prettyBytes(file.length)})`}</span>
                   </label>
-                </li>
+                </div>
               ))}
-            </ul>
+            </div>
           ) : null}
-          <p className="torrent-meta">
+          <div className="torrent-info">
             {downloadRoot === null
               ? 'No download folder is available yet.'
               : `Saving to ${downloadRoot}`}
-          </p>
-          <div className="torrent-actions">
-            <button
-              disabled={busy || downloadRoot === null}
-              onClick={() => void commit()}
-              type="button"
-            >
-              Start download
-            </button>
-            <button
-              disabled={busy}
-              onClick={() => void discard()}
-              type="button"
-            >
-              Discard
-            </button>
           </div>
         </div>
       ) : (
-        <form
-          onSubmit={event => {
-            event.preventDefault()
-            void prepare()
-          }}
-        >
-          <label htmlFor="torrent-url">Torrent file URL</label>
-          <input
-            id="torrent-url"
-            name="torrent-url"
-            onChange={event => setUrl(event.target.value)}
-            placeholder="https://example.com/file.torrent"
-            type="url"
-            value={url}
-          />
-          <button disabled={busy || !ready || url.trim() === ''} type="submit">
-            Prepare
-          </button>
-        </form>
+        <>
+          <p>
+            <label htmlFor="torrent-address-field">
+              Enter torrent address or magnet link
+            </label>
+          </p>
+          <div>
+            <input
+              autoFocus
+              className="control"
+              id="torrent-address-field"
+              name="torrent-address-field"
+              onChange={event => setUrl(event.target.value)}
+              type="text"
+              value={url}
+            />
+          </div>
+        </>
       )}
 
       {failure ? (
-        <p className="error" role="alert">
+        <div className="error" role="alert">
           {failure.displayMessage}
-        </p>
+        </div>
       ) : null}
-    </section>
+
+      <div className="float-right">
+        <button
+          className="control cancel"
+          disabled={busy}
+          onClick={() => void cancel()}
+          type="button"
+        >
+          CANCEL
+        </button>
+        <button
+          className="control ok"
+          disabled={
+            busy ||
+            (preparation ? downloadRoot === null : !ready || url.trim() === '')
+          }
+          type="submit"
+        >
+          OK
+        </button>
+      </div>
+    </form>
   )
 }

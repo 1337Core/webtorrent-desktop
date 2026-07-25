@@ -1,22 +1,31 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import type { BootstrapSnapshot, EngineStatus } from '../shared/contracts'
-import { AddTorrent } from './components/add-torrent'
-import { CreateTorrent } from './components/create-torrent'
+import { AddTorrentModal } from './components/add-torrent'
+import { CreateTorrentPage } from './components/create-torrent'
+import { Header } from './components/header'
 import { MediaPlayer } from './components/media-player'
-import { Preferences } from './components/preferences'
+import { PreferencesPage } from './components/preferences'
 import { TorrentList } from './components/torrent-list'
 
-function engineLabel(status: EngineStatus): string {
-  switch (status.state) {
-    case 'ready':
-      return `WebTorrent ${status.webTorrentVersion} · native WebRTC ready`
-    case 'restarting':
-      return 'Engine stopped unexpectedly · restarting once…'
-    case 'stopped':
-      return status.message
-    case 'starting':
-      return 'Checking the native WebRTC engine…'
-  }
+type Location = 'create-torrent' | 'home' | 'player' | 'preferences'
+
+type Preferences = {
+  downloadRoot: string | null
+  externalPlayer: string | null
+  torrentsFolder: string | null
+}
+
+type Playing = {
+  fileIndex: number
+  fileName: string
+  infoHash: string
+}
+
+const TITLES: Readonly<Record<Location, string>> = {
+  'create-torrent': 'Create torrent',
+  home: 'WebTorrent Updated',
+  player: 'WebTorrent Updated',
+  preferences: 'Preferences'
 }
 
 function hasPrivilegedRendererGlobal(): boolean {
@@ -25,6 +34,11 @@ function hasPrivilegedRendererGlobal(): boolean {
   )
 }
 
+/**
+ * The application shell, laid out as the original: a header above one page of
+ * content, with a modal over the top. The screens are the ones the original
+ * had, minus the features section 4.2 removes.
+ */
 export function App(): React.JSX.Element {
   const rendererBoundaryFailed = hasPrivilegedRendererGlobal()
   const [bootstrap, setBootstrap] = useState<BootstrapSnapshot | null>(null)
@@ -38,90 +52,81 @@ export function App(): React.JSX.Element {
       ? 'The renderer trust boundary failed; torrent controls remain disabled.'
       : null
   )
-  const [restartPending, setRestartPending] = useState(false)
-  const [listRevision, setListRevision] = useState(0)
-  const [preferences, setPreferences] = useState<{
-    downloadRoot: string | null
-    externalPlayer: string | null
-    torrentsFolder: string | null
-  }>({ downloadRoot: null, externalPlayer: null, torrentsFolder: null })
+  const [preferences, setPreferences] = useState<Preferences>({
+    downloadRoot: null,
+    externalPlayer: null,
+    torrentsFolder: null
+  })
+  const [location, setLocation] = useState<Location>('home')
+  const [modalOpen, setModalOpen] = useState(false)
   const [openIntent, setOpenIntent] = useState<
     | { kind: 'magnet'; magnet: string }
     | { kind: 'torrent-file'; torrentPath: string }
     | null
   >(null)
-  const [focused, setFocused] = useState<
-    'add-torrent' | 'create-torrent' | 'preferences' | null
-  >(null)
-  const [playing, setPlaying] = useState<{
-    fileIndex: number
-    fileName: string
-    infoHash: string
-  } | null>(null)
+  const [playing, setPlaying] = useState<Playing | null>(null)
+  const [listRevision, setListRevision] = useState(0)
 
-  // A menu action only asks the renderer to surface a section; it never
-  // performs the action itself.
   useEffect(() => {
     if (rendererBoundaryFailed) return undefined
-    return window.desktop.onOpenIntent(setOpenIntent)
+    return window.desktop.onEngineStatus(setEngineStatus)
+  }, [rendererBoundaryFailed])
+
+  useEffect(() => {
+    if (rendererBoundaryFailed) return undefined
+    return window.desktop.onOpenIntent(intent => {
+      setOpenIntent(intent)
+      setLocation('home')
+      setModalOpen(true)
+    })
   }, [rendererBoundaryFailed])
 
   useEffect(() => {
     if (rendererBoundaryFailed) return undefined
     return window.desktop.onMenuAction(action => {
-      setFocused(action)
-      document.getElementById(`${action}-heading`)?.scrollIntoView({
-        behavior: 'smooth'
-      })
+      if (action === 'add-torrent') {
+        setLocation('home')
+        setModalOpen(true)
+        return
+      }
+      setLocation(action)
     })
   }, [rendererBoundaryFailed])
 
   useEffect(() => {
+    if (rendererBoundaryFailed) return undefined
     let active = true
-    if (rendererBoundaryFailed) {
-      return () => {
-        active = false
-      }
-    }
-
-    const unsubscribe = window.desktop.onEngineStatus(status => {
-      if (active) setEngineStatus(status)
-    })
-
-    void window.desktop.getBootstrap().then(result => {
-      if (!active) return
-      if (!result.ok) {
-        setStartupError(result.error.displayMessage)
-        return
-      }
-
-      setBootstrap(result.value)
-      setPreferences(result.value.state.preferences)
-      setEngineStatus(result.value.engineStatusEvent.status)
-    })
-
+    const timer = setTimeout(() => {
+      void window.desktop.getBootstrap().then(result => {
+        if (!active) return
+        if (!result.ok) {
+          setStartupError(result.error.displayMessage)
+          return
+        }
+        setBootstrap(result.value)
+        setPreferences(result.value.state.preferences)
+        setEngineStatus(result.value.engineStatusEvent.status)
+      })
+    }, 0)
     return () => {
       active = false
-      unsubscribe()
+      clearTimeout(timer)
     }
   }, [rendererBoundaryFailed])
 
-  async function restartEngine(): Promise<void> {
-    setRestartPending(true)
-    const result = await window.desktop.restartEngine()
-    setRestartPending(false)
-    if (result.ok) {
-      setStartupError(null)
-      setEngineStatus(result.value.status)
-    } else {
-      setStartupError(result.error.displayMessage)
-    }
-  }
-
-  const statusLabel = engineLabel(engineStatus)
+  const ready = engineStatus.state === 'ready'
+  const closeModal = useCallback(() => {
+    setModalOpen(false)
+    setOpenIntent(null)
+  }, [])
+  const play = useCallback((selection: Playing) => {
+    setPlaying(selection)
+    setLocation('player')
+  }, [])
 
   return (
-    <main
+    <div
+      className="app is-darwin"
       data-bootstrap-ready={bootstrap !== null}
       data-renderer-boundary={rendererBoundaryFailed ? 'failed' : 'passed'}
     >
@@ -135,78 +140,74 @@ export function App(): React.JSX.Element {
         tabIndex={-1}
         type="button"
       />
-      <p className="eyebrow">Apple Silicon modernization</p>
-      <h1>WebTorrent Updated</h1>
-      <p className="summary">
-        Apple Silicon build with a sandboxed renderer and a supervised torrent
-        engine.
-      </p>
 
-      <section aria-labelledby="runtime-heading">
-        <div>
-          <h2 id="runtime-heading">Runtime</h2>
-          <p>
-            {bootstrap
-              ? `${bootstrap.runtime.architecture} · macOS · Electron ${bootstrap.runtime.electronVersion}`
-              : 'Loading main-owned runtime information…'}
-          </p>
-        </div>
-        <div className="status-group">
-          <span className={`status status-${engineStatus.state}`} role="status">
-            {statusLabel}
-          </span>
-          {engineStatus.state === 'stopped' ? (
-            <button
-              disabled={restartPending}
-              onClick={() => void restartEngine()}
-              type="button"
-            >
-              {restartPending ? 'Restarting…' : 'Restart engine'}
-            </button>
-          ) : null}
-        </div>
-      </section>
+      <Header
+        canGoBack={location !== 'home'}
+        onAdd={() => setModalOpen(true)}
+        onBack={() => {
+          setPlaying(null)
+          setLocation('home')
+        }}
+        showAdd={location === 'home' && ready}
+        title={TITLES[location]}
+      />
 
-      <div data-focused-section={focused ?? undefined}>
-        <Preferences onChanged={setPreferences} preferences={preferences} />
+      <div className={`error-popover ${startupError ? 'visible' : 'hidden'}`}>
+        <div className="title">Error</div>
+        {startupError ? <div className="error">{startupError}</div> : null}
       </div>
 
-      <AddTorrent
-        downloadRoot={preferences.downloadRoot}
-        intent={openIntent}
-        onAdded={() => {
-          setOpenIntent(null)
-          setListRevision(revision => revision + 1)
-        }}
-        ready={engineStatus.state === 'ready'}
-      />
+      <div className="content">
+        {location === 'home' ? (
+          <TorrentList active={ready} key={listRevision} onPlay={play} />
+        ) : null}
+        {location === 'create-torrent' ? (
+          <CreateTorrentPage
+            onCancel={() => setLocation('home')}
+            onCreated={() => {
+              setListRevision(revision => revision + 1)
+              setLocation('home')
+            }}
+            ready={ready}
+          />
+        ) : null}
+        {location === 'preferences' ? (
+          <PreferencesPage
+            onChanged={setPreferences}
+            preferences={preferences}
+          />
+        ) : null}
+        {location === 'player' && playing ? (
+          <MediaPlayer
+            externalPlayerConfigured={preferences.externalPlayer !== null}
+            fileIndex={playing.fileIndex}
+            fileName={playing.fileName}
+            infoHash={playing.infoHash}
+            onClose={() => {
+              setPlaying(null)
+              setLocation('home')
+            }}
+          />
+        ) : null}
+      </div>
 
-      <CreateTorrent
-        onCreated={() => setListRevision(revision => revision + 1)}
-        ready={engineStatus.state === 'ready'}
-      />
-
-      <TorrentList
-        active={engineStatus.state === 'ready'}
-        key={listRevision}
-        onPlay={setPlaying}
-      />
-
-      {playing ? (
-        <MediaPlayer
-          externalPlayerConfigured={preferences.externalPlayer !== null}
-          fileIndex={playing.fileIndex}
-          fileName={playing.fileName}
-          infoHash={playing.infoHash}
-          onClose={() => setPlaying(null)}
-        />
+      {modalOpen ? (
+        <div className="modal">
+          <div className="modal-background" />
+          <div className="modal-content">
+            <AddTorrentModal
+              downloadRoot={preferences.downloadRoot}
+              intent={openIntent}
+              onAdded={() => {
+                setListRevision(revision => revision + 1)
+                closeModal()
+              }}
+              onCancel={closeModal}
+              ready={ready}
+            />
+          </div>
+        </div>
       ) : null}
-
-      {startupError ? (
-        <p className="error" role="alert">
-          {startupError}
-        </p>
-      ) : null}
-    </main>
+    </div>
   )
 }

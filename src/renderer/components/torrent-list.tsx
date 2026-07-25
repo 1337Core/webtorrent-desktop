@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { calculateEta, prettyBytes } from '../lib/format'
 import {
   runCommand,
   type EngineFailure,
@@ -7,37 +8,29 @@ import {
 
 const TORRENT_LIST_REFRESH_MS = 1_000
 const PAGE_LIMIT = 64
+const PLAYABLE = /\.(m4a|m4b|m4p|m4v|mkv|mov|mp3|mp4|ogg|wav|webm)$/iu
 
 type TorrentSummary = EngineValue<'list-torrents'>['items'][number]
 type TorrentFile = EngineValue<'get-torrent-files'>['items'][number]
 
-const STATE_LABELS: Readonly<Record<TorrentSummary['state'], string>> = {
-  checking: 'Checking',
-  downloading: 'Downloading',
-  error: 'Error',
-  paused: 'Paused',
-  seeding: 'Seeding',
-  stopped: 'Stopped'
-}
-
-function formatBytes(value: number): string {
-  if (value < 1_000) return `${value} B`
-  const units = ['kB', 'MB', 'GB', 'TB']
-  let scaled = value / 1_000
-  let unit = 0
-  while (scaled >= 1_000 && unit < units.length - 1) {
-    scaled /= 1_000
-    unit += 1
+function statusLabel(torrent: TorrentSummary): string {
+  switch (torrent.state) {
+    case 'checking':
+      return 'Verifying'
+    case 'downloading':
+      return 'Downloading'
+    case 'error':
+      return 'Error'
+    case 'paused':
+      return torrent.progress === 1 ? 'Not seeding' : 'Paused'
+    case 'seeding':
+      return 'Seeding'
+    case 'stopped':
+      return ''
   }
-  return `${scaled.toFixed(scaled < 10 ? 1 : 0)} ${units[unit]}`
-}
-
-function formatRate(value: number): string {
-  return value > 0 ? `${formatBytes(value)}/s` : '—'
 }
 
 export type TorrentListProps = Readonly<{
-  /** Disabled while the engine is not ready; the list stops polling. */
   active: boolean
   onPlay: (
     selection: Readonly<{
@@ -50,9 +43,9 @@ export type TorrentListProps = Readonly<{
 }>
 
 /**
- * The torrent list. It owns no torrent state of its own: every row comes from
- * the engine's bounded page, and each action re-reads the page rather than
- * guessing what the engine did.
+ * The original torrent list: one row per torrent with its name, a download
+ * checkbox, status, progress bar and figures, and the remove control,
+ * expanding to the file table when the row is selected.
  */
 export function TorrentList({
   active,
@@ -62,7 +55,7 @@ export function TorrentList({
   const [torrents, setTorrents] = useState<ReadonlyArray<TorrentSummary>>([])
   const [failure, setFailure] = useState<EngineFailure | null>(null)
   const [pending, setPending] = useState<string | null>(null)
-  const [expanded, setExpanded] = useState<string | null>(null)
+  const [selected, setSelected] = useState<string | null>(null)
   const [files, setFiles] = useState<ReadonlyArray<TorrentFile>>([])
   const mounted = useRef(true)
 
@@ -89,7 +82,6 @@ export function TorrentList({
 
   useEffect(() => {
     if (!active) return undefined
-    // Deferred so the first read happens after the effect, not during it.
     const first = setTimeout(() => void refresh(), 0)
     const timer = setInterval(() => void refresh(), refreshMs)
     return () => {
@@ -98,10 +90,10 @@ export function TorrentList({
     }
   }, [active, refresh, refreshMs])
 
-  const showFiles = useCallback(
+  const select = useCallback(
     async (infoHash: string) => {
-      if (expanded === infoHash) {
-        setExpanded(null)
+      if (selected === infoHash) {
+        setSelected(null)
         setFiles([])
         return
       }
@@ -114,10 +106,10 @@ export function TorrentList({
         setFailure(outcome.error)
         return
       }
-      setExpanded(infoHash)
+      setSelected(infoHash)
       setFiles(outcome.value.items)
     },
-    [expanded]
+    [selected]
   )
 
   const act = useCallback(
@@ -144,102 +136,135 @@ export function TorrentList({
     [refresh]
   )
 
-  if (torrents.length === 0) {
-    return (
-      <section aria-labelledby="torrents-heading">
-        <h2 id="torrents-heading">Torrents</h2>
-        {failure ? (
-          <p className="error" role="alert">
-            {failure.displayMessage}
-          </p>
-        ) : (
-          <p className="summary">No torrents yet.</p>
-        )}
-      </section>
-    )
-  }
-
   return (
-    <section aria-labelledby="torrents-heading">
-      <h2 id="torrents-heading">Torrents</h2>
+    <div className="torrent-list">
       {failure ? (
-        <p className="error" role="alert">
-          {failure.displayMessage}
-        </p>
+        <div className="torrent-placeholder">{failure.displayMessage}</div>
       ) : null}
-      <ul className="torrent-list">
-        {torrents.map(torrent => (
-          <li key={torrent.infoHash} className="torrent-row">
-            <div>
-              <p className="torrent-name">{torrent.name}</p>
-              <p className="torrent-meta">
-                <span>{STATE_LABELS[torrent.state]}</span>
-                <span>{` · ${Math.round(torrent.progress * 100)}%`}</span>
-                <span>{` · ${formatBytes(torrent.length)}`}</span>
-                <span>{` · ↓ ${formatRate(torrent.downloadSpeed)}`}</span>
-                <span>{` · ↑ ${formatRate(torrent.uploadSpeed)}`}</span>
-                <span>{` · ${torrent.peerCount} peers`}</span>
-              </p>
-              <progress max={1} value={torrent.progress}>
-                {Math.round(torrent.progress * 100)}%
-              </progress>
-            </div>
-            <div className="torrent-actions">
-              <button
-                aria-expanded={expanded === torrent.infoHash}
-                onClick={() => void showFiles(torrent.infoHash)}
-                type="button"
-              >
-                {`Files of ${torrent.name}`}
-              </button>
-              {torrent.state === 'paused' ? (
-                <button
+
+      {torrents.map(torrent => {
+        const isSelected = selected === torrent.infoHash
+        const isActive =
+          torrent.state === 'downloading' || torrent.state === 'seeding'
+        const eta = calculateEta(
+          torrent.length - torrent.downloaded,
+          torrent.downloadSpeed
+        )
+        let speeds = ''
+        if (torrent.downloadSpeed > 0) {
+          speeds += ` ↓ ${prettyBytes(torrent.downloadSpeed)}/s`
+        }
+        if (torrent.uploadSpeed > 0) {
+          speeds += ` ↑ ${prettyBytes(torrent.uploadSpeed)}/s`
+        }
+
+        return (
+          <div
+            className={`torrent${isSelected ? ' selected' : ''}`}
+            key={torrent.infoHash}
+            onClick={() => void select(torrent.infoHash)}
+          >
+            <div className="metadata">
+              <div className="name ellipsis">{torrent.name}</div>
+              <div className="ellipsis">
+                <input
+                  aria-label={`Download ${torrent.name}`}
+                  checked={isActive}
+                  className={`control download ${torrent.state}`}
                   disabled={pending === torrent.infoHash}
-                  onClick={() => void act(torrent.infoHash, 'resume-torrent')}
-                  type="button"
-                >
-                  {`Resume ${torrent.name}`}
-                </button>
-              ) : (
-                <button
-                  disabled={pending === torrent.infoHash}
-                  onClick={() => void act(torrent.infoHash, 'pause-torrent')}
-                  type="button"
-                >
-                  {`Pause ${torrent.name}`}
-                </button>
-              )}
-              <button
-                disabled={pending === torrent.infoHash}
-                onClick={() => void act(torrent.infoHash, 'remove-torrent')}
-                type="button"
-              >
-                {`Remove ${torrent.name}`}
-              </button>
+                  onChange={() =>
+                    void act(
+                      torrent.infoHash,
+                      isActive ? 'pause-torrent' : 'resume-torrent'
+                    )
+                  }
+                  onClick={event => event.stopPropagation()}
+                  type="checkbox"
+                />
+                <span>{statusLabel(torrent)}</span>
+                <progress max={1} value={torrent.progress} />
+                <span>{`${Math.floor(100 * torrent.progress)}%`}</span>
+                <span>
+                  {torrent.downloaded === torrent.length
+                    ? prettyBytes(torrent.length)
+                    : `${prettyBytes(torrent.downloaded)} / ${prettyBytes(torrent.length)}`}
+                </span>
+                {torrent.peerCount > 0 ? (
+                  <span>
+                    {`${torrent.peerCount} ${torrent.peerCount === 1 ? 'peer' : 'peers'}`}
+                  </span>
+                ) : null}
+                {speeds === '' ? null : <span>{speeds}</span>}
+                {eta === '' ? null : <span>{eta}</span>}
+              </div>
             </div>
-            {expanded === torrent.infoHash ? (
-              <ul className="file-list">
-                {files.map(file => (
-                  <li key={file.index}>
-                    <button
-                      onClick={() =>
-                        onPlay({
-                          fileIndex: file.index,
-                          fileName: file.path,
-                          infoHash: torrent.infoHash
-                        })
-                      }
-                      type="button"
-                    >
-                      {`Play ${file.path}`}
-                    </button>
-                  </li>
-                ))}
-              </ul>
+
+            <div className="torrent-controls">
+              <i
+                aria-label={`Remove ${torrent.name}`}
+                className="icon delete"
+                onClick={event => {
+                  event.stopPropagation()
+                  void act(torrent.infoHash, 'remove-torrent')
+                }}
+                role="button"
+                title="Remove torrent"
+              >
+                close
+              </i>
+            </div>
+
+            {isSelected ? (
+              <div className="torrent-details">
+                <div className="files">
+                  <table>
+                    <tbody>
+                      {files.map(file => {
+                        const playable = PLAYABLE.test(file.path)
+                        return (
+                          <tr
+                            className={file.selected ? '' : 'disabled'}
+                            key={file.index}
+                            onClick={event => {
+                              event.stopPropagation()
+                              if (!playable) return
+                              onPlay({
+                                fileIndex: file.index,
+                                fileName: file.path,
+                                infoHash: torrent.infoHash
+                              })
+                            }}
+                          >
+                            <td className="col-icon">
+                              <i className="icon">
+                                {playable ? 'play_arrow' : 'description'}
+                              </i>
+                            </td>
+                            <td className="col-name">{file.path}</td>
+                            <td className="col-progress">
+                              {`${Math.floor(100 * file.progress)}%`}
+                            </td>
+                            <td className="col-size">
+                              {prettyBytes(file.length)}
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             ) : null}
-          </li>
-        ))}
-      </ul>
-    </section>
+            <hr />
+          </div>
+        )
+      })}
+
+      <div className="torrent-placeholder">
+        <span className="ellipsis">
+          Drop a torrent file here or paste a magnet link
+        </span>
+      </div>
+    </div>
   )
 }

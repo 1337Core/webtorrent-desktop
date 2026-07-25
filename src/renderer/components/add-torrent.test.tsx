@@ -6,7 +6,7 @@ import type {
   EngineCommand,
   TorrentCommandResult
 } from '../../shared/contracts'
-import { AddTorrent } from './add-torrent'
+import { AddTorrentModal } from './add-torrent'
 
 const PREPARATION_ID = '00000000-0000-4000-8000-000000000010'
 const INFO_HASH = '0123456789abcdef0123456789abcdef01234567'
@@ -177,17 +177,24 @@ afterEach(() => {
   cleanup()
 })
 
-describe('AddTorrent', () => {
+describe('AddTorrentModal', () => {
   it('prepares a remote torrent for review before writing anything', async () => {
     const user = userEvent.setup()
     const onAdded = vi.fn()
-    render(<AddTorrent downloadRoot={DOWNLOAD_ROOT} onAdded={onAdded} ready />)
+    render(
+      <AddTorrentModal
+        downloadRoot={DOWNLOAD_ROOT}
+        onCancel={vi.fn()}
+        onAdded={onAdded}
+        ready
+      />
+    )
 
     await user.type(
-      screen.getByLabelText('Torrent file URL'),
+      screen.getByLabelText('Enter torrent address or magnet link'),
       'https://example.com/file.torrent'
     )
-    await user.click(screen.getByRole('button', { name: 'Prepare' }))
+    await user.click(screen.getByRole('button', { name: 'OK' }))
 
     expect(await screen.findByText('Prepared payload')).toBeDefined()
     expect(commands[0]).toEqual({
@@ -210,13 +217,20 @@ describe('AddTorrent', () => {
 
   it('lists the manifest and toggles a file through the engine', async () => {
     const user = userEvent.setup()
-    render(<AddTorrent downloadRoot={DOWNLOAD_ROOT} onAdded={vi.fn()} ready />)
+    render(
+      <AddTorrentModal
+        downloadRoot={DOWNLOAD_ROOT}
+        onCancel={vi.fn()}
+        onAdded={vi.fn()}
+        ready
+      />
+    )
 
     await user.type(
-      screen.getByLabelText('Torrent file URL'),
+      screen.getByLabelText('Enter torrent address or magnet link'),
       'https://example.com/file.torrent'
     )
-    await user.click(screen.getByRole('button', { name: 'Prepare' }))
+    await user.click(screen.getByRole('button', { name: 'OK' }))
 
     const first = await screen.findByLabelText(/payload\/first\.bin/u)
     const second = screen.getByLabelText(/payload\/second\.bin/u)
@@ -240,15 +254,22 @@ describe('AddTorrent', () => {
   it('commits the reviewed preparation into the chosen root', async () => {
     const user = userEvent.setup()
     const onAdded = vi.fn()
-    render(<AddTorrent downloadRoot={DOWNLOAD_ROOT} onAdded={onAdded} ready />)
+    render(
+      <AddTorrentModal
+        downloadRoot={DOWNLOAD_ROOT}
+        onCancel={vi.fn()}
+        onAdded={onAdded}
+        ready
+      />
+    )
 
     await user.type(
-      screen.getByLabelText('Torrent file URL'),
+      screen.getByLabelText('Enter torrent address or magnet link'),
       'https://example.com/file.torrent'
     )
-    await user.click(screen.getByRole('button', { name: 'Prepare' }))
+    await user.click(screen.getByRole('button', { name: 'OK' }))
     await screen.findByText('Prepared payload')
-    await user.click(screen.getByRole('button', { name: 'Start download' }))
+    await user.click(screen.getByRole('button', { name: 'OK' }))
 
     await waitFor(() => expect(onAdded).toHaveBeenCalledOnce())
     expect(commands.at(-1)).toEqual({
@@ -258,26 +279,34 @@ describe('AddTorrent', () => {
         preparationId: PREPARATION_ID
       }
     })
-    expect(screen.getByLabelText('Torrent file URL')).toHaveProperty(
-      'value',
-      ''
-    )
+    expect(
+      screen.getByLabelText('Enter torrent address or magnet link')
+    ).toHaveProperty('value', '')
   })
 
   it('discards a preparation instead of leaving it open', async () => {
     const user = userEvent.setup()
-    render(<AddTorrent downloadRoot={DOWNLOAD_ROOT} onAdded={vi.fn()} ready />)
+    render(
+      <AddTorrentModal
+        downloadRoot={DOWNLOAD_ROOT}
+        onCancel={vi.fn()}
+        onAdded={vi.fn()}
+        ready
+      />
+    )
 
     await user.type(
-      screen.getByLabelText('Torrent file URL'),
+      screen.getByLabelText('Enter torrent address or magnet link'),
       'https://example.com/file.torrent'
     )
-    await user.click(screen.getByRole('button', { name: 'Prepare' }))
+    await user.click(screen.getByRole('button', { name: 'OK' }))
     await screen.findByText('Prepared payload')
-    await user.click(screen.getByRole('button', { name: 'Discard' }))
+    await user.click(screen.getByRole('button', { name: 'CANCEL' }))
 
     await waitFor(() =>
-      expect(screen.getByLabelText('Torrent file URL')).toBeDefined()
+      expect(
+        screen.getByLabelText('Enter torrent address or magnet link')
+      ).toBeDefined()
     )
     expect(commands.at(-1)).toEqual({
       command: 'discard-preparation',
@@ -287,27 +316,42 @@ describe('AddTorrent', () => {
 
   it('refuses to commit without a download root', async () => {
     const user = userEvent.setup()
-    render(<AddTorrent downloadRoot={null} onAdded={vi.fn()} ready />)
+    render(
+      <AddTorrentModal
+        downloadRoot={null}
+        onCancel={vi.fn()}
+        onAdded={vi.fn()}
+        ready
+      />
+    )
 
     await user.type(
-      screen.getByLabelText('Torrent file URL'),
+      screen.getByLabelText('Enter torrent address or magnet link'),
       'https://example.com/file.torrent'
     )
-    await user.click(screen.getByRole('button', { name: 'Prepare' }))
+    await user.click(screen.getByRole('button', { name: 'OK' }))
     await screen.findByText('Prepared payload')
 
     expect(
       screen.getByText('No download folder is available yet.')
     ).toBeDefined()
-    expect(
-      screen.getByRole('button', { name: 'Start download' })
-    ).toHaveProperty('disabled', true)
+    expect(screen.getByRole('button', { name: 'OK' })).toHaveProperty(
+      'disabled',
+      true
+    )
   })
 
   it('waits for a ready engine and a URL before preparing', () => {
-    render(<AddTorrent downloadRoot={DOWNLOAD_ROOT} onAdded={vi.fn()} ready />)
+    render(
+      <AddTorrentModal
+        downloadRoot={DOWNLOAD_ROOT}
+        onCancel={vi.fn()}
+        onAdded={vi.fn()}
+        ready
+      />
+    )
 
-    expect(screen.getByRole('button', { name: 'Prepare' })).toHaveProperty(
+    expect(screen.getByRole('button', { name: 'OK' })).toHaveProperty(
       'disabled',
       true
     )
@@ -315,14 +359,21 @@ describe('AddTorrent', () => {
 
   it('surfaces a rejected preparation', async () => {
     const user = userEvent.setup()
-    render(<AddTorrent downloadRoot={DOWNLOAD_ROOT} onAdded={vi.fn()} ready />)
+    render(
+      <AddTorrentModal
+        downloadRoot={DOWNLOAD_ROOT}
+        onCancel={vi.fn()}
+        onAdded={vi.fn()}
+        ready
+      />
+    )
 
     failNext = 'The remote torrent could not be loaded.'
     await user.type(
-      screen.getByLabelText('Torrent file URL'),
+      screen.getByLabelText('Enter torrent address or magnet link'),
       'https://example.com/file.torrent'
     )
-    await user.click(screen.getByRole('button', { name: 'Prepare' }))
+    await user.click(screen.getByRole('button', { name: 'OK' }))
 
     expect(
       await screen.findByText('The remote torrent could not be loaded.')
@@ -331,9 +382,10 @@ describe('AddTorrent', () => {
 
   it('prepares a torrent opened from Finder', async () => {
     render(
-      <AddTorrent
+      <AddTorrentModal
         downloadRoot={DOWNLOAD_ROOT}
         intent={{ kind: 'torrent-file', torrentPath: '/Users/owner/a.torrent' }}
+        onCancel={vi.fn()}
         onAdded={vi.fn()}
         ready
       />
@@ -351,9 +403,10 @@ describe('AddTorrent', () => {
   it('prepares a magnet link opened from the OS', async () => {
     const magnet = `magnet:?xt=urn:btih:${INFO_HASH}`
     render(
-      <AddTorrent
+      <AddTorrentModal
         downloadRoot={DOWNLOAD_ROOT}
         intent={{ kind: 'magnet', magnet }}
+        onCancel={vi.fn()}
         onAdded={vi.fn()}
         ready
       />
@@ -375,9 +428,10 @@ describe('AddTorrent', () => {
 
   it('ignores an intent while the engine is not ready', () => {
     render(
-      <AddTorrent
+      <AddTorrentModal
         downloadRoot={DOWNLOAD_ROOT}
         intent={{ kind: 'torrent-file', torrentPath: '/Users/owner/a.torrent' }}
+        onCancel={vi.fn()}
         onAdded={vi.fn()}
         ready={false}
       />

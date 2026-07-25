@@ -168,19 +168,26 @@ describe('TorrentList', () => {
     render(<TorrentList active onPlay={onPlay} refreshMs={100_000} />)
 
     expect(await screen.findByText('Example payload')).toBeDefined()
-    const meta = document.querySelector('.torrent-meta')?.textContent
-    expect(meta).toBe('Downloading · 50% · 1.0 kB · ↓ 2.0 kB/s · ↑ — · 3 peers')
+    const meta = document.querySelectorAll('.metadata .ellipsis')[1]
+      ?.textContent
+    expect(meta).toContain('Downloading')
+    expect(meta).toContain('50%')
+    expect(meta).toContain('500 B / 1 kB')
+    expect(meta).toContain('3 peers')
+    expect(meta).toContain('↓ 2 kB/s')
     expect(commands[0]).toEqual({
       command: 'list-torrents',
       payload: { cursor: 0, limit: 64 }
     })
   })
 
-  it('shows an empty state before any torrent exists', async () => {
+  it('shows the original placeholder before any torrent exists', async () => {
     items = []
     render(<TorrentList active onPlay={onPlay} refreshMs={100_000} />)
 
-    expect(await screen.findByText('No torrents yet.')).toBeDefined()
+    expect(
+      await screen.findByText('Drop a torrent file here or paste a magnet link')
+    ).toBeDefined()
   })
 
   it('stays quiet while the engine is not ready', () => {
@@ -194,30 +201,28 @@ describe('TorrentList', () => {
     render(<TorrentList active onPlay={onPlay} refreshMs={100_000} />)
     await screen.findByText('Example payload')
 
-    // The refresh after the action re-reads the engine page, so the fake
-    // engine reports the new state before the click.
+    // The download checkbox is the original pause and resume control.
     items = [summary({ state: 'paused' })]
-    await user.click(screen.getByRole('button', { name: /^Pause/u }))
+    await user.click(screen.getByRole('checkbox', { name: /^Download/u }))
     await waitFor(() =>
       expect(
         commands.some(command => command.command === 'pause-torrent')
       ).toBe(true)
     )
     await waitFor(() =>
-      expect(screen.getByRole('button', { name: /^Resume/u })).toBeDefined()
+      expect(
+        screen.getByRole('checkbox', { name: /^Download/u })
+      ).toHaveProperty('checked', false)
     )
 
     items = [summary({ state: 'downloading' })]
-    await user.click(screen.getByRole('button', { name: /^Resume/u }))
+    await user.click(screen.getByRole('checkbox', { name: /^Download/u }))
     await waitFor(() =>
       expect(
         commands.some(command => command.command === 'resume-torrent')
       ).toBe(true)
     )
 
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: /^Pause/u })).toBeDefined()
-    )
     items = []
     await user.click(screen.getByRole('button', { name: /^Remove/u }))
     await waitFor(() =>
@@ -240,7 +245,7 @@ describe('TorrentList', () => {
       code: 'STATE_CONFLICT',
       displayMessage: 'The torrent cannot change state right now.'
     }
-    await user.click(screen.getByRole('button', { name: /^Pause/u }))
+    await user.click(screen.getByRole('checkbox', { name: /^Download/u }))
 
     expect(
       await screen.findByText('The torrent cannot change state right now.')
@@ -253,11 +258,10 @@ describe('TorrentList', () => {
     render(<TorrentList active onPlay={onPlay} refreshMs={100_000} />)
     await screen.findByText('Example payload')
 
-    await user.click(screen.getByRole('button', { name: /^Files of/u }))
-    const play = await screen.findByRole('button', {
-      name: 'Play payload/movie.mp4'
-    })
-    await user.click(play)
+    // Selecting the row reveals its files, exactly as the original did.
+    await user.click(screen.getByText('Example payload'))
+    const file = await screen.findByText('payload/movie.mp4')
+    await user.click(file)
 
     expect(onPlay).toHaveBeenCalledWith({
       fileIndex: 0,

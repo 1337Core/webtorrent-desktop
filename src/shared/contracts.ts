@@ -430,7 +430,18 @@ export const choosePathResultSchema = z.discriminatedUnion('ok', [
     requestId: requestIdSchema,
     ok: z.literal(true),
     value: z.strictObject({
-      path: z.string().min(1).max(4_096).nullable()
+      path: z.string().min(1).max(4_096).nullable(),
+      /**
+       * Counts for a chosen creation source, so the create-torrent screen can
+       * show the original "N files, SIZE" line without the renderer ever
+       * reading the filesystem. Absent for every other chooser kind.
+       */
+      summary: z
+        .strictObject({
+          fileCount: z.number().int().min(0).max(1_000_000),
+          totalBytes: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER)
+        })
+        .nullable()
     })
   }),
   z.strictObject({
