@@ -124,6 +124,51 @@ describe('PeerBudget', () => {
     expect(target.admit({ key: 'a', peer: '203.0.113.1:6881' })).toBe(true)
   })
 
+  it('holds PEX discovery to its own narrower ceiling', () => {
+    const { budget: target } = budget()
+
+    let admitted = 0
+    for (let index = 0; index < 120; index += 1) {
+      if (
+        target.admit({
+          key: 'a',
+          peer: `203.0.113.${index % 250}:${7_000 + index}`,
+          scope: 'pex'
+        })
+      ) {
+        admitted += 1
+      }
+    }
+
+    expect(admitted).toBe(PEER_BUDGET_LIMITS.maxPexRecordsPerTorrent)
+    expect(target.pexRecordsFor('a')).toBe(
+      PEER_BUDGET_LIMITS.maxPexRecordsPerTorrent
+    )
+    // The same torrent still has ordinary record capacity left.
+    expect(target.admit({ key: 'a', peer: '198.51.100.1:6881' })).toBe(true)
+  })
+
+  it('bounds PEX discovery engine-wide, not only per torrent', () => {
+    const { budget: target } = budget()
+
+    let admitted = 0
+    for (let torrent = 0; torrent < 4; torrent += 1) {
+      for (let index = 0; index < 40; index += 1) {
+        if (
+          target.admit({
+            key: `torrent-${torrent}`,
+            peer: `203.0.113.${index}:${8_000 + index}`,
+            scope: 'pex'
+          })
+        ) {
+          admitted += 1
+        }
+      }
+    }
+
+    expect(admitted).toBe(PEER_BUDGET_LIMITS.maxPexRecords)
+  })
+
   it('returns capacity when a torrent or a peer goes away', () => {
     const { budget: target } = budget()
     fill(target, 'a', 10)

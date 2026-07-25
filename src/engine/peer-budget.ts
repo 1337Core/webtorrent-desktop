@@ -5,6 +5,10 @@ export const PEER_BUDGET_LIMITS = Object.freeze({
   maxRecords: 256,
   /** Peer records one torrent may retain. */
   maxRecordsPerTorrent: 128,
+  /** PEX-origin records engine-wide, a subset of the record budget. */
+  maxPexRecords: 64,
+  /** PEX-origin records one torrent may retain. */
+  maxPexRecordsPerTorrent: 50,
   /** Live peer transports every staging acquisition may hold together. */
   maxStagingLiveTransports: 8,
   /** Peer records every staging acquisition may hold together. */
@@ -13,7 +17,7 @@ export const PEER_BUDGET_LIMITS = Object.freeze({
   maxStagingRecordsPerAcquisition: 16
 } as const)
 
-export type PeerBudgetScope = 'staging' | 'torrent'
+export type PeerBudgetScope = 'pex' | 'staging' | 'torrent'
 
 export type PeerBudgetOptions = Readonly<{
   /**
@@ -28,6 +32,8 @@ export type PeerBudgetOptions = Readonly<{
 
 type Holder = {
   key: string
+  /** PEX-origin peer keys, a subset of `records`. */
+  pex: Set<string>
   /** Peer keys in least-recently-admitted order. */
   records: Set<string>
   scope: PeerBudgetScope
@@ -77,9 +83,11 @@ export class PeerBudget {
     const holder = this.#holder(input.key, scope)
     if (holder.records.has(input.peer)) return true
     if (!this.#admitsTransport(scope)) return false
+    if (scope === 'pex' && !this.#admitsPex(holder)) return false
     if (!this.#admitsRecord(holder, scope)) return false
 
     holder.records.add(input.peer)
+    if (scope === 'pex') holder.pex.add(input.peer)
     return true
   }
 
@@ -90,13 +98,33 @@ export class PeerBudget {
 
   /** Drops one recorded peer, typically when its transport is gone. */
   forget(key: string, peer: string): void {
-    this.#holders.get(key)?.records.delete(peer)
+    const holder = this.#holders.get(key)
+    holder?.records.delete(peer)
+    holder?.pex.delete(peer)
+  }
+
+  pexRecordsFor(key: string): number {
+    return this.#holders.get(key)?.pex.size ?? 0
+  }
+
+  /**
+   * PEX is a receive-only discovery source with its own narrower ceiling
+   * inside the shared record budget, so a talkative swarm cannot fill the
+   * engine through it.
+   */
+  #admitsPex(holder: Holder): boolean {
+    if (holder.pex.size >= PEER_BUDGET_LIMITS.maxPexRecordsPerTorrent) {
+      return false
+    }
+    let total = 0
+    for (const entry of this.#holders.values()) total += entry.pex.size
+    return total < PEER_BUDGET_LIMITS.maxPexRecords
   }
 
   #holder(key: string, scope: PeerBudgetScope): Holder {
     const existing = this.#holders.get(key)
     if (existing) return existing
-    const holder: Holder = { key, records: new Set(), scope }
+    const holder: Holder = { key, pex: new Set(), records: new Set(), scope }
     this.#holders.set(key, holder)
     return holder
   }
@@ -117,6 +145,7 @@ export class PeerBudget {
       scope === 'staging'
         ? PEER_BUDGET_LIMITS.maxStagingRecordsPerAcquisition
         : PEER_BUDGET_LIMITS.maxRecordsPerTorrent
+
     if (holder.records.size >= perHolder) return false
 
     if (
@@ -155,6 +184,7 @@ export class PeerBudget {
     const oldest = largest.records.values().next().value
     if (oldest === undefined) return false
     largest.records.delete(oldest)
+    largest.pex.delete(oldest)
     return true
   }
 }

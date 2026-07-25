@@ -178,6 +178,7 @@ export class DiskTorrentSession {
   readonly #reservation: TorrentReservation
   readonly #storeSupervisor: GuardedStoreSupervisor
   #activation: TorrentActivation | null = null
+  #admitting = false
   #committed = false
   #selectedIndexes: number[]
   #state: DiskTorrentState = 'adding'
@@ -351,7 +352,7 @@ export class DiskTorrentSession {
     if (!this.#peerFilter(address)) return false
     if (!this.#admitsBudget(address)) return false
     try {
-      return torrent.addPeer(address, source)
+      return this.#handoff(() => torrent.addPeer(address, source))
     } catch {
       return false
     }
@@ -377,7 +378,7 @@ export class DiskTorrentSession {
     if (typeof address !== 'string' || !this.#peerFilter(address)) return false
     if (!this.#admitsBudget(peer.id ?? address)) return false
     try {
-      return torrent.addPeer(peer, source)
+      return this.#handoff(() => torrent.addPeer(peer, source))
     } catch {
       return false
     }
@@ -387,13 +388,53 @@ export class DiskTorrentSession {
    * The shared engine-wide bound. WebTorrent's own `maxConns` is per torrent,
    * so without this one torrent could hold the whole engine's capacity.
    */
-  #admitsBudget(peer: string): boolean {
+  #admitsBudget(peer: string, scope?: 'pex'): boolean {
     return (
       this.#budget?.admit({
-        key: `${this.#metadata.infoHash}:${this.#reservation.generationId}`,
-        peer
+        key: this.#budgetKey,
+        peer,
+        ...(scope ? { scope } : {})
       }) ?? true
     )
+  }
+
+  get #budgetKey(): string {
+    return `${this.#metadata.infoHash}:${this.#reservation.generationId}`
+  }
+
+  /**
+   * WebTorrent discovers peers of its own through the PEX extension and hands
+   * them straight to `addPeer`, which would bypass this session's address
+   * policy and the engine's shared budget. Wrapping the method keeps the
+   * promise that the gate runs immediately before every handoff, whatever
+   * discovered the peer.
+   */
+  #containDiscovery(torrent: EngineTorrent): void {
+    const target = torrent as {
+      addPeer: (peer: EngineWebRtcPeer | string, source?: string) => boolean
+    }
+    const original = target.addPeer.bind(torrent)
+    target.addPeer = (peer, source) => {
+      if (this.#admitting) return original(peer, source)
+      // Discovery from inside WebTorrent: receive-only, filtered, and counted
+      // against the narrower PEX ceiling.
+      if (typeof peer !== 'string') return false
+      const [host] = peer.split(':')
+      if (!host || this.#state !== 'running') return false
+      if (!this.#peerFilter(peer)) return false
+      if (!this.#admitsBudget(peer, 'pex')) return false
+      return original(peer, source)
+    }
+  }
+
+  /** Runs one handoff this session authorized, past its own wrapper. */
+  #handoff(run: () => boolean): boolean {
+    this.#admitting = true
+    try {
+      return run()
+    } finally {
+      this.#admitting = false
+    }
   }
 
   /**
@@ -517,6 +558,7 @@ export class DiskTorrentSession {
         return
       }
       this.#torrent = torrent
+      this.#containDiscovery(torrent)
 
       torrent.on('error', () => {
         fail(new DiskTorrentError('TORRENT_ERROR'))

@@ -96,7 +96,7 @@ class FakeTorrent extends EventEmitter implements EngineTorrent {
     return this.#overrides.torrentFile ?? this.#metadata.torrentBytes
   }
 
-  addPeer(peer: unknown): boolean {
+  addPeer(peer: unknown, _source?: string): boolean {
     if (typeof peer === 'string') this.peers.push(peer)
     else this.connections.push(peer)
     return true
@@ -428,6 +428,27 @@ describe('DiskTorrentSession', () => {
     // A transport with no remote address is never handed to WebTorrent.
     expect(session.admitConnection({ destroy: () => undefined })).toBe(false)
     expect(torrent.connections).toEqual([connected])
+  })
+
+  it('filters peers WebTorrent discovers for itself', async () => {
+    const session = await addReadySession(
+      {},
+      { peerFilter: address => address !== '10.0.0.5:6881' }
+    )
+    const torrent = harness.torrents[0]
+    if (!torrent) throw new Error('Expected a torrent')
+    session.resume()
+
+    // WebTorrent's own PEX path calls addPeer directly; it must still pass
+    // this session's address policy.
+    expect(torrent.addPeer('10.0.0.5:6881', 'ut_pex')).toBe(false)
+    expect(torrent.addPeer('203.0.113.20:6881', 'ut_pex')).toBe(true)
+    expect(torrent.peers).toEqual(['203.0.113.20:6881'])
+
+    await session.pause()
+    // A paused generation discovers nothing, whatever WebTorrent believes.
+    expect(torrent.addPeer('203.0.113.21:6881', 'ut_pex')).toBe(false)
+    expect(torrent.peers).toEqual(['203.0.113.20:6881'])
   })
 
   it('refuses lifecycle commands that do not match the current state', async () => {
