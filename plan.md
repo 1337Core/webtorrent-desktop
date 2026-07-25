@@ -226,7 +226,7 @@ Controls:
   executed by main or engine, including `webtorrent` and its qualified
   compatibility subpaths, `parse-torrent`, `bencode`, `undici`, `ws`,
   `@thaunknown/simple-peer`, `bittorrent-protocol`, `create-torrent`,
-  `bittorrent-dht`, `k-rpc`, `k-rpc-socket`, `music-metadata`, and `chokidar`.
+  `music-metadata`, and `chokidar`.
   App-owned main/engine modules remain bundled, while Node-runtime packages
   retain their Node export conditions, ESM identity, and native dependency
   chains. Browser-safe renderer dependencies remain bundled.
@@ -720,13 +720,28 @@ No migration decision depends on an unmerged upstream change.
 
 ### 9.7 App-owned DHT boundary
 
+**Amended 2026-07-24 (implementation):** the boundary is an app-owned
+standalone DHT client over `node:dgram`, not an injection into
+`bittorrent-dht`/`k-rpc`/`k-rpc-socket`. The requirements below already
+replaced every part of that stack the app would have reused: the app owns the
+socket, decode, transaction identity, source matching, routing insertion and
+its hard cap, traversal, announce, scheduling, rate limiting, and teardown,
+while disabling stock populate, bucket maintenance, rebootstrap, and ping. The
+remaining stock surface was three unmaintained packages held in place by
+startup source-hash guards that any lawful transitive re-resolution would trip.
+Owning the ~500 lines directly removes three direct dependencies, the
+source-guard failure mode, and the compatibility-shape risk, and keeps the
+behavior contract below unchanged. Every limit, endpoint, and rejection rule
+in this section still applies exactly, and its tests are the acceptance
+evidence. The paragraph below records the superseded injection design.
+
 Do not give any WebTorrent client its stock DHT or `torrent-discovery` DHT
 path. The stock path bootstraps on construction, accepts peer-supplied
 `PORT` nodes, can announce before a paused torrent reaches `ready`, performs
 unbounded decode/traversal work, and cannot enforce this fork's destination
-policy. Instead, the engine owns one public-only standalone
-`bittorrent-dht@11.0.12` instance built from exact `k-rpc@5.1.0` and
-`k-rpc-socket@1.11.1` behind an app-owned filtered `udp4` socket. Supply that
+policy. The superseded design built one public-only standalone
+`bittorrent-dht@11.0.12` instance from exact `k-rpc@5.1.0` and
+`k-rpc-socket@1.11.1` behind an app-owned filtered `udp4` socket: supply that
 socket through `k-rpc-socket({ socket })`, then construct
 `k-rpc({ krpcSocket, id: sessionNodeId, nodes: approvedNumericBootstraps,
 ...limits })`, then
@@ -768,13 +783,12 @@ cycle makes at most 64 node queries, accepts at most 100 compact peer values
 per response and 256 peer observations overall, then announces to at most 20
 valid token-bearing nodes. At most two DHT operations run concurrently; retain
 one queued activation per info hash and 64 queued activations total. Configure
-KRPC concurrency 8, background concurrency 2, bucket size 20, query timeout
-2,000 milliseconds, and at most 64 pending RPC entries. A guarded `_addNode`
-insertion accepts refreshes of existing public contacts but rejects a new
-contact once the routing table contains 1,024; explicit query timeouts remove
-dead entries before later inserts. Configure DHT caches with `maxTables: 64`,
-`maxValues: 1`, `maxPeers: 255`, and a 30-minute peer age; `255` intentionally
-keeps `record-cache`'s two-generation observed ceiling at 511.
+Query concurrency is 8, bucket size 20, query timeout 2,000 milliseconds, and
+at most 64 pending RPC entries. Guarded routing insertion accepts refreshes of
+existing public contacts but rejects a new contact once the routing table
+contains 1,024; explicit query timeouts remove dead entries before later
+inserts. Peer observations are bounded per cycle rather than cached across
+cycles, so no shared record cache exists.
 
 The wrapper accepts and emits at most 2,048 bytes per datagram. Before stock
 decode, require bencode depth at most 8, at most 256 aggregate values, sorted
@@ -806,25 +820,15 @@ torrents never enter the scheduler. KRPC `ready` is not connectivity proof:
 zero valid bootstrap/lookup replies produce a visible DHT-scoped availability
 warning and retry, not a healthy state or an engine crash.
 
-At startup, source/shape guards verify the injection and traversal assumptions
-and exact SHA-256 values:
-
-- `bittorrent-dht/client.js`:
-  `9dec67e48477b16783ad8962f922c736ad8d995ed9ecab3aea1febae8bd6bb2b`;
-- `k-rpc/index.js`:
-  `15a1e5f82c97485eb2a1c09ead633bf6c7f07bdee7acb12782c36890317d149b`;
-- `k-rpc-socket/index.js`:
-  `bccbd497618270796ad79d16231f1d3be8ff91bc56572c9f8a9cfac01769991c`;
-  and
-- `record-cache/index.js`:
-  `64b27cb693e7061fb59dff9a60eec12fd4ae17b5ed2fafc8154a6bc7331daf09`.
-
-Guard that `bootstrap: false` suppresses populate, the stock bucket maintenance
-and ping paths remain disabled, guarded insertion owns the hard routing cap,
-traversal uses the injected query socket, output uses the supplied raw socket,
-pending entries retain callbacks, response generation passes through the
-bounded wrapper, and supplied `opts.krpc` remains authoritative. Mismatch is
-engine-fatal and requires requalification of the exact dependency unit.
+Because the boundary owns its socket, decode, traversal, and routing outright,
+there is no stock DHT source to guard: the superseded SHA-256 guards over
+`bittorrent-dht`, `k-rpc`, `k-rpc-socket`, and `record-cache` are removed with
+the injection design. Their obligations become behavioral tests instead —
+no packet before activation, no maintenance traffic, the hard routing cap,
+exact source and transaction matching, bounded traversal, and single-shot
+callbacks on cancellation. WebTorrent's own DHT stays disabled, and package
+verification proves the engine never constructs `torrent-discovery`'s DHT
+path.
 
 ### 9.8 Torrent ingestion policy
 
@@ -1570,9 +1574,7 @@ tokens. Preserve the current visual identity; this is not a redesign.
 | `bencode` | Exact 4.0.1 pin for prebounded v1 decoding; app-owned canonical validation remains authoritative. |
 | `undici` | Exact 7.29.0 pin for engine-owned DNS-pinned, connected-address-verified HTTP transport; no general HTTP capability crosses the engine API. |
 | `bittorrent-protocol` | Exact 5.0.7 direct pin for the qualified pre-buffer frame guard and compatibility contract; it must resolve to the same externalized package instance WebTorrent uses. |
-| `bittorrent-dht` | Exact 11.0.12 direct pin for the app-owned public DHT node; WebTorrent's embedded discovery path remains disabled. |
-| `k-rpc` | Exact 5.1.0 direct pin for bounded, generation-scoped DHT traversal behind the compatibility wrapper. |
-| `k-rpc-socket` | Exact 1.11.1 direct pin for the injected filtered `udp4` boundary; the app repairs its source-port, transaction-ID, decode, and teardown gaps. |
+| DHT | No direct pin. The app-owned boundary in section 9.7 uses `node:dgram` and app-owned KRPC encoding; `bittorrent-dht`, `k-rpc`, and `k-rpc-socket` remain transitive under WebTorrent, whose DHT path stays disabled. |
 | `create-torrent` | Exact 6.1.3 pin for creation; never consume its built-in announce defaults as product policy. |
 | `ws` | Exact 8.21.1 pin for the app-owned WSS tracker transport; no pooling, compression, redirects, or autonomous reconnect. |
 | `@thaunknown/simple-peer` | Exact 10.1.1 pin for bounded app-owned tracker offers and the qualified WebTorrent WebRTC chain. |
@@ -2367,10 +2369,10 @@ endpoints. If not, the current assets and empty endpoint defaults remain.
 - [WebTorrent connection-pool source](https://github.com/webtorrent/webtorrent/blob/v3.0.16/lib/conn-pool.js)
 - [WebTorrent built-in server source](https://github.com/webtorrent/webtorrent/blob/v3.0.16/lib/server.js)
 - [`bittorrent-protocol` 5.0.7 framing source](https://github.com/webtorrent/bittorrent-protocol/blob/v5.0.7/index.js)
+- [BEP 5 DHT protocol](https://www.bittorrent.org/beps/bep_0005.html)
 - [`bittorrent-dht` 11.0.12 source](https://github.com/webtorrent/bittorrent-dht/blob/v11.0.12/client.js)
 - [`k-rpc` 5.1.0 source](https://github.com/mafintosh/k-rpc/blob/v5.1.0/index.js)
 - [`k-rpc-socket` 1.11.1 source](https://github.com/mafintosh/k-rpc-socket/blob/v1.11.1/index.js)
-- [`record-cache` 1.2.0 source](https://github.com/mafintosh/record-cache/blob/v1.2.0/index.js)
 - [`ut_pex` 5.0.2 source](https://github.com/webtorrent/ut_pex/blob/v5.0.2/index.js)
 - [`fs-chunk-store` 5.0.1 source](https://github.com/webtorrent/fs-chunk-store/blob/v5.0.1/index.js)
 - [`parse-torrent` raw path handling](https://github.com/webtorrent/parse-torrent/blob/v11.0.23/index.js)

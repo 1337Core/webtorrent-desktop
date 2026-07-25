@@ -3,6 +3,8 @@ import process from 'node:process'
 import WebTorrent from 'webtorrent'
 import type { EngineEvent, EngineRuntimeInfo } from '../shared/contracts'
 import { EngineClientLifecycle } from './client-lifecycle'
+import { DhtBoundary } from './dht-boundary'
+import { resolve4 } from 'node:dns/promises'
 import { EgressPolicy } from './network-policy'
 import { PeerAdmissionPolicy } from './peer-admission'
 import { EngineProtocolController } from './protocol-controller'
@@ -10,6 +12,7 @@ import { EngineRuntime } from './runtime'
 import { TrackerActivation } from './tracker-activation'
 import { TrackerHttpRequestGate, TrackerHttpTransport } from './tracker-http'
 import { TorrentManager } from './torrent-manager'
+import type { DiskTorrentSession } from './disk-torrent'
 import type { TorrentOwner } from './torrent-registry'
 
 const parentPort = process.parentPort
@@ -62,6 +65,28 @@ function resolveClient(owner: TorrentOwner): WebTorrent {
   return client
 }
 
+/**
+ * One public-only DHT participant per engine. Its peers re-enter through the
+ * same generation and address gate as every other discovery source.
+ */
+const dhtSessions = new Map<string, DiskTorrentSession>()
+const dht = new DhtBoundary({
+  onPeers: delivery => {
+    const session = dhtSessions.get(delivery.infoHash)
+    if (!session || session.generationId !== delivery.generationId) return
+    for (const peer of delivery.peers) {
+      session.admitPeer(`${peer.address}:${peer.port}`, 'dht')
+    }
+  },
+  resolveBootstrap: async hostname => {
+    try {
+      return await resolve4(hostname)
+    } catch {
+      return []
+    }
+  }
+})
+
 const torrentManager = new TorrentManager({
   resolveClient,
   sessionOptions: {
@@ -97,8 +122,24 @@ const torrentManager = new TorrentManager({
       return {
         start: () => {
           activation.start()
+          if (session.metadata.private) return
+          dhtSessions.set(session.infoHash, session)
+          void dht
+            .activate({
+              announcePort: handle.port,
+              generationId: session.generationId,
+              infoHash: session.infoHash,
+              private: false
+            })
+            .catch(() => {
+              // A DHT-scoped failure is a warning, never a torrent failure.
+            })
         },
-        stop: () => activation.stop()
+        stop: async () => {
+          dhtSessions.delete(session.infoHash)
+          dht.deactivate(session.infoHash)
+          await activation.stop()
+        }
       }
     },
     peerFilter: address => {
@@ -170,6 +211,8 @@ const controller = new EngineProtocolController({
     try {
       await runtime.close()
     } finally {
+      dht.close()
+      dhtSessions.clear()
       await lifecycle.close()
     }
   }
