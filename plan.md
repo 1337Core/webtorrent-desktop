@@ -2278,9 +2278,13 @@ WebRTC signaling and peer handoff, torrent creation, resume, and the loopback
 media proxy. The packaged engine reaches `ready` with native WebRTC and uTP
 disabled.
 
-What remains in this milestone is evidence, not implementation: the
-deterministic TCP, WebRTC, and stream integration tests in section 18.2 do not
-exist yet, so the exit condition is unproven.
+What remains in this milestone is evidence, not implementation. A deterministic
+TCP transfer, partial selection, pause, removal, and loopback playback are now
+proven against a local peer with a fixture allow-set that production policy
+still rejects. The browser-WebRTC transfer stays unproven: native peers connect
+in the packaged Electron runtime rather than under the Node test runner, so that
+evidence belongs to the end-to-end suite. The wider section 18.2 boundary,
+DHT, tracker, and hostile-race coverage is also still outstanding.
 
 ### Milestone 4 — storage, resume, and legacy import
 
