@@ -187,12 +187,9 @@ describe('torrent lifecycle', () => {
     expect(empty.value?.total).toBe(0)
   })
 
-  it('accepts a magnet source and reports why it fails, not that it is unknown', async () => {
-    // No peer can answer inside a test, so the acquisition must time out or
-    // report an unreachable tracker. What matters is that the magnet reaches
-    // the staging path at all rather than returning a fixed unsupported.
-    const opened = await run({
-      command: 'open-preparation',
+  it('starts a magnet acquisition and reports it as pending', async () => {
+    const started = await run({
+      command: 'start-acquisition',
       payload: {
         source: {
           allowDhtExposure: false,
@@ -205,9 +202,29 @@ describe('torrent lifecycle', () => {
       }
     })
 
-    expect(opened.ok).toBe(false)
-    expect(opened.code).not.toBe('UNSUPPORTED')
-    expect(opened.code).toBe('METADATA_UNAVAILABLE')
+    // The command answers immediately: metadata cannot arrive inside the
+    // renderer's bounded request, so the acquisition runs behind it.
+    expect(started.ok).toBe(true)
+    const acquisitionId = started.value?.acquisitionId as string
+    expect(typeof acquisitionId).toBe('string')
+
+    const polled = await run({
+      command: 'get-acquisition',
+      payload: { acquisitionId }
+    })
+    expect(polled.ok).toBe(true)
+    // No peer can answer an unreachable tracker, so it is still working.
+    expect(polled.value?.state).toBe('acquiring')
+  })
+
+  it('refuses an acquisition identifier it never issued', async () => {
+    const missing = await run({
+      command: 'get-acquisition',
+      payload: { acquisitionId: '00000000-0000-4000-8000-000000000099' }
+    })
+
+    expect(missing.ok).toBe(false)
+    expect(missing.code).toBe('NOT_FOUND')
   })
 
   it('refuses a preparation source outside the validated shapes', async () => {

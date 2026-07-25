@@ -181,11 +181,12 @@ describe('App', () => {
       })
     )
 
+    // A pasted magnet starts an acquisition: its manifest does not exist yet.
     await waitFor(() =>
       expect(
         commands.some(
           command =>
-            command.command === 'open-preparation' &&
+            command.command === 'start-acquisition' &&
             command.payload.source.kind === 'magnet'
         )
       ).toBe(true)

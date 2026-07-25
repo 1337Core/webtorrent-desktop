@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { prettyBytes } from '../lib/format'
 import {
   runCommand,
@@ -10,6 +10,22 @@ type Preparation = EngineValue<'open-preparation'>
 type PreparationFile = EngineValue<'get-preparation-files'>['items'][number]
 
 const FILE_PAGE_LIMIT = 64
+const MAGNET = /^magnet:\?/iu
+/** How often the pending acquisition is checked, and how long it may run. */
+const ACQUISITION_POLL_MS = 500
+const ACQUISITION_DEADLINE_MS = 130_000
+
+const ACQUISITION_FAILURES: Readonly<Record<string, string>> = {
+  INPUT_INVALID: 'That magnet link could not be read.',
+  INTERNAL: 'The torrent details could not be fetched.',
+  METADATA_UNAVAILABLE:
+    'No peer answered with this torrent’s details. Try again later.'
+}
+
+type PreparationSource = Extract<
+  Parameters<typeof runCommand>[0],
+  { command: 'start-acquisition' }
+>['payload']['source']
 
 const WARNING_LABELS: Readonly<Record<string, string>> = {
   DHT_EXPOSURE_USED: 'The info hash was exposed to the public DHT.',
@@ -51,8 +67,92 @@ export function AddTorrentModal({
   const [preparation, setPreparation] = useState<Preparation | null>(null)
   const [files, setFiles] = useState<ReadonlyArray<PreparationFile>>([])
   const [selected, setSelected] = useState<ReadonlySet<number>>(new Set())
+  const [acquiring, setAcquiring] = useState(false)
+  const cancelled = useRef(false)
+
+  useEffect(() => {
+    cancelled.current = false
+    return () => {
+      cancelled.current = true
+    }
+  }, [])
+
+  /**
+   * A magnet carries no manifest, so its metadata is fetched before there is
+   * anything to review. The engine cannot answer that inside one bounded
+   * command, so the acquisition is started and then polled until it settles.
+   */
+  const acquire = useCallback(
+    async (
+      source: Extract<PreparationSource, { kind: 'magnet' }>
+    ): Promise<void> => {
+      setAcquiring(true)
+      setFailure(null)
+      const started = await runCommand({
+        command: 'start-acquisition',
+        payload: { source }
+      })
+      if (!started.ok) {
+        setAcquiring(false)
+        setFailure(started.error)
+        return
+      }
+
+      const deadline = Date.now() + ACQUISITION_DEADLINE_MS
+      while (!cancelled.current && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, ACQUISITION_POLL_MS))
+        if (cancelled.current) return
+        const polled = await runCommand({
+          command: 'get-acquisition',
+          payload: { acquisitionId: started.value.acquisitionId }
+        })
+        if (!polled.ok) {
+          setAcquiring(false)
+          setFailure(polled.error)
+          return
+        }
+        if (polled.value.state === 'ready') {
+          setAcquiring(false)
+          setPreparation(polled.value.preparation)
+          return
+        }
+        if (polled.value.state === 'failed') {
+          setAcquiring(false)
+          setFailure({
+            code: polled.value.code,
+            displayMessage:
+              ACQUISITION_FAILURES[polled.value.code] ??
+              'The torrent details could not be fetched.',
+            retryable: polled.value.code === 'METADATA_UNAVAILABLE'
+          })
+          return
+        }
+      }
+      if (!cancelled.current) {
+        setAcquiring(false)
+        setFailure({
+          code: 'METADATA_UNAVAILABLE',
+          displayMessage:
+            ACQUISITION_FAILURES.METADATA_UNAVAILABLE ??
+            'The torrent details could not be fetched.',
+          retryable: true
+        })
+      }
+    },
+    []
+  )
 
   const prepare = useCallback(async () => {
+    const address = url.trim()
+    if (MAGNET.test(address)) {
+      await acquire({
+        allowDhtExposure: false,
+        allowPrivateNetwork: false,
+        kind: 'magnet',
+        magnet: address
+      })
+      return
+    }
     setBusy(true)
     setFailure(null)
     const outcome = await runCommand({
@@ -62,7 +162,7 @@ export function AddTorrentModal({
           allowHttp: false,
           allowPrivateNetwork: false,
           kind: 'remote-torrent',
-          url: url.trim()
+          url: address
         }
       }
     })
@@ -72,25 +172,26 @@ export function AddTorrentModal({
       return
     }
     setPreparation(outcome.value)
-  }, [url])
+  }, [acquire, url])
 
   // An OS open request prepares exactly like a typed URL: reviewed first,
   // committed only on confirmation.
   useEffect(() => {
     if (!intent || !ready) return undefined
     const timer = setTimeout(() => {
+      if (intent.kind === 'magnet') {
+        void acquire({
+          allowDhtExposure: false,
+          allowPrivateNetwork: false,
+          kind: 'magnet',
+          magnet: intent.magnet
+        })
+        return
+      }
       void runCommand({
         command: 'open-preparation',
         payload: {
-          source:
-            intent.kind === 'magnet'
-              ? {
-                  allowDhtExposure: false,
-                  allowPrivateNetwork: false,
-                  kind: 'magnet',
-                  magnet: intent.magnet
-                }
-              : { kind: 'local-torrent', path: intent.torrentPath }
+          source: { kind: 'local-torrent', path: intent.torrentPath }
         }
       }).then(outcome => {
         if (!outcome.ok) {
@@ -103,7 +204,7 @@ export function AddTorrentModal({
     return () => {
       clearTimeout(timer)
     }
-  }, [intent, ready])
+  }, [acquire, intent, ready])
 
   // The first page of the manifest is enough to review a typical torrent;
   // larger torrents keep their remaining files deselected until committed.
@@ -248,6 +349,10 @@ export function AddTorrentModal({
               ? 'No download folder is available yet.'
               : `Saving to ${downloadRoot}`}
           </div>
+        </div>
+      ) : acquiring ? (
+        <div className="torrent-info" role="status">
+          Fetching torrent details…
         </div>
       ) : (
         <>

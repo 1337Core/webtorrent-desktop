@@ -98,6 +98,7 @@ const engineCommandNameSchema = z.enum([
   'commit-preparation',
   'create-torrent',
   'discard-preparation',
+  'get-acquisition',
   'get-preparation-files',
   'get-torrent-files',
   'heartbeat-media',
@@ -112,6 +113,7 @@ const engineCommandNameSchema = z.enum([
   'restore-torrent',
   'resume-torrent',
   'set-torrent-selection',
+  'start-acquisition',
   'update-preparation-selection'
 ])
 
@@ -176,6 +178,24 @@ export const engineCommandSchema = z.discriminatedUnion('command', [
         infoHashSourceSchema
       ])
     })
+  }),
+  /**
+   * Metadata for a magnet or info hash cannot arrive inside one bounded
+   * request, so acquisition is started and then polled. Nothing is stored
+   * until it settles into an ordinary preparation.
+   */
+  z.strictObject({
+    command: z.literal('start-acquisition'),
+    payload: z.strictObject({
+      source: z.discriminatedUnion('kind', [
+        magnetSourceSchema,
+        infoHashSourceSchema
+      ])
+    })
+  }),
+  z.strictObject({
+    command: z.literal('get-acquisition'),
+    payload: z.strictObject({ acquisitionId: uuidSchema })
   }),
   z.strictObject({
     command: z.literal('get-preparation-files'),
@@ -511,6 +531,24 @@ const engineCommandSuccessSchema = z.discriminatedUnion('command', [
     value: preparationSummarySchema
   }),
   z.strictObject({
+    command: z.literal('start-acquisition'),
+    value: z.strictObject({ acquisitionId: uuidSchema })
+  }),
+  z.strictObject({
+    command: z.literal('get-acquisition'),
+    value: z.discriminatedUnion('state', [
+      z.strictObject({ state: z.literal('acquiring') }),
+      z.strictObject({
+        state: z.literal('ready'),
+        preparation: preparationSummarySchema
+      }),
+      z.strictObject({
+        state: z.literal('failed'),
+        code: z.enum(['METADATA_UNAVAILABLE', 'INPUT_INVALID', 'INTERNAL'])
+      })
+    ])
+  }),
+  z.strictObject({
     command: z.literal('get-preparation-files'),
     value: z
       .strictObject({
@@ -749,6 +787,8 @@ export function engineResultMatchesOperation(
     case 'open-preparation':
     case 'list-torrents':
     case 'list-legacy-imports':
+    case 'start-acquisition':
+    case 'get-acquisition':
       return result.result.command === operation.command
     case 'import-legacy-torrent':
       return (

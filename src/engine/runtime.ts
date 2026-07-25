@@ -11,6 +11,7 @@ import {
   type PreparationFilePage,
   type PreparationSnapshot
 } from './preparation-store'
+import { randomUUID } from 'node:crypto'
 import { DiskTorrentError } from './disk-torrent'
 import { LegacyImportError } from './legacy-import'
 import type { LegacyImportService } from './legacy-import-service'
@@ -31,6 +32,7 @@ import {
 import { TorrentRegistryError } from './torrent-registry'
 
 type PreparationService = Pick<TorrentPreparationService, 'open'>
+
 type EngineSuccess = Extract<EngineCommandResult, { ok: true }>['result']
 type PreparationSummary = Extract<
   EngineSuccess,
@@ -40,6 +42,24 @@ type PublicPreparationFilePage = Extract<
   EngineSuccess,
   { command: 'get-preparation-files' }
 >['value']
+
+/** Acquisitions tracked at once, and how long a settled one is kept. */
+const MAX_TRACKED_ACQUISITIONS = 4
+const ACQUISITION_TTL_MS = 5 * 60_000
+
+type AcquisitionState =
+  | Readonly<{ state: 'acquiring' }>
+  | Readonly<{ preparation: PreparationSummary; state: 'ready' }>
+  | Readonly<{
+      code: 'INPUT_INVALID' | 'INTERNAL' | 'METADATA_UNAVAILABLE'
+      state: 'failed'
+    }>
+
+type AcquisitionRecord = {
+  controller: AbortController
+  expiresAtMs: number
+  state: AcquisitionState
+}
 
 type EngineRuntimeOptions = Readonly<{
   createPreparationService?: (store: PreparationStore) => PreparationService
@@ -295,6 +315,7 @@ function preparationFilePage(
 export class EngineRuntime {
   readonly #emitEvent: (event: EngineEvent) => void
   readonly #lifecycleController = new AbortController()
+  readonly #acquisitions = new Map<string, AcquisitionRecord>()
   readonly #preparationService: PreparationService
   readonly #preparationStore: PreparationStore
   readonly #activeExecutions = new Set<Promise<EngineCommandResult>>()
@@ -402,6 +423,10 @@ export class EngineRuntime {
     switch (operation.command) {
       case 'open-preparation':
         return await this.#openPreparation(operation, signal)
+      case 'start-acquisition':
+        return this.#startAcquisition(operation)
+      case 'get-acquisition':
+        return this.#getAcquisition(operation)
       case 'get-preparation-files': {
         const page = preparationFilePage(
           this.#preparationStore.pageFiles(operation.payload.preparationId, {
@@ -899,6 +924,87 @@ export class EngineRuntime {
       this.#emitEvent(event)
     } catch {
       // A reporting callback cannot fail a completed command.
+    }
+  }
+
+  /**
+   * Starts one acquisition and answers immediately. Metadata cannot arrive
+   * inside the renderer's bounded request, so the caller polls
+   * `get-acquisition` until it settles; nothing is stored until it does.
+   */
+  #startAcquisition(
+    operation: Extract<EngineCommand, { command: 'start-acquisition' }>
+  ): EngineCommandResult {
+    this.#expireAcquisitions()
+    if (this.#acquisitions.size >= MAX_TRACKED_ACQUISITIONS) {
+      return errorResult(operation, PUBLIC_ERRORS.capacityExceeded)
+    }
+
+    const acquisitionId = randomUUID()
+    const controller = new AbortController()
+    const record: AcquisitionRecord = {
+      controller,
+      expiresAtMs: Date.now() + ACQUISITION_TTL_MS,
+      state: { state: 'acquiring' }
+    }
+    this.#acquisitions.set(acquisitionId, record)
+
+    void this.#preparationService
+      .open(operation.payload.source, controller.signal)
+      .then(snapshot => {
+        record.state = {
+          preparation: preparationSummary(snapshot),
+          state: 'ready'
+        }
+      })
+      .catch((error: unknown) => {
+        record.state = {
+          code:
+            error instanceof TorrentPreparationServiceError &&
+            error.code === 'INPUT_INVALID'
+              ? 'INPUT_INVALID'
+              : error instanceof TorrentPreparationServiceError &&
+                  error.code === 'METADATA_UNAVAILABLE'
+                ? 'METADATA_UNAVAILABLE'
+                : 'INTERNAL',
+          state: 'failed'
+        }
+      })
+      .finally(() => {
+        record.expiresAtMs = Date.now() + ACQUISITION_TTL_MS
+      })
+
+    return {
+      ok: true,
+      result: { command: 'start-acquisition', value: { acquisitionId } }
+    }
+  }
+
+  #getAcquisition(
+    operation: Extract<EngineCommand, { command: 'get-acquisition' }>
+  ): EngineCommandResult {
+    this.#expireAcquisitions()
+    const record = this.#acquisitions.get(operation.payload.acquisitionId)
+    if (!record)
+      return errorResult(operation, PUBLIC_ERRORS.preparationNotFound)
+
+    // A settled acquisition is reported once and then forgotten: its
+    // preparation now lives in the store under its own identifier.
+    if (record.state.state !== 'acquiring') {
+      this.#acquisitions.delete(operation.payload.acquisitionId)
+    }
+    return {
+      ok: true,
+      result: { command: 'get-acquisition', value: record.state }
+    }
+  }
+
+  #expireAcquisitions(): void {
+    const now = Date.now()
+    for (const [id, record] of this.#acquisitions) {
+      if (record.expiresAtMs > now) continue
+      record.controller.abort()
+      this.#acquisitions.delete(id)
     }
   }
 

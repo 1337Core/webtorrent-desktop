@@ -2323,15 +2323,17 @@ own identity, and the second refusal that sat above the preparation service is
 gone — a magnet now reaches staging and reports why it failed rather than
 claiming the operation is unknown.
 
-One design decision remains before magnets are useful, and it is the owner's
-to make. The renderer bridge bounds every command to five seconds, so an
-acquisition that needs longer cannot answer through it; the engine currently
-reports `METADATA_UNAVAILABLE` at four seconds rather than letting the bridge
-fail with a protocol error. For a magnet to succeed in practice, preparation
-must become an asynchronous operation — opened immediately, reported by engine
-event when metadata arrives — which changes the command contract and needs a
-pending state in the add dialog. That is a visible change to an otherwise
-under-the-hood migration, so it is recorded here rather than assumed.
+Acquisition is asynchronous, because it has to be: the renderer bridge bounds
+every command to five seconds and metadata routinely needs longer.
+`start-acquisition` answers immediately with an identifier and
+`get-acquisition` reports `acquiring`, `ready`, or a fixed failure code, so the
+acquisition keeps its own full budget without a command ever hanging. At most
+four acquisitions are tracked, a settled one is reported once and forgotten,
+and an abandoned one is aborted when its five-minute record expires.
+
+The interface change this required is one line of copy: the add dialog shows
+"Fetching torrent details…" where the file review will appear, and nothing
+else about the modal moved.
 
 ### Milestone 4 — storage, resume, and legacy import
 

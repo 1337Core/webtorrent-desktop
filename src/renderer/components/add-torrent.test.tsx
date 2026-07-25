@@ -11,6 +11,7 @@ import { AddTorrentModal } from './add-torrent'
 const PREPARATION_ID = '00000000-0000-4000-8000-000000000010'
 const INFO_HASH = '0123456789abcdef0123456789abcdef01234567'
 const DOWNLOAD_ROOT = '/Users/owner/Downloads'
+const ACQUISITION_ID = '00000000-0000-4000-8000-000000000020'
 
 let commands: EngineCommand[] = []
 let failNext: string | null = null
@@ -42,6 +43,43 @@ function response(operation: EngineCommand): TorrentCommandResult {
   }
 
   switch (operation.command) {
+    case 'start-acquisition':
+      return {
+        ...envelope(),
+        ok: true,
+        value: {
+          ok: true,
+          result: {
+            command: 'start-acquisition',
+            value: { acquisitionId: ACQUISITION_ID }
+          }
+        }
+      } as TorrentCommandResult
+    case 'get-acquisition':
+      return {
+        ...envelope(),
+        ok: true,
+        value: {
+          ok: true,
+          result: {
+            command: 'get-acquisition',
+            value: {
+              preparation: {
+                expiresAtMs: 1_000,
+                fileCount: 2,
+                infoHash: INFO_HASH,
+                length: 40,
+                name: 'Prepared payload',
+                preparationId: PREPARATION_ID,
+                private: false,
+                selectedFileCount: 0,
+                warnings: ['WEB_SEED_DISABLED']
+              },
+              state: 'ready'
+            }
+          }
+        }
+      } as TorrentCommandResult
     case 'open-preparation':
       return {
         ...envelope(),
@@ -412,9 +450,13 @@ describe('AddTorrentModal', () => {
       />
     )
 
-    await waitFor(() => expect(commands).toHaveLength(2))
+    // A magnet has no manifest yet, so the dialog says so while the engine
+    // acquires it rather than appearing to hang.
+    expect((await screen.findByRole('status')).textContent).toContain(
+      'Fetching torrent details'
+    )
     expect(commands[0]).toEqual({
-      command: 'open-preparation',
+      command: 'start-acquisition',
       payload: {
         source: {
           allowDhtExposure: false,
@@ -424,6 +466,13 @@ describe('AddTorrentModal', () => {
         }
       }
     })
+
+    await waitFor(() =>
+      expect(
+        commands.some(command => command.command === 'get-acquisition')
+      ).toBe(true)
+    )
+    expect(await screen.findByText('Prepared payload')).toBeTruthy()
   })
 
   it('ignores an intent while the engine is not ready', () => {

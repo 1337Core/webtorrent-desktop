@@ -351,15 +351,9 @@ const metadataAcquisition = new MetadataAcquisition({
       release: lease.release
     }
   },
-  stagingPath: path.join(forkDirectory, 'staging'),
-  /**
-   * The renderer's bridge gives every command five seconds, so an acquisition
-   * must answer inside that or the user sees a protocol failure instead of a
-   * reason. Metadata that needs longer therefore reports as unavailable: for
-   * magnets to succeed in practice, preparation has to become an
-   * asynchronous, event-reported operation rather than one bounded request.
-   */
-  timeoutMs: 4_000
+  // Acquisition runs behind `start-acquisition`, not inside one bounded
+  // request, so it keeps its own full budget.
+  stagingPath: path.join(forkDirectory, 'staging')
 })
 
 const mediaProxy = new MediaProxy()
