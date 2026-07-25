@@ -27,9 +27,9 @@ application and is not an official WebTorrent release.
   build, or Intel Mac build.
 
 The complete decisions and migration gates are in [plan.md](./plan.md).
-Migration is in progress on this branch; until a milestone replaces a legacy
-subsystem, its source still reflects the original WebTorrent Desktop
-implementation.
+Migration is in progress on this branch. No pre-migration source remains: the
+main process, preload bridge, renderer, and torrent engine are all rewritten
+for the process boundaries described in the plan.
 
 ## Current development workflow
 

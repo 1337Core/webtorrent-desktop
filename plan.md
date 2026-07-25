@@ -2227,14 +2227,15 @@ Exit: **passed 2026-07-24** — explicit migration approval received.
 - Prove fuses and native-unpack behavior.
 - Prove the standalone Vite/Forge integration and local `.app` packaging.
 
-Exit status: **reopened 2026-07-24 after the final research amendment.** The
-development and packaged arm64 shells, Electron 43, Node 24, WebTorrent 3,
-native WebRTC load, arm64 addon, ASAR integrity, fuses, and ad-hoc signature
-already pass, and the accepted audit findings are recorded in
-`docs/dependency-audit.md`. Re-close this milestone only after replacing the
-package lifecycle/Forge rebuild path with the prebuilt-only workflow in
-section 9.4 and qualifying the final scoped WebdriverIO stack in section 14.6
-against the packaged Electron 43 app.
+Exit: **passed 2026-07-25**, after the reopening that followed the final
+research amendment. The development and packaged arm64 shells, Electron 43,
+Node 24, WebTorrent 3, native WebRTC load, arm64 addon, ASAR integrity, fuses,
+and ad-hoc signature pass, and the accepted audit findings are recorded in
+`docs/dependency-audit.md`. Both reopening conditions are now met: the package
+lifecycle/Forge rebuild path is replaced by the script-free prebuilt-only
+acquisition in section 6.2, and the scoped WebdriverIO stack in section 14.6
+drives the packaged Electron 43 application through its own validated bridge,
+with the driver matched to the Chromium the artifact actually reports.
 
 ### Milestone 2 — establish security/process boundaries
 
@@ -2269,10 +2270,17 @@ inventory, and the Milestone 1 arm64/fuse/signature guarantees.
 
 Exit: the isolated engine can add, create, transfer, stream, and stop safely.
 
-Progress 2026-07-24: validated local/remote preparation, the command-facing
-runtime, shared peer admission, and bounded HTTP tracker transport are landed.
-Client lifecycle, guarded storage, DHT/WSS containment, PEX/framing, transfer,
-creation, and streaming remain in this milestone.
+Progress 2026-07-25: the engine implementation is landed — validated
+local/remote preparation, the command-facing runtime, client lifecycle and
+registry, guarded storage behind the commit barrier, the app-owned DHT
+boundary, mediated HTTP and WSS tracker transports with per-tier scheduling,
+WebRTC signaling and peer handoff, torrent creation, resume, and the loopback
+media proxy. The packaged engine reaches `ready` with native WebRTC and uTP
+disabled.
+
+What remains in this milestone is evidence, not implementation: the
+deterministic TCP, WebRTC, and stream integration tests in section 18.2 do not
+exist yet, so the exit condition is unproven.
 
 ### Milestone 4 — storage, resume, and legacy import
 
@@ -2282,6 +2290,11 @@ creation, and streaming remain in this milestone.
 
 Exit: real legacy fixtures migrate without changing legacy data or escaping
 authorized roots.
+
+Progress 2026-07-25: the atomic cached torrent, resume, and state models,
+read-only legacy import with report and rollback, and the durable torrent
+library are landed with unit coverage. Proof against real legacy fixtures and
+the hostile-operation and trash isolation tests in section 18.2 remain.
 
 ### Milestone 5 — reconnect and modernize the UI
 
@@ -2293,12 +2306,25 @@ authorized roots.
 
 Exit: required application behavior works without privileged renderer access.
 
+Progress 2026-07-25: the renderer is React 19 with strict TypeScript and typed
+capabilities, Material UI and PropTypes are gone, and the torrent list,
+two-phase add, file selection, creation, player, subtitles, preferences, row
+context menu, and error handling are reconnected behind the validated bridge.
+Casting, video posters, telemetry, and announcements are absent. The packaged
+shell exposes exactly eleven capabilities and no privileged global.
+
 ### Milestone 6 — restore OS integrations
 
 - Reconnect macOS handlers, startup, folder watch, external player, menus,
   notifications, dock, power-save, and Trash through main-owned adapters.
 
 Exit: macOS behavior passes native E2E on the owner’s machine.
+
+Progress 2026-07-25: the macOS handlers, startup and login policy, watched
+folder, external player, application menu, notifications, dock badge,
+power-save guard, and Trash-backed deletion are landed with unit coverage. The
+native end-to-end coverage in section 18.3 is still limited to launch,
+protocol, boundary, capability, and engine-readiness specs.
 
 ### Milestone 7 — qualify the personal app
 
