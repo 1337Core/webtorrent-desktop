@@ -45,8 +45,7 @@ export class DhtWireError extends Error {
   }
 }
 
-type KrpcQueryMethod =
-  'announce_peer' | 'find_node' | 'get_peers' | 'ping'
+type KrpcQueryMethod = 'announce_peer' | 'find_node' | 'get_peers' | 'ping'
 
 const ALLOWED_METHODS = new Set<string>([
   'announce_peer',
