@@ -241,6 +241,15 @@ for (const requiredMarker of [
     throw new Error(`Main trust-boundary marker is missing: ${requiredMarker}`)
   }
 }
+
+// A release artifact must refuse remote debugging. The automation build
+// compiles `automationBuild: true` into this call site; the shipped bundle
+// must carry the release value.
+if (!/automationBuild:\s*false/u.test(mainBundle)) {
+  throw new Error(
+    'Packaged main bundle does not prove that remote debugging is refused'
+  )
+}
 for (const requiredMarker of [
   'desktop:bootstrap:v1',
   'desktop:engine-restart:v1',

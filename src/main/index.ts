@@ -1022,7 +1022,9 @@ app.on('window-all-closed', () => {
   if (!shutdownStarted) requestQuit(0)
 })
 
-const dangerousLaunchSwitch = findDangerousLaunchSwitch(app.commandLine)
+const dangerousLaunchSwitch = findDangerousLaunchSwitch(app.commandLine, {
+  automationBuild: __WEBTORRENT_UPDATED_E2E_BUILD__
+})
 
 if (dangerousLaunchSwitch) {
   diagnostics.error('security.dangerous-launch-switch')

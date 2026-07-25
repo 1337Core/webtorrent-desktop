@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2024"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "noEmit": true,
+    "types": [
+      "node",
+      "mocha",
+      "@wdio/globals/types",
+      "@wdio/electron-service",
+      "expect-webdriverio"
+    ]
+  },
+  "include": ["e2e/**/*.ts", "wdio.conf.ts"]
+}

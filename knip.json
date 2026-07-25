@@ -7,8 +7,14 @@
     "src/main/index.ts",
     "src/preload/index.ts",
     "src/renderer/index.tsx",
-    "src/shared/**/*.test.ts"
+    "src/shared/**/*.test.ts",
+    "e2e/**/*.e2e.ts"
   ],
-  "ignoreDependencies": ["@thaunknown/simple-peer", "bittorrent-tracker", "ws"],
-  "project": ["scripts/**/*.mjs", "src/**/*.ts", "src/**/*.tsx"]
+  "ignoreDependencies": [
+    "@thaunknown/simple-peer",
+    "@wdio/local-runner",
+    "bittorrent-tracker",
+    "ws"
+  ],
+  "project": ["scripts/**/*.mjs", "src/**/*.ts", "src/**/*.tsx", "e2e/**/*.ts"]
 }

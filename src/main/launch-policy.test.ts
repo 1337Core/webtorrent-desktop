@@ -17,4 +17,20 @@ describe('findDangerousLaunchSwitch', () => {
   it('allows an ordinary command line', () => {
     expect(findDangerousLaunchSwitch({ hasSwitch: () => false })).toBeNull()
   })
+
+  it('permits remote debugging only in the automation build', () => {
+    const debugging = {
+      hasSwitch: (name: string) => name === 'remote-debugging-port'
+    }
+    const unsafe = { hasSwitch: (name: string) => name === 'no-sandbox' }
+
+    expect(findDangerousLaunchSwitch(debugging)).toBe('remote-debugging-port')
+    expect(
+      findDangerousLaunchSwitch(debugging, { automationBuild: true })
+    ).toBeNull()
+    // Automation never relaxes anything else.
+    expect(findDangerousLaunchSwitch(unsafe, { automationBuild: true })).toBe(
+      'no-sandbox'
+    )
+  })
 })

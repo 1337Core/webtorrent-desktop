@@ -12,6 +12,18 @@ const nodeExternals = [
   ...builtinModules.map(module => `node:${module}`)
 ]
 
+/**
+ * A separate end-to-end build. Automation drives the packaged app through
+ * Chrome DevTools, which the release build refuses: `--remote-debugging-port`
+ * is a dangerous launch switch. This constant is compiled in only when the
+ * build is explicitly requested for automation, and package verification
+ * proves the release artifact does not carry it.
+ */
+const isE2eBuild = process.env.WEBTORRENT_UPDATED_E2E === '1'
+if (isE2eBuild) {
+  console.log('build: automation build — remote debugging is permitted')
+}
+
 await rm(outputRoot, { force: true, recursive: true })
 
 async function buildNodeEntry({
@@ -23,6 +35,9 @@ async function buildNodeEntry({
 }) {
   await build({
     configFile: false,
+    define: {
+      __WEBTORRENT_UPDATED_E2E_BUILD__: JSON.stringify(isE2eBuild)
+    },
     logLevel: 'info',
     build: {
       emptyOutDir: false,
