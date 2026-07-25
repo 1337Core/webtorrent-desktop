@@ -23,7 +23,16 @@ const DOWNLOAD_ROOT = path.join(path.sep, 'tmp', 'wu-downloads')
 
 class FakeTorrent extends EventEmitter implements EngineTorrent {
   destroyed = false
+  done = false
+  downloadSpeed = 0
+  downloaded = 0
+  numPeers = 0
   paused = true
+  progress = 0
+  ready = false
+  timeRemaining = Number.POSITIVE_INFINITY
+  uploadSpeed = 0
+  uploaded = 0
   readonly destroyCalls: Array<{ destroyStore: boolean }> = []
   readonly selectionCalls: string[] = []
   #metadata: ValidatedTorrentMetadata
@@ -38,10 +47,15 @@ class FakeTorrent extends EventEmitter implements EngineTorrent {
     this.#overrides = overrides
   }
 
-  get files(): ReadonlyArray<{ length: number; path: string }> {
+  get files(): ReadonlyArray<{
+    downloaded: number
+    length: number
+    path: string
+  }> {
     return (
       this.#overrides.files ??
       this.#metadata.files.map(file => ({
+        downloaded: 0,
         length: file.length,
         path: file.path
       }))

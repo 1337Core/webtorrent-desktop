@@ -13,6 +13,7 @@ import {
   type PreparationSnapshot
 } from './preparation-store'
 import { EngineRuntime } from './runtime'
+import { TorrentManager } from './torrent-manager'
 import type { ValidatedTorrentMetadata } from './torrent-metadata'
 import {
   TorrentPreparationService,
@@ -129,6 +130,7 @@ function createPreparationHarness(
   const runtime = new EngineRuntime({
     emitEvent: options.emitEvent,
     preparationStore: store,
+    torrentManager: emptyTorrentManager(),
     createPreparationService: ownedStore =>
       new TorrentPreparationService({
         readLocalTorrent,
@@ -137,6 +139,17 @@ function createPreparationHarness(
       })
   })
   return { readLocalTorrent, runtime, store }
+}
+
+/** A manager with no sessions: every torrent command reports NOT_FOUND. */
+function emptyTorrentManager(): TorrentManager {
+  return new TorrentManager({
+    resolveClient: () => ({
+      add: () => {
+        throw new Error('No client is attached in this test')
+      }
+    })
+  })
 }
 
 describe('EngineRuntime', () => {
@@ -300,8 +313,8 @@ describe('EngineRuntime', () => {
     })
   })
 
-  it('returns an exact empty torrent page until torrent commit is implemented', async () => {
-    const runtime = new EngineRuntime()
+  it('returns an exact empty torrent page from the attached manager', async () => {
+    const runtime = new EngineRuntime({ torrentManager: emptyTorrentManager() })
     const operation: EngineCommand = {
       command: 'list-torrents',
       payload: { cursor: 64, limit: 1 }
@@ -321,6 +334,40 @@ describe('EngineRuntime', () => {
         }
       }
     })
+  })
+
+  it('reports a missing torrent for every transfer command', async () => {
+    const runtime = new EngineRuntime({ torrentManager: emptyTorrentManager() })
+    const operations = [
+      {
+        command: 'get-torrent-files',
+        payload: { cursor: 0, infoHash: INFO_HASH, limit: 50 }
+      },
+      { command: 'pause-torrent', payload: { infoHash: INFO_HASH } },
+      { command: 'resume-torrent', payload: { infoHash: INFO_HASH } },
+      {
+        command: 'remove-torrent',
+        payload: { deleteData: false, infoHash: INFO_HASH }
+      }
+    ] satisfies EngineCommand[]
+
+    for (const operation of operations) {
+      const result = await runtime.execute(operation, signal())
+      expectStrictResult(operation, result)
+      expect(errorCode(result)).toBe('NOT_FOUND')
+    }
+  })
+
+  it('reports an unavailable engine when no clients are attached', async () => {
+    const runtime = new EngineRuntime()
+    const operation: EngineCommand = {
+      command: 'list-torrents',
+      payload: { cursor: 0, limit: 50 }
+    }
+
+    const result = await runtime.execute(operation, signal())
+    expectStrictResult(operation, result)
+    expect(errorCode(result)).toBe('ENGINE_NOT_READY')
   })
 
   it('rejects magnet and info-hash preparation without invoking the service', async () => {
@@ -362,7 +409,7 @@ describe('EngineRuntime', () => {
   })
 
   it('returns fixed unsupported results for every deferred command', async () => {
-    const runtime = new EngineRuntime()
+    const runtime = new EngineRuntime({ torrentManager: emptyTorrentManager() })
     const operations = [
       {
         command: 'commit-preparation',
@@ -370,22 +417,6 @@ describe('EngineRuntime', () => {
           destinationRoot: '/authorized/downloads',
           preparationId: PREPARATION_ID
         }
-      },
-      {
-        command: 'get-torrent-files',
-        payload: { cursor: 0, infoHash: INFO_HASH, limit: 50 }
-      },
-      {
-        command: 'pause-torrent',
-        payload: { infoHash: INFO_HASH }
-      },
-      {
-        command: 'resume-torrent',
-        payload: { infoHash: INFO_HASH }
-      },
-      {
-        command: 'remove-torrent',
-        payload: { deleteData: false, infoHash: INFO_HASH }
       },
       {
         command: 'create-torrent',

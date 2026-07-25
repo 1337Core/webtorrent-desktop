@@ -11,10 +11,12 @@ import {
   type PreparationFilePage,
   type PreparationSnapshot
 } from './preparation-store'
+import { TorrentManager, TorrentManagerError } from './torrent-manager'
 import {
   TorrentPreparationService,
   TorrentPreparationServiceError
 } from './torrent-preparation-service'
+import { TorrentRegistryError } from './torrent-registry'
 
 type PreparationService = Pick<TorrentPreparationService, 'open'>
 type EngineSuccess = Extract<EngineCommandResult, { ok: true }>['result']
@@ -31,7 +33,16 @@ type EngineRuntimeOptions = Readonly<{
   createPreparationService?: (store: PreparationStore) => PreparationService
   emitEvent?: (event: EngineEvent) => void
   preparationStore?: PreparationStore
+  torrentManager?: TorrentManager
 }>
+
+/** Raised when a torrent command arrives before the clients are attached. */
+class EngineRuntimeUnavailableError extends Error {
+  constructor() {
+    super('The torrent engine runtime has no attached clients.')
+    this.name = 'EngineRuntimeUnavailableError'
+  }
+}
 
 type PublicError = Readonly<{
   code: Extract<EngineCommandResult, { ok: false }>['error']['code']
@@ -89,6 +100,16 @@ const PUBLIC_ERRORS = Object.freeze({
     code: 'NOT_FOUND',
     displayMessage: 'The remote torrent could not be loaded.',
     retryable: true
+  },
+  torrentNotFound: {
+    code: 'NOT_FOUND',
+    displayMessage: 'The torrent was not found.',
+    retryable: false
+  },
+  torrentStateConflict: {
+    code: 'STATE_CONFLICT',
+    displayMessage: 'The torrent cannot change state right now.',
+    retryable: false
   },
   stateConflict: {
     code: 'STATE_CONFLICT',
@@ -172,11 +193,13 @@ export class EngineRuntime {
   readonly #preparationService: PreparationService
   readonly #preparationStore: PreparationStore
   readonly #activeExecutions = new Set<Promise<EngineCommandResult>>()
+  readonly #torrentManager: TorrentManager | null
   #closePromise: Promise<void> | null = null
   #closed = false
 
   constructor(options: EngineRuntimeOptions = {}) {
     this.#emitEvent = options.emitEvent ?? (() => undefined)
+    this.#torrentManager = options.torrentManager ?? null
     this.#preparationStore = options.preparationStore ?? new PreparationStore()
     this.#preparationService =
       options.createPreparationService?.(this.#preparationStore) ??
@@ -225,9 +248,13 @@ export class EngineRuntime {
     this.#lifecycleController.abort()
     this.#preparationStore.clear()
     const activeExecutions = [...this.#activeExecutions]
-    this.#closePromise = Promise.allSettled(activeExecutions).then(() => {
-      this.#preparationStore.clear()
-    })
+    this.#closePromise = Promise.allSettled(activeExecutions)
+      .then(async () => {
+        await this.#torrentManager?.closeAll()
+      })
+      .then(() => {
+        this.#preparationStore.clear()
+      })
     return this.#closePromise
   }
 
@@ -302,28 +329,89 @@ export class EngineRuntime {
           }
         }
       }
-      case 'list-torrents':
+      case 'list-torrents': {
+        const manager = this.#requireManager()
         return {
           ok: true,
           result: {
             command: 'list-torrents',
-            value: {
-              items: [],
-              nextCursor: null,
-              total: 0
-            }
+            value: manager.list(
+              operation.payload.cursor,
+              operation.payload.limit
+            )
           }
         }
+      }
+      case 'get-torrent-files': {
+        const manager = this.#requireManager()
+        return {
+          ok: true,
+          result: {
+            command: 'get-torrent-files',
+            value: manager.files(
+              operation.payload.infoHash,
+              operation.payload.cursor,
+              operation.payload.limit
+            )
+          }
+        }
+      }
+      case 'pause-torrent': {
+        const manager = this.#requireManager()
+        return {
+          ok: true,
+          result: {
+            command: 'pause-torrent',
+            value: await manager.pause(operation.payload.infoHash)
+          }
+        }
+      }
+      case 'resume-torrent': {
+        const manager = this.#requireManager()
+        return {
+          ok: true,
+          result: {
+            command: 'resume-torrent',
+            value: await manager.resume(operation.payload.infoHash)
+          }
+        }
+      }
+      case 'remove-torrent': {
+        const manager = this.#requireManager()
+        await manager.remove(operation.payload.infoHash)
+        this.#emit({
+          event: 'torrent-removed',
+          payload: { infoHash: operation.payload.infoHash }
+        })
+        return {
+          ok: true,
+          result: {
+            command: 'remove-torrent',
+            value: { infoHash: operation.payload.infoHash, removed: true }
+          }
+        }
+      }
       case 'close-media':
       case 'commit-preparation':
       case 'create-torrent':
-      case 'get-torrent-files':
       case 'heartbeat-media':
       case 'open-media':
-      case 'pause-torrent':
-      case 'remove-torrent':
-      case 'resume-torrent':
         return errorResult(operation, PUBLIC_ERRORS.unsupported)
+    }
+  }
+
+  #requireManager(): TorrentManager {
+    if (!this.#torrentManager) {
+      throw new EngineRuntimeUnavailableError()
+    }
+    return this.#torrentManager
+  }
+
+  #emit(event: EngineEvent): void {
+    try {
+      this.#emitEvent(event)
+    } catch {
+      // A reporting callback cannot fail a completed command.
     }
   }
 
@@ -404,6 +492,38 @@ export class EngineRuntime {
           return errorResult(operation, PUBLIC_ERRORS.unsupported)
         case 'INTERNAL':
           return errorResult(operation, PUBLIC_ERRORS.internal)
+      }
+    }
+
+    if (error instanceof EngineRuntimeUnavailableError) {
+      return errorResult(operation, PUBLIC_ERRORS.engineNotReady)
+    }
+
+    if (error instanceof TorrentManagerError) {
+      switch (error.code) {
+        case 'CAPACITY_EXCEEDED':
+          return errorResult(operation, PUBLIC_ERRORS.capacityExceeded)
+        case 'INPUT_INVALID':
+          return errorResult(operation, PUBLIC_ERRORS.inputInvalid)
+        case 'NOT_FOUND':
+          return errorResult(operation, PUBLIC_ERRORS.torrentNotFound)
+        case 'STATE_CONFLICT':
+          return errorResult(operation, PUBLIC_ERRORS.torrentStateConflict)
+      }
+    }
+
+    if (error instanceof TorrentRegistryError) {
+      switch (error.code) {
+        case 'CAPACITY_EXCEEDED':
+          return errorResult(operation, PUBLIC_ERRORS.capacityExceeded)
+        case 'DUPLICATE_INFO_HASH':
+          return errorResult(operation, PUBLIC_ERRORS.alreadyExists)
+        case 'INVALID_INPUT':
+          return errorResult(operation, PUBLIC_ERRORS.inputInvalid)
+        case 'NOT_FOUND':
+          return errorResult(operation, PUBLIC_ERRORS.torrentNotFound)
+        case 'STATE_CONFLICT':
+          return errorResult(operation, PUBLIC_ERRORS.torrentStateConflict)
       }
     }
 

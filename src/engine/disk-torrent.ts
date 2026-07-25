@@ -45,18 +45,40 @@ export type EngineTorrent = {
     callback: (error?: Error) => void
   ): void
   destroyed: boolean
-  files: ReadonlyArray<{ length: number; path: string }>
+  done: boolean
+  downloadSpeed: number
+  downloaded: number
+  files: ReadonlyArray<{ downloaded: number; length: number; path: string }>
   infoHash: string
   length: number
   name: string
+  numPeers: number
   on(event: string, listener: (...args: unknown[]) => void): unknown
   pause(): void
   pieceLength: number
   private: boolean
+  progress: number
+  ready: boolean
   resume(): void
   select(start: number, end: number, priority?: number): void
+  timeRemaining: number
   torrentFile: Uint8Array
+  uploadSpeed: number
+  uploaded: number
 }
+
+/** Live counters the engine reports to the renderer as bounded DTOs. */
+export type DiskTorrentStats = Readonly<{
+  done: boolean
+  downloadSpeed: number
+  downloaded: number
+  fileDownloaded: ReadonlyArray<number>
+  numPeers: number
+  progress: number
+  timeRemainingMs: number | null
+  uploadSpeed: number
+  uploaded: number
+}>
 
 export type EngineAddClient = {
   add(torrentId: Uint8Array, options: TorrentOptions): EngineTorrent
@@ -99,6 +121,15 @@ export type DiskTorrentSnapshot = Readonly<{
   selectedIndexes: ReadonlyArray<number>
   state: DiskTorrentState
 }>
+
+function clamp(value: number, minimum: number, maximum: number): number {
+  if (!Number.isFinite(value)) return minimum
+  return Math.min(Math.max(value, minimum), maximum)
+}
+
+function clampRate(value: number | undefined): number {
+  return Number.isFinite(value) && (value ?? 0) > 0 ? (value as number) : 0
+}
 
 /**
  * A disk-backed torrent for one registry generation.
@@ -225,6 +256,33 @@ export class DiskTorrentSession {
 
   get selectedIndexes(): ReadonlyArray<number> {
     return [...this.#selectedIndexes]
+  }
+
+  /**
+   * Bounded live counters. Values are clamped rather than trusted so a
+   * WebTorrent regression cannot produce a DTO the contract rejects.
+   */
+  stats(): DiskTorrentStats {
+    const torrent = this.#torrent
+    const length = this.#metadata.length
+    const downloaded = Math.trunc(clamp(torrent?.downloaded ?? 0, 0, length))
+    const timeRemaining = torrent?.timeRemaining ?? Number.NaN
+    return {
+      done: torrent?.done ?? false,
+      downloadSpeed: clampRate(torrent?.downloadSpeed),
+      downloaded,
+      fileDownloaded: this.#metadata.files.map((file, index) =>
+        Math.trunc(clamp(torrent?.files[index]?.downloaded ?? 0, 0, file.length))
+      ),
+      numPeers: Math.min(Math.max(Math.trunc(torrent?.numPeers ?? 0), 0), 10_000),
+      progress: length === 0 ? 1 : clamp(downloaded / length, 0, 1),
+      timeRemainingMs:
+        Number.isFinite(timeRemaining) && timeRemaining >= 0
+          ? Math.min(Math.trunc(timeRemaining), Number.MAX_SAFE_INTEGER)
+          : null,
+      uploadSpeed: clampRate(torrent?.uploadSpeed),
+      uploaded: Math.max(Math.trunc(torrent?.uploaded ?? 0), 0)
+    }
   }
 
   snapshot(): DiskTorrentSnapshot {
