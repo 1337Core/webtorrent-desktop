@@ -5,6 +5,7 @@ import type { EngineEvent, EngineRuntimeInfo } from '../shared/contracts'
 import { EngineClientLifecycle } from './client-lifecycle'
 import { DhtBoundary } from './dht-boundary'
 import { resolve4 } from 'node:dns/promises'
+import { LegacyImportService } from './legacy-import-service'
 import { MediaProxy } from './media-proxy'
 import { EgressPolicy } from './network-policy'
 import { PeerAdmissionPolicy } from './peer-admission'
@@ -198,6 +199,7 @@ const mediaProxy = new MediaProxy()
 let emitRuntimeEvent = (_event: EngineEvent): void => undefined
 const runtime = new EngineRuntime({
   creationService: new TorrentCreationService({ policy: egress }),
+  legacyImports: new LegacyImportService({ policy: egress }),
   mediaProxy,
   emitEvent: event => emitRuntimeEvent(event),
   torrentManager

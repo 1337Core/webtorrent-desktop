@@ -101,6 +101,8 @@ const engineCommandNameSchema = z.enum([
   'get-preparation-files',
   'get-torrent-files',
   'heartbeat-media',
+  'import-legacy-torrent',
+  'list-legacy-imports',
   'list-torrents',
   'open-media',
   'open-preparation',
@@ -215,6 +217,20 @@ export const engineCommandSchema = z.discriminatedUnion('command', [
   z.strictObject({
     command: z.literal('list-torrents'),
     payload: pageRequestSchema
+  }),
+  z.strictObject({
+    command: z.literal('list-legacy-imports'),
+    payload: pageRequestSchema.extend({
+      legacyRoot: absolutePathSchema
+    })
+  }),
+  z.strictObject({
+    command: z.literal('import-legacy-torrent'),
+    payload: z.strictObject({
+      destinationRoot: absolutePathSchema,
+      infoHash: infoHashSchema,
+      legacyRoot: absolutePathSchema
+    })
   }),
   z.strictObject({
     command: z.literal('get-torrent-files'),
@@ -364,6 +380,41 @@ const torrentFileSummaryPageSchema = z
     )
   )
 
+const legacyImportEntrySchema = z.discriminatedUnion('kind', [
+  z.strictObject({
+    kind: z.literal('importable'),
+    infoHash: infoHashSchema,
+    name: boundedNameSchema,
+    length: z.number().int().nonnegative().safe(),
+    fileCount: z.number().int().min(1).max(100_000),
+    selectedFileCount: z.number().int().min(0).max(100_000),
+    private: z.boolean()
+  }),
+  z.strictObject({
+    kind: z.literal('skipped'),
+    name: boundedNameSchema,
+    reason: z.enum([
+      'DUPLICATE',
+      'INVALID_ENTRY',
+      'INVALID_METADATA',
+      'PRIVATE_WITHOUT_TRACKER',
+      'TORRENT_FILE_MISSING',
+      'UNSUPPORTED_FORMAT'
+    ])
+  })
+])
+
+const legacyImportPageSchema = z
+  .array(legacyImportEntrySchema)
+  .max(64)
+  .refine(
+    items =>
+      items.reduce(
+        (bytes, item) => bytes + utf8Encoder.encode(item.name).byteLength,
+        0
+      ) <= 16_384
+  )
+
 const preparationSummarySchema = z
   .strictObject({
     preparationId: uuidSchema,
@@ -459,6 +510,23 @@ const engineCommandSuccessSchema = z.discriminatedUnion('command', [
         ...pageResultFields
       })
       .refine(isValidPageResult)
+  }),
+  z.strictObject({
+    command: z.literal('list-legacy-imports'),
+    value: z
+      .strictObject({
+        items: legacyImportPageSchema,
+        skippedCount: z.number().int().nonnegative().max(100_000),
+        ...pageResultFields
+      })
+      .refine(isValidPageResult)
+  }),
+  z.strictObject({
+    command: z.literal('import-legacy-torrent'),
+    value: z.strictObject({
+      infoHash: infoHashSchema,
+      torrent: torrentSummarySchema
+    })
   }),
   z.strictObject({
     command: z.literal('pause-torrent'),
@@ -595,7 +663,13 @@ export function engineResultMatchesOperation(
   switch (operation.command) {
     case 'open-preparation':
     case 'list-torrents':
+    case 'list-legacy-imports':
       return result.result.command === operation.command
+    case 'import-legacy-torrent':
+      return (
+        result.result.command === operation.command &&
+        result.result.value.infoHash === operation.payload.infoHash
+      )
     case 'get-preparation-files':
     case 'update-preparation-selection':
     case 'commit-preparation':

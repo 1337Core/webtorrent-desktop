@@ -12,6 +12,8 @@ import {
   type PreparationSnapshot
 } from './preparation-store'
 import { DiskTorrentError } from './disk-torrent'
+import { LegacyImportError } from './legacy-import'
+import type { LegacyImportService } from './legacy-import-service'
 import { MediaProxy, MediaProxyError } from './media-proxy'
 import {
   TorrentCreationError,
@@ -39,6 +41,7 @@ type EngineRuntimeOptions = Readonly<{
   createPreparationService?: (store: PreparationStore) => PreparationService
   emitEvent?: (event: EngineEvent) => void
   creationService?: TorrentCreationService
+  legacyImports?: LegacyImportService
   mediaProxy?: MediaProxy
   preparationStore?: PreparationStore
   torrentManager?: TorrentManager
@@ -108,6 +111,11 @@ const PUBLIC_ERRORS = Object.freeze({
     code: 'NOT_FOUND',
     displayMessage: 'The remote torrent could not be loaded.',
     retryable: true
+  },
+  legacyUnreadable: {
+    code: 'INPUT_INVALID',
+    displayMessage: 'That previous installation could not be read.',
+    retryable: false
   },
   mediaNotFound: {
     code: 'NOT_FOUND',
@@ -242,6 +250,7 @@ export class EngineRuntime {
   readonly #preparationStore: PreparationStore
   readonly #activeExecutions = new Set<Promise<EngineCommandResult>>()
   readonly #creationService: TorrentCreationService | null
+  readonly #legacyImports: LegacyImportService | null
   readonly #mediaProxy: MediaProxy | null
   readonly #torrentManager: TorrentManager | null
   #closePromise: Promise<void> | null = null
@@ -250,6 +259,7 @@ export class EngineRuntime {
   constructor(options: EngineRuntimeOptions = {}) {
     this.#emitEvent = options.emitEvent ?? (() => undefined)
     this.#creationService = options.creationService ?? null
+    this.#legacyImports = options.legacyImports ?? null
     this.#mediaProxy = options.mediaProxy ?? null
     this.#torrentManager = options.torrentManager ?? null
     this.#preparationStore = options.preparationStore ?? new PreparationStore()
@@ -449,6 +459,43 @@ export class EngineRuntime {
         return await this.#commitPreparation(operation)
       case 'create-torrent':
         return await this.#createTorrent(operation)
+      case 'list-legacy-imports': {
+        const importer = this.#requireLegacyImports()
+        return {
+          ok: true,
+          result: {
+            command: 'list-legacy-imports',
+            value: await importer.page(
+              operation.payload.legacyRoot,
+              operation.payload.cursor,
+              operation.payload.limit
+            )
+          }
+        }
+      }
+      case 'import-legacy-torrent': {
+        const importer = this.#requireLegacyImports()
+        const manager = this.#requireManager()
+        const entry = await importer.take(
+          operation.payload.legacyRoot,
+          operation.payload.infoHash
+        )
+        if (!entry) return errorResult(operation, PUBLIC_ERRORS.torrentNotFound)
+
+        const torrent = await manager.add({
+          destinationRoot: operation.payload.destinationRoot,
+          metadata: entry.metadata,
+          selectedIndexes: entry.selectedIndexes
+        })
+        this.#emit({ event: 'torrent-updated', payload: torrent })
+        return {
+          ok: true,
+          result: {
+            command: 'import-legacy-torrent',
+            value: { infoHash: operation.payload.infoHash, torrent }
+          }
+        }
+      }
       case 'open-media':
         return this.#openMedia(operation)
       case 'heartbeat-media': {
@@ -604,6 +651,11 @@ export class EngineRuntime {
     }
   }
 
+  #requireLegacyImports(): LegacyImportService {
+    if (!this.#legacyImports) throw new EngineRuntimeUnavailableError()
+    return this.#legacyImports
+  }
+
   #requireMediaProxy(): MediaProxy {
     if (!this.#mediaProxy) throw new EngineRuntimeUnavailableError()
     return this.#mediaProxy
@@ -706,6 +758,16 @@ export class EngineRuntime {
 
     if (error instanceof EngineRuntimeUnavailableError) {
       return errorResult(operation, PUBLIC_ERRORS.engineNotReady)
+    }
+
+    if (error instanceof LegacyImportError) {
+      switch (error.code) {
+        case 'ROOT_NOT_AUTHORIZED':
+          return errorResult(operation, PUBLIC_ERRORS.sourceNotAuthorized)
+        case 'STATE_UNREADABLE':
+        case 'TOO_MANY_TORRENTS':
+          return errorResult(operation, PUBLIC_ERRORS.legacyUnreadable)
+      }
     }
 
     if (error instanceof MediaProxyError) {
