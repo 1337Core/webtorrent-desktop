@@ -11,6 +11,7 @@ import {
   type PreparationFilePage,
   type PreparationSnapshot
 } from './preparation-store'
+import { DiskTorrentError } from './disk-torrent'
 import { TorrentManager, TorrentManagerError } from './torrent-manager'
 import {
   TorrentPreparationService,
@@ -99,6 +100,21 @@ const PUBLIC_ERRORS = Object.freeze({
   remoteTorrentUnavailable: {
     code: 'NOT_FOUND',
     displayMessage: 'The remote torrent could not be loaded.',
+    retryable: true
+  },
+  torrentAddFailed: {
+    code: 'INTERNAL',
+    displayMessage: 'The torrent could not be started.',
+    retryable: false
+  },
+  torrentMetadataRejected: {
+    code: 'INPUT_INVALID',
+    displayMessage: 'The torrent metadata did not match its reservation.',
+    retryable: false
+  },
+  torrentTimedOut: {
+    code: 'TIMEOUT',
+    displayMessage: 'The torrent did not become ready in time.',
     retryable: true
   },
   torrentNotFound: {
@@ -391,12 +407,56 @@ export class EngineRuntime {
           }
         }
       }
-      case 'close-media':
       case 'commit-preparation':
+        return await this.#commitPreparation(operation)
+      case 'close-media':
       case 'create-torrent':
       case 'heartbeat-media':
       case 'open-media':
         return errorResult(operation, PUBLIC_ERRORS.unsupported)
+    }
+  }
+
+  /**
+   * Consumes an open preparation exactly once. A failure before the metadata
+   * barrier rolls the preparation back to open; a successful commitment
+   * consumes its exclusive reservation.
+   */
+  async #commitPreparation(
+    operation: Extract<EngineCommand, { command: 'commit-preparation' }>
+  ): Promise<EngineCommandResult> {
+    const manager = this.#requireManager()
+    const reservation = this.#preparationStore.beginCommit(
+      operation.payload.preparationId
+    )
+
+    let torrent
+    try {
+      torrent = await manager.add({
+        destinationRoot: operation.payload.destinationRoot,
+        metadata: reservation.metadata,
+        selectedIndexes: reservation.selectedIndexes
+      })
+    } catch (error) {
+      try {
+        this.#preparationStore.rollbackCommitBeforeMetadata(reservation)
+      } catch {
+        // An exact TTL boundary may already have removed the preparation.
+      }
+      throw error
+    }
+
+    this.#preparationStore.consumeCommit(reservation)
+    this.#emit({ event: 'torrent-updated', payload: torrent })
+    return {
+      ok: true,
+      result: {
+        command: 'commit-preparation',
+        value: {
+          preparationId: reservation.preparationId,
+          torrent
+        }
+      }
     }
   }
 
@@ -497,6 +557,21 @@ export class EngineRuntime {
 
     if (error instanceof EngineRuntimeUnavailableError) {
       return errorResult(operation, PUBLIC_ERRORS.engineNotReady)
+    }
+
+    if (error instanceof DiskTorrentError) {
+      switch (error.code) {
+        case 'COMMIT_REJECTED':
+          return errorResult(operation, PUBLIC_ERRORS.torrentMetadataRejected)
+        case 'READY_TIMEOUT':
+          return errorResult(operation, PUBLIC_ERRORS.torrentTimedOut)
+        case 'STATE_CONFLICT':
+          return errorResult(operation, PUBLIC_ERRORS.torrentStateConflict)
+        case 'ADD_FAILED':
+        case 'DESTROYED':
+        case 'TORRENT_ERROR':
+          return errorResult(operation, PUBLIC_ERRORS.torrentAddFailed)
+      }
     }
 
     if (error instanceof TorrentManagerError) {

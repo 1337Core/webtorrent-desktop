@@ -13,7 +13,9 @@ import {
   type PreparationSnapshot
 } from './preparation-store'
 import { EngineRuntime } from './runtime'
-import { TorrentManager } from './torrent-manager'
+import { DiskTorrentError } from './disk-torrent'
+import type { TorrentManager } from './torrent-manager'
+import { TorrentManager as TorrentManagerImpl } from './torrent-manager'
 import type { ValidatedTorrentMetadata } from './torrent-metadata'
 import {
   TorrentPreparationService,
@@ -143,7 +145,7 @@ function createPreparationHarness(
 
 /** A manager with no sessions: every torrent command reports NOT_FOUND. */
 function emptyTorrentManager(): TorrentManager {
-  return new TorrentManager({
+  return new TorrentManagerImpl({
     resolveClient: () => ({
       add: () => {
         throw new Error('No client is attached in this test')
@@ -408,16 +410,113 @@ describe('EngineRuntime', () => {
     expect(open).not.toHaveBeenCalled()
   })
 
+  it('commits an open preparation into an owned torrent session', async () => {
+    const store = new PreparationStore({ createId: idFactory() })
+    const prepared = metadata({ fileCount: 2 })
+    const manager = {
+      add: vi.fn(async () => ({
+        downloadSpeed: 0,
+        downloaded: 0,
+        fileCount: 2,
+        infoHash: INFO_HASH,
+        length: prepared.length,
+        name: prepared.name,
+        peerCount: 0,
+        private: false,
+        progress: 0,
+        selectedFileCount: 2,
+        state: 'paused' as const,
+        timeRemainingMs: null,
+        uploadSpeed: 0,
+        uploaded: 0
+      })),
+      closeAll: vi.fn(async () => undefined)
+    }
+    const emitEvent = vi.fn()
+    const runtime = new EngineRuntime({
+      emitEvent,
+      preparationStore: store,
+      torrentManager: manager as unknown as TorrentManager,
+      createPreparationService: ownedStore =>
+        new TorrentPreparationService({
+          readLocalTorrent: async () => new Uint8Array([1]),
+          store: ownedStore,
+          validateMetadata: async () => prepared
+        })
+    })
+
+    await runtime.execute(localOpen(), signal())
+    const operation: EngineCommand = {
+      command: 'commit-preparation',
+      payload: {
+        destinationRoot: '/authorized/downloads',
+        preparationId: PREPARATION_ID
+      }
+    }
+    const result = await runtime.execute(operation, signal())
+
+    expectStrictResult(operation, result)
+    expect(result).toMatchObject({
+      ok: true,
+      result: {
+        command: 'commit-preparation',
+        value: {
+          preparationId: PREPARATION_ID,
+          torrent: { infoHash: INFO_HASH }
+        }
+      }
+    })
+    expect(manager.add).toHaveBeenCalledWith({
+      destinationRoot: '/authorized/downloads',
+      metadata: expect.objectContaining({ infoHash: INFO_HASH }) as unknown,
+      selectedIndexes: []
+    })
+    expect(emitEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ event: 'torrent-updated' })
+    )
+    expect(() => store.get(PREPARATION_ID)).toThrow()
+  })
+
+  it('reopens the preparation when the commit fails before metadata', async () => {
+    const store = new PreparationStore({ createId: idFactory() })
+    const prepared = metadata({ fileCount: 2 })
+    const manager = {
+      add: vi.fn(async () => {
+        throw new DiskTorrentError('COMMIT_REJECTED', 'NAME_MISMATCH')
+      }),
+      closeAll: vi.fn(async () => undefined)
+    }
+    const runtime = new EngineRuntime({
+      preparationStore: store,
+      torrentManager: manager as unknown as TorrentManager,
+      createPreparationService: ownedStore =>
+        new TorrentPreparationService({
+          readLocalTorrent: async () => new Uint8Array([1]),
+          store: ownedStore,
+          validateMetadata: async () => prepared
+        })
+    })
+
+    await runtime.execute(localOpen(), signal())
+    const operation: EngineCommand = {
+      command: 'commit-preparation',
+      payload: {
+        destinationRoot: '/authorized/downloads',
+        preparationId: PREPARATION_ID
+      }
+    }
+    const result = await runtime.execute(operation, signal())
+
+    expectStrictResult(operation, result)
+    expect(errorCode(result)).toBe('INPUT_INVALID')
+    expect(store.get(PREPARATION_ID)).toMatchObject({
+      lifecycleState: 'open'
+    })
+  })
+
   it('returns fixed unsupported results for every deferred command', async () => {
     const runtime = new EngineRuntime({ torrentManager: emptyTorrentManager() })
     const operations = [
-      {
-        command: 'commit-preparation',
-        payload: {
-          destinationRoot: '/authorized/downloads',
-          preparationId: PREPARATION_ID
-        }
-      },
       {
         command: 'create-torrent',
         payload: {
