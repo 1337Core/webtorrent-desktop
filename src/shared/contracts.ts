@@ -24,6 +24,25 @@ export const menuActionEventSchema = z.strictObject({
 })
 
 export type MenuActionEvent = z.infer<typeof menuActionEventSchema>
+
+export const DESKTOP_OPEN_INTENT_CHANNEL = 'desktop:open-intent:v1'
+
+/** A validated open request from the OS, still unvalidated as a torrent. */
+export const openIntentEventSchema = z.strictObject({
+  protocolVersion: z.literal(PROTOCOL_VERSION),
+  intent: z.discriminatedUnion('kind', [
+    z.strictObject({
+      kind: z.literal('magnet'),
+      magnet: z.string().min(8).max(65_536)
+    }),
+    z.strictObject({
+      kind: z.literal('torrent-file'),
+      torrentPath: z.string().min(1).max(4_096)
+    })
+  ])
+})
+
+export type OpenIntentEvent = z.infer<typeof openIntentEventSchema>
 export const ENGINE_MESSAGE_BUDGET = {
   maxBytes: 128 * 1024,
   maxDepth: 16,

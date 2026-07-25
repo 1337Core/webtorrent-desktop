@@ -23,6 +23,7 @@ import { z } from 'zod'
 import {
   APP_NAME,
   DESKTOP_MENU_ACTION_CHANNEL,
+  DESKTOP_OPEN_INTENT_CHANNEL,
   ENGINE_STATUS_CHANNEL,
   PROTOCOL_VERSION,
   engineStatusEventSchema,
@@ -45,6 +46,7 @@ import {
 import { EngineSupervisor } from './engine-supervisor'
 import { findDangerousLaunchSwitch } from './launch-policy'
 import { installAppMenu } from './app-menu'
+import { TorrentHandlers } from './torrent-handlers'
 import { AppStateStore } from './state-store'
 import { TRUSTED_RENDERER_URL } from './trusted-renderer'
 
@@ -367,6 +369,7 @@ function publishEngineStatus(status: EngineStatus): void {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.mainFrame.send(
       DESKTOP_MENU_ACTION_CHANNEL,
+      DESKTOP_OPEN_INTENT_CHANNEL,
       ENGINE_STATUS_CHANNEL,
       latestEngineStatusEvent
     )
@@ -694,6 +697,31 @@ function createMainWindow(runtime: RuntimeInfo): BrowserWindow {
     if (result.canceled) return null
     return result.filePaths[0] ?? null
   }
+
+  const torrentHandlers = new TorrentHandlers({
+    diagnostics,
+    onIntent: intent => {
+      window.webContents.mainFrame.send(DESKTOP_OPEN_INTENT_CHANNEL, {
+        protocolVersion: PROTOCOL_VERSION,
+        intent
+      })
+      if (window.isMinimized()) window.restore()
+      window.focus()
+    }
+  })
+
+  app.on('open-url', (event, url) => {
+    event.preventDefault()
+    torrentHandlers.handleUrl(url)
+  })
+  app.on('open-file', (event, filePath) => {
+    event.preventDefault()
+    void torrentHandlers.handleFile(filePath)
+  })
+  app.on('second-instance', (_event, argv) => {
+    void torrentHandlers.handleArguments(argv)
+  })
+  void torrentHandlers.handleArguments(process.argv)
 
   const sendMenuAction = (
     action: 'add-torrent' | 'create-torrent' | 'preferences'

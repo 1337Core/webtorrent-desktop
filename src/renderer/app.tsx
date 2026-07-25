@@ -41,6 +41,11 @@ export function App(): React.JSX.Element {
   const [restartPending, setRestartPending] = useState(false)
   const [listRevision, setListRevision] = useState(0)
   const [downloadRoot, setDownloadRoot] = useState<string | null>(null)
+  const [openIntent, setOpenIntent] = useState<
+    | { kind: 'magnet'; magnet: string }
+    | { kind: 'torrent-file'; torrentPath: string }
+    | null
+  >(null)
   const [focused, setFocused] = useState<
     'add-torrent' | 'create-torrent' | 'preferences' | null
   >(null)
@@ -52,6 +57,11 @@ export function App(): React.JSX.Element {
 
   // A menu action only asks the renderer to surface a section; it never
   // performs the action itself.
+  useEffect(() => {
+    if (rendererBoundaryFailed) return undefined
+    return window.desktop.onOpenIntent(setOpenIntent)
+  }, [rendererBoundaryFailed])
+
   useEffect(() => {
     if (rendererBoundaryFailed) return undefined
     return window.desktop.onMenuAction(action => {
@@ -159,7 +169,11 @@ export function App(): React.JSX.Element {
 
       <AddTorrent
         downloadRoot={downloadRoot}
-        onAdded={() => setListRevision(revision => revision + 1)}
+        intent={openIntent}
+        onAdded={() => {
+          setOpenIntent(null)
+          setListRevision(revision => revision + 1)
+        }}
         ready={engineStatus.state === 'ready'}
       />
 

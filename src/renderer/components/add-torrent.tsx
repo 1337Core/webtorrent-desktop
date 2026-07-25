@@ -21,6 +21,11 @@ const WARNING_LABELS: Readonly<Record<string, string>> = {
 export type AddTorrentProps = Readonly<{
   /** Absent until main has resolved the download root. */
   downloadRoot: string | null
+  /** A validated open request from Finder or a magnet link. */
+  intent?: Readonly<
+    | { kind: 'magnet'; magnet: string }
+    | { kind: 'torrent-file'; torrentPath: string }
+  > | null
   onAdded: () => void
   ready: boolean
 }>
@@ -32,6 +37,7 @@ export type AddTorrentProps = Readonly<{
  */
 export function AddTorrent({
   downloadRoot,
+  intent = null,
   onAdded,
   ready
 }: AddTorrentProps): React.JSX.Element {
@@ -63,6 +69,37 @@ export function AddTorrent({
     }
     setPreparation(outcome.value)
   }, [url])
+
+  // An OS open request prepares exactly like a typed URL: reviewed first,
+  // committed only on confirmation.
+  useEffect(() => {
+    if (!intent || !ready) return undefined
+    const timer = setTimeout(() => {
+      void runCommand({
+        command: 'open-preparation',
+        payload: {
+          source:
+            intent.kind === 'magnet'
+              ? {
+                  allowDhtExposure: false,
+                  allowPrivateNetwork: false,
+                  kind: 'magnet',
+                  magnet: intent.magnet
+                }
+              : { kind: 'local-torrent', path: intent.torrentPath }
+        }
+      }).then(outcome => {
+        if (!outcome.ok) {
+          setFailure(outcome.error)
+          return
+        }
+        setPreparation(outcome.value)
+      })
+    }, 0)
+    return () => {
+      clearTimeout(timer)
+    }
+  }, [intent, ready])
 
   // The first page of the manifest is enough to review a typical torrent;
   // larger torrents keep their remaining files deselected until committed.

@@ -328,4 +328,61 @@ describe('AddTorrent', () => {
       await screen.findByText('The remote torrent could not be loaded.')
     ).toBeDefined()
   })
+
+  it('prepares a torrent opened from Finder', async () => {
+    render(
+      <AddTorrent
+        downloadRoot={DOWNLOAD_ROOT}
+        intent={{ kind: 'torrent-file', torrentPath: '/Users/owner/a.torrent' }}
+        onAdded={vi.fn()}
+        ready
+      />
+    )
+
+    expect(await screen.findByText('Prepared payload')).toBeDefined()
+    expect(commands[0]).toEqual({
+      command: 'open-preparation',
+      payload: {
+        source: { kind: 'local-torrent', path: '/Users/owner/a.torrent' }
+      }
+    })
+  })
+
+  it('prepares a magnet link opened from the OS', async () => {
+    const magnet = `magnet:?xt=urn:btih:${INFO_HASH}`
+    render(
+      <AddTorrent
+        downloadRoot={DOWNLOAD_ROOT}
+        intent={{ kind: 'magnet', magnet }}
+        onAdded={vi.fn()}
+        ready
+      />
+    )
+
+    await waitFor(() => expect(commands).toHaveLength(2))
+    expect(commands[0]).toEqual({
+      command: 'open-preparation',
+      payload: {
+        source: {
+          allowDhtExposure: false,
+          allowPrivateNetwork: false,
+          kind: 'magnet',
+          magnet
+        }
+      }
+    })
+  })
+
+  it('ignores an intent while the engine is not ready', () => {
+    render(
+      <AddTorrent
+        downloadRoot={DOWNLOAD_ROOT}
+        intent={{ kind: 'torrent-file', torrentPath: '/Users/owner/a.torrent' }}
+        onAdded={vi.fn()}
+        ready={false}
+      />
+    )
+
+    expect(commands).toEqual([])
+  })
 })

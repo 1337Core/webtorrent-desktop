@@ -4,6 +4,7 @@ import type {
   EngineCommand,
   EngineStatus,
   MenuActionEvent,
+  OpenIntentEvent,
   RestartEngineResult,
   SetPreferencesResult,
   TorrentCommandResult
@@ -19,6 +20,9 @@ declare global {
       onEngineStatus: (listener: (status: EngineStatus) => void) => () => void
       onMenuAction: (
         listener: (action: MenuActionEvent['action']) => void
+      ) => () => void
+      onOpenIntent: (
+        listener: (intent: OpenIntentEvent['intent']) => void
       ) => () => void
       restartEngine: () => Promise<RestartEngineResult>
       runTorrentCommand: (

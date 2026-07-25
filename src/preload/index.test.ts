@@ -195,6 +195,7 @@ describe('preload desktop bridge', () => {
       'getBootstrap',
       'onEngineStatus',
       'onMenuAction',
+      'onOpenIntent',
       'restartEngine',
       'runTorrentCommand',
       'setDownloadRoot'

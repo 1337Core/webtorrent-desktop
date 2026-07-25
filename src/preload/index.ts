@@ -6,6 +6,7 @@ import {
   DESKTOP_CHOOSE_PATH_CHANNEL,
   DESKTOP_ENGINE_RESTART_CHANNEL,
   DESKTOP_MENU_ACTION_CHANNEL,
+  DESKTOP_OPEN_INTENT_CHANNEL,
   DESKTOP_PREFERENCES_CHANNEL,
   DESKTOP_TORRENT_COMMAND_CHANNEL,
   ENGINE_STATUS_CHANNEL,
@@ -13,6 +14,7 @@ import {
   preloadTrustProofSchema,
   PROTOCOL_VERSION,
   menuActionEventSchema,
+  openIntentEventSchema,
   restartEngineResultSchema,
   setPreferencesResultSchema,
   torrentCommandResultSchema,
@@ -20,6 +22,7 @@ import {
   type ChoosePathResult,
   type EngineCommand,
   type MenuActionEvent,
+  type OpenIntentEvent,
   type SetPreferencesResult,
   type TorrentCommandResult,
   type EngineStatusEvent,
@@ -322,6 +325,21 @@ function onMenuAction(
   }
 }
 
+/** Finder and magnet opens arrive here; the renderer prepares them. */
+function onOpenIntent(
+  listener: (intent: OpenIntentEvent['intent']) => void
+): () => void {
+  const handler = (_event: unknown, value: unknown): void => {
+    const parsed = openIntentEventSchema.safeParse(value)
+    if (!parsed.success) return
+    listener(parsed.data.intent)
+  }
+  ipcRenderer.on(DESKTOP_OPEN_INTENT_CHANNEL, handler)
+  return () => {
+    ipcRenderer.removeListener(DESKTOP_OPEN_INTENT_CHANNEL, handler)
+  }
+}
+
 contextBridge.exposeInMainWorld(
   'desktop',
   Object.freeze({
@@ -331,6 +349,7 @@ contextBridge.exposeInMainWorld(
     runTorrentCommand,
     setDownloadRoot,
     onEngineStatus,
-    onMenuAction
+    onMenuAction,
+    onOpenIntent
   })
 )
