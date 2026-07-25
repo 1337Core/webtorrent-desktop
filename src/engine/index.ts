@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto'
+import path from 'node:path'
 import process from 'node:process'
 import WebTorrent from 'webtorrent'
 import type { EngineEvent, EngineRuntimeInfo } from '../shared/contracts'
@@ -11,7 +12,10 @@ import { EgressPolicy } from './network-policy'
 import { PeerAdmissionPolicy } from './peer-admission'
 import { EngineProtocolController } from './protocol-controller'
 import { EngineRuntime } from './runtime'
+import { ResumeStore } from './resume-store'
+import { TorrentArchive } from './torrent-archive'
 import { TorrentCreationService } from './torrent-creation'
+import { validateTorrentMetadata } from './torrent-metadata'
 import { TrackerActivation } from './tracker-activation'
 import { TrackerHttpRequestGate, TrackerHttpTransport } from './tracker-http'
 import { TorrentManager } from './torrent-manager'
@@ -90,8 +94,19 @@ const dht = new DhtBoundary({
   }
 })
 
+// Main gives the engine a 0700 fork-owned working directory as its cwd; the
+// resume sidecars and archived torrent bytes live under it and nowhere else.
+const forkDirectory = path.resolve(process.cwd())
+const resumeStore = new ResumeStore({
+  directory: path.join(forkDirectory, 'resume')
+})
+const torrentArchive = new TorrentArchive({
+  directory: path.join(forkDirectory, 'torrents')
+})
+
 const torrentManager = new TorrentManager({
   resolveClient,
+  resume: resumeStore,
   sessionOptions: {
     createActivation: session => {
       const tiers = session.metadata.announceTiers
@@ -203,7 +218,11 @@ const runtime = new EngineRuntime({
   legacyImports: new LegacyImportService({ policy: egress }),
   mediaProxy,
   emitEvent: event => emitRuntimeEvent(event),
-  torrentManager
+  resumeSelection: async infoHash =>
+    (await resumeStore.load(infoHash))?.selectedPaths ?? null,
+  torrentArchive,
+  torrentManager,
+  validateArchivedMetadata: bytes => validateTorrentMetadata(bytes, egress)
 })
 
 const controller = new EngineProtocolController({

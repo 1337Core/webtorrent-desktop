@@ -19,7 +19,9 @@ import {
   TorrentCreationError,
   TorrentCreationService
 } from './torrent-creation'
+import { TorrentArchive, TorrentArchiveError } from './torrent-archive'
 import { TorrentManager, TorrentManagerError } from './torrent-manager'
+import type { ValidatedTorrentMetadata } from './torrent-metadata'
 import {
   TorrentPreparationService,
   TorrentPreparationServiceError
@@ -44,6 +46,14 @@ type EngineRuntimeOptions = Readonly<{
   legacyImports?: LegacyImportService
   mediaProxy?: MediaProxy
   preparationStore?: PreparationStore
+  /** Keeps committed torrent bytes so a restart can rebuild its sessions. */
+  torrentArchive?: TorrentArchive
+  /** Revalidates archived bytes on the way back in. */
+  validateArchivedMetadata?: (
+    bytes: Uint8Array
+  ) => Promise<ValidatedTorrentMetadata>
+  /** The restored torrent's saved selection, by normalized path. */
+  resumeSelection?: (infoHash: string) => Promise<ReadonlyArray<string> | null>
   torrentManager?: TorrentManager
 }>
 
@@ -70,6 +80,11 @@ const PUBLIC_ERRORS = Object.freeze({
   alreadyExists: {
     code: 'ALREADY_EXISTS',
     displayMessage: 'This torrent is already being prepared.',
+    retryable: false
+  },
+  archiveUnavailable: {
+    code: 'NOT_FOUND',
+    displayMessage: 'The saved torrent file is missing; add it again.',
     retryable: false
   },
   capacityExceeded: {
@@ -252,6 +267,11 @@ export class EngineRuntime {
   readonly #creationService: TorrentCreationService | null
   readonly #legacyImports: LegacyImportService | null
   readonly #mediaProxy: MediaProxy | null
+  readonly #torrentArchive: TorrentArchive | null
+  readonly #validateArchivedMetadata:
+    ((bytes: Uint8Array) => Promise<ValidatedTorrentMetadata>) | null
+  readonly #resumeSelection:
+    ((infoHash: string) => Promise<ReadonlyArray<string> | null>) | null
   readonly #torrentManager: TorrentManager | null
   #closePromise: Promise<void> | null = null
   #closed = false
@@ -261,6 +281,9 @@ export class EngineRuntime {
     this.#creationService = options.creationService ?? null
     this.#legacyImports = options.legacyImports ?? null
     this.#mediaProxy = options.mediaProxy ?? null
+    this.#torrentArchive = options.torrentArchive ?? null
+    this.#validateArchivedMetadata = options.validateArchivedMetadata ?? null
+    this.#resumeSelection = options.resumeSelection ?? null
     this.#torrentManager = options.torrentManager ?? null
     this.#preparationStore = options.preparationStore ?? new PreparationStore()
     this.#preparationService =
@@ -466,6 +489,7 @@ export class EngineRuntime {
         const manager = this.#requireManager()
         this.#mediaProxy?.revokeTorrent(operation.payload.infoHash)
         await manager.remove(operation.payload.infoHash)
+        await this.#torrentArchive?.remove(operation.payload.infoHash)
         this.#emit({
           event: 'torrent-removed',
           payload: { infoHash: operation.payload.infoHash }
@@ -478,6 +502,8 @@ export class EngineRuntime {
           }
         }
       }
+      case 'restore-torrent':
+        return await this.#restoreTorrent(operation)
       case 'commit-preparation':
         return await this.#commitPreparation(operation)
       case 'create-torrent':
@@ -581,6 +607,7 @@ export class EngineRuntime {
     }
 
     this.#preparationStore.consumeCommit(reservation)
+    await this.#archive(reservation.metadata)
     this.#emit({ event: 'torrent-updated', payload: torrent })
     return {
       ok: true,
@@ -590,6 +617,75 @@ export class EngineRuntime {
           preparationId: reservation.preparationId,
           torrent
         }
+      }
+    }
+  }
+
+  /**
+   * Keeps the committed bytes so a restart can rebuild the session without
+   * asking the network for metadata again. A failed archive costs the restart,
+   * not the add, so it never fails the command.
+   */
+  async #archive(metadata: ValidatedTorrentMetadata): Promise<void> {
+    if (!this.#torrentArchive) return
+    try {
+      await this.#torrentArchive.save(metadata.infoHash, metadata.torrentBytes)
+    } catch {
+      // The torrent is running; only the next restart loses its fast path.
+    }
+  }
+
+  /**
+   * Rebuilds one session from its archived bytes. The bytes re-enter through
+   * the ordinary metadata boundary, and a torrent whose archive is missing or
+   * no longer valid is reported rather than silently skipped.
+   */
+  async #restoreTorrent(
+    operation: Extract<EngineCommand, { command: 'restore-torrent' }>
+  ): Promise<EngineCommandResult> {
+    const manager = this.#requireManager()
+    const archive = this.#torrentArchive
+    const validate = this.#validateArchivedMetadata
+    if (!archive || !validate) throw new EngineRuntimeUnavailableError()
+
+    const bytes = await archive.load(operation.payload.infoHash)
+    if (bytes === null) {
+      return errorResult(operation, PUBLIC_ERRORS.archiveUnavailable)
+    }
+
+    const metadata = await validate(bytes)
+    if (metadata.infoHash !== operation.payload.infoHash) {
+      return errorResult(operation, PUBLIC_ERRORS.archiveUnavailable)
+    }
+
+    // Selections are keyed by normalized path, never by array index, so a
+    // reordered manifest can never select the wrong file. A torrent with no
+    // saved selection restores whole, as it was first added.
+    const saved = (await this.#resumeSelection?.(metadata.infoHash)) ?? null
+    const wanted = new Set(saved ?? [])
+    const selectedIndexes = metadata.files
+      .filter(file => wanted.has(file.path))
+      .map(file => file.index)
+
+    const torrent = await manager.add({
+      destinationRoot: operation.payload.destinationRoot,
+      metadata,
+      selectedIndexes:
+        selectedIndexes.length > 0
+          ? selectedIndexes
+          : metadata.files.map(file => file.index)
+    })
+    if (operation.payload.paused) {
+      await manager.pause(metadata.infoHash)
+    }
+
+    const restored = manager.summary(metadata.infoHash)
+    this.#emit({ event: 'torrent-updated', payload: restored })
+    return {
+      ok: true,
+      result: {
+        command: 'restore-torrent',
+        value: { infoHash: torrent.infoHash, torrent: restored }
       }
     }
   }
@@ -624,6 +720,7 @@ export class EngineRuntime {
       metadata: created.metadata,
       selectedIndexes: created.metadata.files.map(file => file.index)
     })
+    await this.#archive(created.metadata)
     this.#emit({ event: 'torrent-updated', payload: torrent })
     return {
       ok: true,
@@ -860,6 +957,10 @@ export class EngineRuntime {
         case 'STATE_CONFLICT':
           return errorResult(operation, PUBLIC_ERRORS.torrentStateConflict)
       }
+    }
+
+    if (error instanceof TorrentArchiveError) {
+      return errorResult(operation, PUBLIC_ERRORS.archiveUnavailable)
     }
 
     if (error instanceof PreparationStoreError) {

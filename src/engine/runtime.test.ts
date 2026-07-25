@@ -20,6 +20,7 @@ import {
   TorrentCreationError,
   type TorrentCreationService
 } from './torrent-creation'
+import type { TorrentArchive } from './torrent-archive'
 import type { TorrentManager } from './torrent-manager'
 import { TorrentManager as TorrentManagerImpl } from './torrent-manager'
 import type { ValidatedTorrentMetadata } from './torrent-metadata'
@@ -417,6 +418,207 @@ describe('EngineRuntime', () => {
         value: { infoHash: INFO_HASH, selectedFileCount: 2 }
       }
     })
+  })
+
+  it('restores a torrent from its archive and saved selection', async () => {
+    const restored = metadata({ fileCount: 3 })
+    const summary = {
+      downloadSpeed: 0,
+      downloaded: 0,
+      fileCount: 3,
+      infoHash: INFO_HASH,
+      length: restored.length,
+      name: restored.name,
+      peerCount: 0,
+      private: false,
+      progress: 0,
+      selectedFileCount: 2,
+      state: 'paused' as const,
+      timeRemainingMs: null,
+      uploadSpeed: 0,
+      uploaded: 0
+    }
+    const manager = {
+      add: vi.fn(async () => summary),
+      pause: vi.fn(async () => summary),
+      summary: vi.fn(() => summary)
+    }
+    const archive = {
+      load: vi.fn(async () => new Uint8Array([1, 2, 3])),
+      remove: vi.fn(async () => undefined),
+      save: vi.fn(async () => undefined)
+    }
+    const runtime = new EngineRuntime({
+      resumeSelection: async () => ['root/file-0.txt', 'root/file-2.txt'],
+      torrentArchive: archive as unknown as TorrentArchive,
+      torrentManager: manager as unknown as TorrentManager,
+      validateArchivedMetadata: async () => restored
+    })
+    const operation: EngineCommand = {
+      command: 'restore-torrent',
+      payload: {
+        destinationRoot: '/authorized/downloads',
+        infoHash: INFO_HASH,
+        paused: true
+      }
+    }
+
+    const result = await runtime.execute(operation, signal())
+
+    expectStrictResult(operation, result)
+    expect(manager.add).toHaveBeenCalledWith({
+      destinationRoot: '/authorized/downloads',
+      metadata: restored,
+      selectedIndexes: [0, 2]
+    })
+    expect(manager.pause).toHaveBeenCalledWith(INFO_HASH)
+    expect(result).toEqual({
+      ok: true,
+      result: {
+        command: 'restore-torrent',
+        value: { infoHash: INFO_HASH, torrent: summary }
+      }
+    })
+  })
+
+  it('reports a missing archive rather than adding an unknown torrent', async () => {
+    const manager = { add: vi.fn() }
+    const archive = { load: vi.fn(async () => null) }
+    const runtime = new EngineRuntime({
+      torrentArchive: archive as unknown as TorrentArchive,
+      torrentManager: manager as unknown as TorrentManager,
+      validateArchivedMetadata: async () => metadata()
+    })
+    const operation: EngineCommand = {
+      command: 'restore-torrent',
+      payload: {
+        destinationRoot: '/authorized/downloads',
+        infoHash: INFO_HASH,
+        paused: false
+      }
+    }
+
+    const result = await runtime.execute(operation, signal())
+
+    expectStrictResult(operation, result)
+    expect(errorCode(result)).toBe('NOT_FOUND')
+    expect(manager.add).not.toHaveBeenCalled()
+  })
+
+  it('refuses archived bytes that no longer carry the expected info hash', async () => {
+    const manager = { add: vi.fn() }
+    const archive = { load: vi.fn(async () => new Uint8Array([1])) }
+    const runtime = new EngineRuntime({
+      torrentArchive: archive as unknown as TorrentArchive,
+      torrentManager: manager as unknown as TorrentManager,
+      validateArchivedMetadata: async () =>
+        metadata({ infoHash: 'f'.repeat(40) })
+    })
+    const operation: EngineCommand = {
+      command: 'restore-torrent',
+      payload: {
+        destinationRoot: '/authorized/downloads',
+        infoHash: INFO_HASH,
+        paused: false
+      }
+    }
+
+    const result = await runtime.execute(operation, signal())
+
+    expect(errorCode(result)).toBe('NOT_FOUND')
+    expect(manager.add).not.toHaveBeenCalled()
+  })
+
+  it('archives the committed bytes so a restart can rebuild the session', async () => {
+    const prepared = metadata({ fileCount: 2 })
+    const store = new PreparationStore()
+    const archive = {
+      load: vi.fn(async () => null),
+      remove: vi.fn(async () => undefined),
+      save: vi.fn(async () => undefined)
+    }
+    const manager = {
+      add: vi.fn(async () => ({
+        downloadSpeed: 0,
+        downloaded: 0,
+        fileCount: 2,
+        infoHash: INFO_HASH,
+        length: prepared.length,
+        name: prepared.name,
+        peerCount: 0,
+        private: false,
+        progress: 0,
+        selectedFileCount: 2,
+        state: 'paused' as const,
+        timeRemainingMs: null,
+        uploadSpeed: 0,
+        uploaded: 0
+      }))
+    }
+    const runtime = new EngineRuntime({
+      preparationStore: store,
+      torrentArchive: archive as unknown as TorrentArchive,
+      torrentManager: manager as unknown as TorrentManager,
+      createPreparationService: ownedStore =>
+        new TorrentPreparationService({
+          readLocalTorrent: async () => new Uint8Array([1]),
+          store: ownedStore,
+          validateMetadata: async () => prepared
+        })
+    })
+
+    const opened = await runtime.execute(localOpen(), signal())
+    const preparationId =
+      opened.ok && opened.result.command === 'open-preparation'
+        ? opened.result.value.preparationId
+        : ''
+    await runtime.execute(
+      {
+        command: 'commit-preparation',
+        payload: { destinationRoot: '/authorized/downloads', preparationId }
+      },
+      signal()
+    )
+
+    expect(archive.save).toHaveBeenCalledWith(INFO_HASH, prepared.torrentBytes)
+  })
+
+  it('drops the archive when a torrent is removed', async () => {
+    const summary = {
+      downloadSpeed: 0,
+      downloaded: 0,
+      fileCount: 1,
+      infoHash: INFO_HASH,
+      length: 1,
+      name: 'example',
+      peerCount: 0,
+      private: false,
+      progress: 0,
+      selectedFileCount: 1,
+      state: 'paused' as const,
+      timeRemainingMs: null,
+      uploadSpeed: 0,
+      uploaded: 0
+    }
+    const archive = { remove: vi.fn(async () => undefined) }
+    const manager = {
+      remove: vi.fn(async () => undefined),
+      summary: vi.fn(() => summary)
+    }
+    const runtime = new EngineRuntime({
+      torrentArchive: archive as unknown as TorrentArchive,
+      torrentManager: manager as unknown as TorrentManager
+    })
+
+    await runtime.execute(
+      {
+        command: 'remove-torrent',
+        payload: { deleteData: false, infoHash: INFO_HASH }
+      },
+      signal()
+    )
+
+    expect(archive.remove).toHaveBeenCalledWith(INFO_HASH)
   })
 
   it('reports an unavailable engine when no clients are attached', async () => {

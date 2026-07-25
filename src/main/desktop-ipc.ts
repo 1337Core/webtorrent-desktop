@@ -31,6 +31,7 @@ import { checkPayloadBudget } from '../shared/payload-budget'
 import type { Diagnostics } from './diagnostics'
 import type { EngineSupervisor } from './engine-supervisor'
 import type { AppStateStore } from './state-store'
+import type { TorrentLibrary } from './torrent-library'
 import { isTrustedRendererEvent } from './trusted-renderer'
 
 const REQUEST_BUDGET = {
@@ -66,6 +67,8 @@ type DesktopIpcOptions = {
   onBootstrap: (trustProof: PreloadTrustProof) => void
   runtime: RuntimeInfo
   stateStore: AppStateStore
+  /** Keeps the durable library current from the commands main validates. */
+  torrentLibrary?: TorrentLibrary
   window: BrowserWindow
 }
 
@@ -117,6 +120,7 @@ export function registerDesktopIpc(options: DesktopIpcOptions): () => void {
     onBootstrap,
     runtime,
     stateStore,
+    torrentLibrary,
     window
   } = options
   const frameIpc = window.webContents.mainFrame.ipc
@@ -297,6 +301,7 @@ export function registerDesktopIpc(options: DesktopIpcOptions): () => void {
       const result = await engineSupervisor.execute(
         request.data.payload.operation
       )
+      torrentLibrary?.record(request.data.payload.operation, result)
       return torrentCommandResultSchema.parse({
         protocolVersion: PROTOCOL_VERSION,
         requestId: request.data.requestId,

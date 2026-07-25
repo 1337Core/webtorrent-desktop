@@ -52,6 +52,7 @@ import { DesktopNotifier, DockBadge, PowerSaveGuard } from './os-integration'
 import { measureSource } from './source-summary'
 import { TorrentHandlers } from './torrent-handlers'
 import { AppStateStore } from './state-store'
+import { TorrentLibrary } from './torrent-library'
 import { TRUSTED_RENDERER_URL } from './trusted-renderer'
 
 const DEFAULT_WINDOW_BOUNDS = {
@@ -233,7 +234,10 @@ configureRendererWebRtcBlocking()
 let mainWindow: BrowserWindow | null = null
 let uiSession: Session | null = null
 let stateStore: AppStateStore | null = null
+let torrentLibrary: TorrentLibrary | null = null
 let engineSupervisor: EngineSupervisor | null = null
+/** One restore sweep per engine generation, never one per status event. */
+let restoredGenerationId: string | null = null
 let unregisterApplicationProtocol: (() => void) | null = null
 let unregisterDesktopIpc: (() => void) | null = null
 let windowBoundsSaveTimer: NodeJS.Timeout | null = null
@@ -366,8 +370,29 @@ function assertWindowSecurity(window: BrowserWindow, session: Session): void {
   }
 }
 
+/**
+ * A ready engine holds no torrents of its own. Every recorded torrent is
+ * rebuilt from its archived bytes once per engine generation, so a restart —
+ * and a supervised engine restart — restores the library the owner left.
+ */
+function restoreLibrary(status: EngineStatus): void {
+  if (status.state !== 'ready' || status.generationId === null) return
+  if (restoredGenerationId === status.generationId) return
+  const library = torrentLibrary
+  const supervisor = engineSupervisor
+  if (!library || !supervisor) return
+
+  restoredGenerationId = status.generationId
+  void library
+    .restore(operation => supervisor.execute(operation))
+    .catch(() => {
+      // A failed sweep is reported by the library itself; the app still runs.
+    })
+}
+
 function publishEngineStatus(status: EngineStatus): void {
   if (status.state === 'ready') lastReadyEngineStatus = status
+  restoreLibrary(status)
   engineStatusSequence += 1
   latestEngineStatusEvent = engineStatusEventSchema.parse({
     protocolVersion: PROTOCOL_VERSION,
@@ -378,8 +403,6 @@ function publishEngineStatus(status: EngineStatus): void {
 
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.mainFrame.send(
-      DESKTOP_MENU_ACTION_CHANNEL,
-      DESKTOP_OPEN_INTENT_CHANNEL,
       ENGINE_STATUS_CHANNEL,
       latestEngineStatusEvent
     )
@@ -806,6 +829,7 @@ function createMainWindow(runtime: RuntimeInfo): BrowserWindow {
     onBootstrap: markRendererBootstrapped,
     runtime,
     stateStore,
+    ...(torrentLibrary ? { torrentLibrary } : {}),
     window
   })
 
@@ -847,6 +871,7 @@ async function initializeApplication(): Promise<void> {
   })
 
   stateStore = new AppStateStore(app.getPath('userData'), diagnostics)
+  torrentLibrary = new TorrentLibrary({ diagnostics, stateStore })
   if (stateStore.snapshot().preferences.downloadRoot === null) {
     stateStore.setDownloadRoot(app.getPath('downloads'))
   }

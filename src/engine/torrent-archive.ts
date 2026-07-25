@@ -1,0 +1,94 @@
+import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises'
+import path from 'node:path'
+
+export const TORRENT_ARCHIVE_LIMITS = {
+  /** The same ceiling the metadata boundary accepts for one torrent. */
+  maxTorrentBytes: 8_000_000
+} as const
+
+export type TorrentArchiveErrorCode = 'INVALID_INPUT' | 'IO_FAILED'
+
+export class TorrentArchiveError extends Error {
+  readonly code: TorrentArchiveErrorCode
+
+  constructor(code: TorrentArchiveErrorCode) {
+    super(`Torrent archive operation failed: ${code}.`)
+    this.name = 'TorrentArchiveError'
+    this.code = code
+  }
+}
+
+/**
+ * The fork-owned copy of every committed torrent's bytes, kept so a restart
+ * can rebuild its sessions without asking the network for metadata again.
+ *
+ * The archive stores bytes and nothing else. Identity, destination, selection,
+ * and status intent live in the main-process state document (section 10.1),
+ * and the bytes are revalidated through the ordinary metadata boundary on the
+ * way back in.
+ */
+export class TorrentArchive {
+  readonly #directory: string
+
+  constructor(options: Readonly<{ directory: string }>) {
+    if (!path.isAbsolute(options.directory)) {
+      throw new TorrentArchiveError('INVALID_INPUT')
+    }
+    this.#directory = path.resolve(options.directory)
+  }
+
+  archivePath(infoHash: string): string {
+    if (!/^[0-9a-f]{40}$/u.test(infoHash)) {
+      throw new TorrentArchiveError('INVALID_INPUT')
+    }
+    return path.join(this.#directory, `${infoHash}.torrent`)
+  }
+
+  /** Atomic: a torn write can never replace good torrent bytes. */
+  async save(infoHash: string, bytes: Uint8Array): Promise<void> {
+    if (bytes.byteLength === 0) {
+      throw new TorrentArchiveError('INVALID_INPUT')
+    }
+    if (bytes.byteLength > TORRENT_ARCHIVE_LIMITS.maxTorrentBytes) {
+      throw new TorrentArchiveError('INVALID_INPUT')
+    }
+
+    const target = this.archivePath(infoHash)
+    const temporary = `${target}.${process.pid}.tmp`
+    try {
+      await mkdir(this.#directory, { mode: 0o700, recursive: true })
+      const handle = await open(temporary, 'w', 0o600)
+      try {
+        await handle.writeFile(bytes)
+        await handle.sync()
+      } finally {
+        await handle.close()
+      }
+      await rename(temporary, target)
+    } catch {
+      await unlink(temporary).catch(() => undefined)
+      throw new TorrentArchiveError('IO_FAILED')
+    }
+  }
+
+  /** Absent or oversized bytes read as absent; the caller re-adds by hand. */
+  async load(infoHash: string): Promise<Uint8Array | null> {
+    let bytes: Buffer
+    try {
+      bytes = await readFile(this.archivePath(infoHash))
+    } catch {
+      return null
+    }
+    if (
+      bytes.byteLength === 0 ||
+      bytes.byteLength > TORRENT_ARCHIVE_LIMITS.maxTorrentBytes
+    ) {
+      return null
+    }
+    return new Uint8Array(bytes)
+  }
+
+  async remove(infoHash: string): Promise<void> {
+    await unlink(this.archivePath(infoHash)).catch(() => undefined)
+  }
+}

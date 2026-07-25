@@ -108,6 +108,7 @@ const engineCommandNameSchema = z.enum([
   'open-preparation',
   'pause-torrent',
   'remove-torrent',
+  'restore-torrent',
   'resume-torrent',
   'set-torrent-selection',
   'update-preparation-selection'
@@ -213,6 +214,20 @@ export const engineCommandSchema = z.discriminatedUnion('command', [
     command: z.literal('discard-preparation'),
     payload: z.strictObject({
       preparationId: uuidSchema
+    })
+  }),
+  /**
+   * Rebuilds one session from the archived torrent bytes at startup. Main
+   * holds the identity, destination, and status intent; the engine revalidates
+   * the bytes through the ordinary metadata boundary and takes the selection
+   * from the torrent's own resume sidecar.
+   */
+  z.strictObject({
+    command: z.literal('restore-torrent'),
+    payload: z.strictObject({
+      infoHash: infoHashSchema,
+      destinationRoot: absolutePathSchema,
+      paused: z.boolean()
     })
   }),
   z.strictObject({
@@ -515,6 +530,13 @@ const engineCommandSuccessSchema = z.discriminatedUnion('command', [
     })
   }),
   z.strictObject({
+    command: z.literal('restore-torrent'),
+    value: z.strictObject({
+      infoHash: infoHashSchema,
+      torrent: torrentSummarySchema
+    })
+  }),
+  z.strictObject({
     command: z.literal('list-torrents'),
     value: z
       .strictObject({
@@ -708,6 +730,7 @@ export function engineResultMatchesOperation(
         result.result.value.preparationId === operation.payload.preparationId
       )
     case 'get-torrent-files':
+    case 'restore-torrent':
     case 'set-torrent-selection':
       return (
         result.result.command === operation.command &&

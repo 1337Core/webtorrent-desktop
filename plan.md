@@ -1425,6 +1425,20 @@ Do not persist:
 Large or binary data lives in dedicated fork-owned directories. Configuration
 migrations make a timestamped backup before writing and are idempotent.
 
+The split in practice: main's document records each torrent's identity,
+destination root, and status intent, and the engine's fork-owned directory
+holds the bytes — one archived `.torrent` per info hash and one resume sidecar
+per torrent, the sidecar being the record of the selection by normalized path.
+Main keeps its document current from the torrent commands it already validates,
+so nothing new crosses a boundary to maintain it.
+
+On every engine generation — first launch and each supervised restart — main
+replays one `restore-torrent` command per recorded torrent. The engine reloads
+the archived bytes, revalidates them through the ordinary metadata boundary,
+restores the sidecar's selection, and honors the recorded paused intent. A
+torrent whose archive is gone is dropped from the library rather than shown as
+a row that can never load.
+
 ### 10.2 Import behavior
 
 On first launch, detect but do not open for writing the original WebTorrent
