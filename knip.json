@@ -13,8 +13,7 @@
   "ignoreDependencies": [
     "@thaunknown/simple-peer",
     "@wdio/local-runner",
-    "bittorrent-tracker",
-    "ws"
+    "bittorrent-tracker"
   ],
   "project": ["scripts/**/*.mjs", "src/**/*.ts", "src/**/*.tsx", "e2e/**/*.ts"]
 }
