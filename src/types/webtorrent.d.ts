@@ -168,6 +168,7 @@ declare module 'webtorrent' {
     } | null
     readonly downloadSpeed: number
     readonly peerId: string
+    readonly torrentPort: number
     readonly torrents: Torrent[]
     readonly uploadSpeed: number
     readonly utp: boolean
