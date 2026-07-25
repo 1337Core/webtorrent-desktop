@@ -5,6 +5,7 @@ import { WSS_TRACKER_LIMITS, type WssSocket } from './wss-tracker'
 
 const INFO_HASH = 'a'.repeat(20)
 const PEER_ID = 'b'.repeat(20)
+const REMOTE_PEER_ID = 'd'.repeat(20)
 
 function sdp(): string {
   return [
@@ -36,13 +37,27 @@ class FakeSocket extends EventEmitter implements WssSocket {
   terminate(): void {
     this.terminated = true
   }
+
+  deliver(payload: unknown): void {
+    this.emit('message', JSON.stringify(payload), false)
+  }
 }
 
 type Harness = {
   activation: WssActivation
+  /** Every endpoint an offer was generated for, in request order. */
+  offerEndpoints: string[]
+  offers: Array<{ offer: WssRemoteOffer; trackerUrl: string }>
   opened: string[]
+  respond: (answer: Readonly<{ offerId: string; sdp: string }>) => void
   sockets: Map<string, FakeSocket>
 }
+
+type WssRemoteOffer = Readonly<{
+  offerId: string
+  peerId: string
+  sdp: string
+}>
 
 function harness(
   options: {
@@ -53,8 +68,11 @@ function harness(
   } = {}
 ): Harness {
   const opened: string[] = []
+  const offerEndpoints: string[] = []
+  const offers: Harness['offers'] = []
   const sockets = new Map<string, FakeSocket>()
   const refuse = options.refuse ?? new Set<string>()
+  let respond: Harness['respond'] = () => undefined
 
   const activation = new WssActivation({
     allowPrivateNetwork: false,
@@ -70,19 +88,32 @@ function harness(
       setTimeout(() => socket.emit('open'), 0)
       return socket
     },
-    createOffers: async count =>
-      Array.from({ length: count }, (_value, index) => ({
+    createOffers: async (count, trackerUrl) => {
+      offerEndpoints.push(trackerUrl)
+      return Array.from({ length: count }, (_value, index) => ({
         offerId: `${index}`.repeat(20).slice(0, 20),
         sdp: sdp()
-      })),
+      }))
+    },
     infoHash: INFO_HASH,
     onAnswer: () => undefined,
+    onOffer: (offer, trackerUrl, reply) => {
+      offers.push({ offer, trackerUrl })
+      respond = reply
+    },
     peerId: PEER_ID,
     progress: () => ({ downloaded: 0, left: 10, uploaded: 0 }),
     tiers: options.tiers ?? [['wss://one.example'], ['wss://two.example']]
   })
 
-  return { activation, opened, sockets }
+  return {
+    activation,
+    offerEndpoints,
+    offers,
+    opened,
+    respond: answer => respond(answer),
+    sockets
+  }
 }
 
 beforeEach(() => {
@@ -294,6 +325,48 @@ describe('WssActivation', () => {
     expect(broken.closed).toBe(true)
     // The refused stopped attempt is made once and never retried.
     expect(broken.sent).toHaveLength(1)
+  })
+
+  it('generates each endpoint’s offers against that endpoint', async () => {
+    const context = harness()
+    const started = context.activation.start()
+    await settle()
+    await started
+
+    expect(context.offerEndpoints).toEqual([
+      'wss://one.example',
+      'wss://two.example'
+    ])
+  })
+
+  it('answers a remote offer through the endpoint that carried it', async () => {
+    const context = harness()
+    const started = context.activation.start()
+    await settle()
+    await started
+
+    const socket = context.sockets.get('wss://two.example')
+    if (!socket) throw new Error('The endpoint never opened')
+    socket.deliver({
+      info_hash: INFO_HASH,
+      offer: { sdp: sdp(), type: 'offer' },
+      offer_id: 'o'.repeat(20),
+      peer_id: REMOTE_PEER_ID
+    })
+
+    expect(context.offers).toHaveLength(1)
+    expect(context.offers[0]?.trackerUrl).toBe('wss://two.example')
+
+    context.respond({ offerId: 'o'.repeat(20), sdp: sdp() })
+
+    const frame = JSON.parse(socket.sent.at(-1) as string) as {
+      answer: { type: string }
+      to_peer_id: string
+    }
+    expect(frame.answer.type).toBe('answer')
+    expect(frame.to_peer_id).toBe(REMOTE_PEER_ID)
+    // The other endpoint never carries another endpoint's answer.
+    expect(context.sockets.get('wss://one.example')?.sent).toHaveLength(1)
   })
 
   it('opens nothing when the torrent has no wss tier', async () => {

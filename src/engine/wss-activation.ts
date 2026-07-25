@@ -27,17 +27,33 @@ export type WssActivationOptions = Readonly<{
   connectSocket: (
     input: Readonly<{ infoHash: string; url: string }>
   ) => Promise<WssSocket>
-  createOffers: (count: number) => Promise<ReadonlyArray<WssOfferDescription>>
+  /** The tracker URL identifies the endpoint whose budget the offers use. */
+  createOffers: (
+    count: number,
+    trackerUrl: string
+  ) => Promise<ReadonlyArray<WssOfferDescription>>
   infoHash: string
   onAnswer: (
     answer: Readonly<{ offerId: string; peerId: string; sdp: string }>
   ) => void
+  /**
+   * Handles one remote offer. `respond` returns this client's answer through
+   * the same endpoint, and does nothing once that endpoint is gone.
+   */
   onOffer?: (
-    offer: Readonly<{ offerId: string; peerId: string; sdp: string }>
+    offer: Readonly<{ offerId: string; peerId: string; sdp: string }>,
+    trackerUrl: string,
+    respond: (answer: Readonly<{ offerId: string; sdp: string }>) => void
   ) => void
   peerId: string
   progress: () => WssActivationProgress
   tiers: ReadonlyArray<ReadonlyArray<string>>
+}>
+
+type WssRemoteOffer = Readonly<{
+  offerId: string
+  peerId: string
+  sdp: string
 }>
 
 export type WssActivationSnapshot = Readonly<{
@@ -189,14 +205,23 @@ export class WssActivation {
       return
     }
 
+    const onOffer = this.#options.onOffer
     const endpoint = new WssTrackerEndpoint({
       allowPrivateNetwork: this.#options.allowPrivateNetwork,
-      createOffers: this.#options.createOffers,
+      createOffers: count => this.#options.createOffers(count, url),
       createSocket: () => socket,
       infoHash: this.#options.infoHash,
       onAnswer: this.#options.onAnswer,
       onInterval: seconds => this.#schedule(url, seconds),
-      ...(this.#options.onOffer ? { onOffer: this.#options.onOffer } : {}),
+      ...(onOffer
+        ? {
+            onOffer: (offer: WssRemoteOffer) => {
+              onOffer(offer, url, answer => {
+                this.#respond(url, answer, offer.peerId)
+              })
+            }
+          }
+        : {}),
       peerId: this.#options.peerId,
       trackerUrl: url
     })
@@ -220,6 +245,25 @@ export class WssActivation {
       return
     }
     this.#schedule(url, WSS_TRACKER_LIMITS.defaultIntervalSeconds)
+  }
+
+  /**
+   * Sends one answer back through the endpoint that carried its offer. A
+   * retired or closed endpoint silently drops it: no other socket may answer
+   * on its behalf.
+   */
+  #respond(
+    url: string,
+    answer: Readonly<{ offerId: string; sdp: string }>,
+    toPeerId: string
+  ): void {
+    const entry = this.#live.get(url)
+    if (!entry) return
+    try {
+      entry.endpoint.answer({ ...answer, toPeerId })
+    } catch {
+      void this.#retire(url)
+    }
   }
 
   #schedule(url: string, seconds: number): void {

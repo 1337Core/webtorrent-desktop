@@ -231,6 +231,32 @@ export class WssTrackerEndpoint {
     })
   }
 
+  /**
+   * Returns this client's answer for one remote offer. The answer carries the
+   * same candidate filtering as an outgoing offer, so a refused SDP is dropped
+   * rather than disclosed.
+   */
+  answer(
+    input: Readonly<{ offerId: string; sdp: string; toPeerId: string }>
+  ): void {
+    if (!this.#socket || this.#closed || this.#quarantined) {
+      throw new WssTrackerError('TRANSPORT_DISABLED')
+    }
+
+    const sdp = filterIceCandidates(input.sdp, {
+      allowPrivateNetwork: this.#allowPrivateNetwork
+    })
+    this.#send({
+      action: 'announce',
+      answer: { sdp, type: 'answer' },
+      info_hash: this.#infoHash,
+      offer_id: input.offerId,
+      peer_id: this.#peerId,
+      to_peer_id: input.toPeerId,
+      ...(this.#trackerId === null ? {} : { 'tracker id': this.#trackerId })
+    })
+  }
+
   /** Idle sockets are probed; a missing pong is a heartbeat failure. */
   heartbeat(): 'failed' | 'idle' | 'probed' {
     if (!this.#socket || this.#closed) return 'failed'

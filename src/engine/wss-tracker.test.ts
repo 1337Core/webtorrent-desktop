@@ -188,6 +188,53 @@ describe('WssTrackerEndpoint', () => {
     expect(frame.offers).toEqual([])
   })
 
+  it('answers a remote offer through the same socket', async () => {
+    const harness = createHarness()
+    await connected(harness)
+
+    harness.endpoint.answer({
+      offerId: 'offer-0'.padEnd(20, '0'),
+      sdp: sdp(),
+      toPeerId: REMOTE_PEER_ID
+    })
+
+    const frame = JSON.parse(harness.socket.sent[0] ?? '{}') as {
+      action: string
+      answer: { sdp: string; type: string }
+      offer_id: string
+      to_peer_id: string
+    }
+    expect(frame.action).toBe('announce')
+    expect(frame.answer.type).toBe('answer')
+    expect(frame.to_peer_id).toBe(REMOTE_PEER_ID)
+    expect(frame.offer_id).toBe('offer-0'.padEnd(20, '0'))
+  })
+
+  it('never answers with a private candidate or a dead transport', async () => {
+    const harness = createHarness()
+    await connected(harness)
+
+    expect(() =>
+      harness.endpoint.answer({
+        offerId: 'offer-0'.padEnd(20, '0'),
+        sdp: sdp('10.0.0.4'),
+        toPeerId: REMOTE_PEER_ID
+      })
+    ).toThrow()
+    expect(harness.socket.sent).toEqual([])
+
+    const closing = harness.endpoint.close()
+    await vi.advanceTimersByTimeAsync(WSS_TRACKER_LIMITS.terminateGraceMs)
+    await closing
+    expect(() =>
+      harness.endpoint.answer({
+        offerId: 'offer-0'.padEnd(20, '0'),
+        sdp: sdp(),
+        toPeerId: REMOTE_PEER_ID
+      })
+    ).toThrow(WssTrackerError)
+  })
+
   it('accepts exactly one answer per offer identifier', async () => {
     const harness = createHarness()
     await connected(harness)
