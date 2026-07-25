@@ -46,6 +46,7 @@ import {
 import { EngineSupervisor } from './engine-supervisor'
 import { findDangerousLaunchSwitch } from './launch-policy'
 import { installAppMenu } from './app-menu'
+import { DesktopNotifier, DockBadge, PowerSaveGuard } from './os-integration'
 import { TorrentHandlers } from './torrent-handlers'
 import { AppStateStore } from './state-store'
 import { TRUSTED_RENDERER_URL } from './trusted-renderer'
@@ -818,11 +819,43 @@ async function initializeApplication(): Promise<void> {
   }
   mkdirSync(engineWorkingDirectory, { mode: 0o700, recursive: true })
   chmodSync(engineWorkingDirectory, 0o700)
+  // Live torrent activity drives macOS behavior: the Mac stays awake only
+  // while transfers run, the dock shows a bounded count, and a finished
+  // download notifies exactly once.
+  const dockBadge = new DockBadge()
+  const powerSaveGuard = new PowerSaveGuard({ diagnostics })
+  const notifier = new DesktopNotifier({ diagnostics })
+  const runningTorrents = new Map<string, boolean>()
+  const notifiedComplete = new Set<string>()
+
   engineSupervisor = new EngineSupervisor({
     appVersion: runtime.appVersion,
     diagnostics,
     entryPath: engineFile(),
     getStateRevision: () => stateStore?.snapshot().revision ?? 0,
+    onEvent: envelope => {
+      const event = envelope.payload
+      if (event.event === 'torrent-removed') {
+        runningTorrents.delete(event.payload.infoHash)
+        notifiedComplete.delete(event.payload.infoHash)
+      } else if (event.event === 'torrent-updated') {
+        const torrent = event.payload
+        runningTorrents.set(
+          torrent.infoHash,
+          torrent.state === 'checking' || torrent.state === 'downloading'
+        )
+        if (torrent.progress >= 1 && !notifiedComplete.has(torrent.infoHash)) {
+          notifiedComplete.add(torrent.infoHash)
+          notifier.notify({ body: torrent.name, title: 'Download complete' })
+        }
+      } else {
+        return
+      }
+
+      const running = [...runningTorrents.values()].filter(Boolean).length
+      powerSaveGuard.update(running)
+      dockBadge.set(running)
+    },
     onStatus: publishEngineStatus,
     workingDirectory: engineWorkingDirectory
   })
