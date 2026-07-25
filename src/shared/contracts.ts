@@ -34,9 +34,37 @@ const windowBoundsSchema = z.strictObject({
 
 const preferencesSchema = z.strictObject({})
 
+/**
+ * One durable library row. Large per-torrent data (selection, resume
+ * bitfield, torrent bytes) lives in fork-owned files, so this record stays
+ * small enough for the bounded state document.
+ */
+const torrentRecordSchema = z.strictObject({
+  addedAtMs: timestampSchema,
+  destinationRoot: z.string().min(1).max(4_096),
+  infoHash: z.string().regex(/^[0-9a-f]{40}$/u),
+  name: z.string().min(1).max(255),
+  paused: z.boolean(),
+  private: z.boolean()
+})
+
+export type TorrentRecord = z.infer<typeof torrentRecordSchema>
+
+const librarySchema = z
+  .strictObject({
+    torrents: z.array(torrentRecordSchema).max(64)
+  })
+  .refine(
+    value =>
+      new Set(value.torrents.map(torrent => torrent.infoHash)).size ===
+      value.torrents.length,
+    'A library holds one record per info hash.'
+  )
+
 export const appStateSchema = z.strictObject({
   schemaVersion: z.literal(1),
   revision: z.number().int().nonnegative(),
+  library: librarySchema,
   preferences: preferencesSchema,
   window: z.strictObject({
     main: z.strictObject({
@@ -50,6 +78,7 @@ export type AppState = z.infer<typeof appStateSchema>
 export const DEFAULT_APP_STATE: AppState = {
   schemaVersion: 1,
   revision: 0,
+  library: { torrents: [] },
   preferences: {},
   window: {
     main: {

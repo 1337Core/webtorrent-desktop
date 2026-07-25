@@ -13,11 +13,13 @@ import ElectronStore from 'electron-store'
 import {
   appStateSchema,
   DEFAULT_APP_STATE,
-  type AppState
+  type AppState,
+  type TorrentRecord
 } from '../shared/contracts'
 import type { Diagnostics } from './diagnostics'
 
 const MAX_STATE_BYTES = 256 * 1024
+const MAX_LIBRARY_TORRENTS = 64
 const ELECTRON_STORE_RENDERER_CHANNEL = 'electron-store-get-data'
 
 function cloneState(state: AppState): AppState {
@@ -156,6 +158,46 @@ export class AppStateStore {
         }
       }
     })
+  }
+
+  /**
+   * Records a torrent in the durable library. Selection, resume state, and
+   * torrent bytes stay in fork-owned files so this document stays bounded.
+   */
+  upsertTorrent(record: TorrentRecord): AppState {
+    const torrents = this.#state.library.torrents.filter(
+      existing => existing.infoHash !== record.infoHash
+    )
+    if (torrents.length >= MAX_LIBRARY_TORRENTS) {
+      throw new Error('The torrent library is full')
+    }
+    torrents.push(record)
+    torrents.sort((left, right) => left.infoHash.localeCompare(right.infoHash))
+
+    this.#persist({
+      ...this.#state,
+      library: { torrents },
+      revision: this.#state.revision + 1
+    })
+    return this.snapshot()
+  }
+
+  removeTorrent(infoHash: string): boolean {
+    const torrents = this.#state.library.torrents.filter(
+      existing => existing.infoHash !== infoHash
+    )
+    if (torrents.length === this.#state.library.torrents.length) return false
+
+    this.#persist({
+      ...this.#state,
+      library: { torrents },
+      revision: this.#state.revision + 1
+    })
+    return true
+  }
+
+  listTorrents(): ReadonlyArray<TorrentRecord> {
+    return this.#state.library.torrents.map(record => ({ ...record }))
   }
 
   #persist(candidate: AppState): void {

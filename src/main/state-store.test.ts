@@ -128,7 +128,80 @@ afterEach(async () => {
   )
 })
 
+function torrentRecord(
+  infoHash: string,
+  overrides: Partial<{
+    addedAtMs: number
+    destinationRoot: string
+    name: string
+    paused: boolean
+    private: boolean
+  }> = {}
+): {
+  addedAtMs: number
+  destinationRoot: string
+  infoHash: string
+  name: string
+  paused: boolean
+  private: boolean
+} {
+  return {
+    addedAtMs: 1_000,
+    destinationRoot: '/Users/owner/Downloads',
+    infoHash,
+    name: `torrent-${infoHash.slice(0, 4)}`,
+    paused: true,
+    private: false,
+    ...overrides
+  }
+}
+
 describe('AppStateStore', () => {
+  it('keeps a durable torrent library ordered by info hash', async () => {
+    const store = new AppStateStore(await createUserData(), diagnostics())
+    const first = 'f'.repeat(40)
+    const second = '0'.repeat(40)
+
+    store.upsertTorrent(torrentRecord(first))
+    const snapshot = store.upsertTorrent(torrentRecord(second))
+
+    expect(snapshot.library.torrents.map(entry => entry.infoHash)).toEqual([
+      second,
+      first
+    ])
+    expect(snapshot.revision).toBe(2)
+    expect(store.listTorrents()).toHaveLength(2)
+  })
+
+  it('replaces a record instead of duplicating its info hash', async () => {
+    const store = new AppStateStore(await createUserData(), diagnostics())
+    const infoHash = 'a'.repeat(40)
+
+    store.upsertTorrent(torrentRecord(infoHash))
+    store.upsertTorrent(
+      torrentRecord(infoHash, { name: 'renamed', paused: false })
+    )
+
+    expect(store.listTorrents()).toEqual([
+      expect.objectContaining({ name: 'renamed', paused: false })
+    ])
+  })
+
+  it('removes a record idempotently and bounds the library', async () => {
+    const store = new AppStateStore(await createUserData(), diagnostics())
+    const infoHash = 'b'.repeat(40)
+    store.upsertTorrent(torrentRecord(infoHash))
+
+    expect(store.removeTorrent(infoHash)).toBe(true)
+    expect(store.removeTorrent(infoHash)).toBe(false)
+    expect(store.listTorrents()).toEqual([])
+
+    for (let index = 0; index < 64; index += 1) {
+      store.upsertTorrent(torrentRecord(index.toString(16).padStart(40, '0')))
+    }
+    expect(() => store.upsertTorrent(torrentRecord('c'.repeat(40)))).toThrow()
+  })
+
   it('creates private defaults and removes renderer compatibility IPC', async () => {
     const userDataPath = await createUserData()
     const store = new AppStateStore(userDataPath, diagnostics())
