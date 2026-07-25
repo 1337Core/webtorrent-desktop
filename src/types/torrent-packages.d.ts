@@ -125,3 +125,16 @@ declare module '@thaunknown/simple-peer' {
     signal(description: unknown): void
   }
 }
+
+/**
+ * Declared only for the characterization fixture that documents why the
+ * engine owns its storage. Production code never imports this package.
+ */
+declare module 'fs-chunk-store' {
+  export default class FSChunkStore {
+    constructor(
+      chunkLength: number,
+      options: { files: ReadonlyArray<{ length: number; path: string }> }
+    )
+  }
+}

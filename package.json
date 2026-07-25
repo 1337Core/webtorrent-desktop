@@ -106,6 +106,7 @@
     "electron": "43.2.0",
     "eslint": "10.7.0",
     "eslint-plugin-react-hooks": "7.1.1",
+    "fs-chunk-store": "5.0.1",
     "globals": "17.7.0",
     "jsdom": "29.1.1",
     "knip": "6.29.0",
