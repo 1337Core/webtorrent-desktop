@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   runCommand,
   type EngineFailure,
@@ -6,6 +6,9 @@ import {
 } from '../lib/engine-client'
 
 type Preparation = EngineValue<'open-preparation'>
+type PreparationFile = EngineValue<'get-preparation-files'>['items'][number]
+
+const FILE_PAGE_LIMIT = 64
 
 const WARNING_LABELS: Readonly<Record<string, string>> = {
   DHT_EXPOSURE_USED: 'The info hash was exposed to the public DHT.',
@@ -36,6 +39,8 @@ export function AddTorrent({
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState<EngineFailure | null>(null)
   const [preparation, setPreparation] = useState<Preparation | null>(null)
+  const [files, setFiles] = useState<ReadonlyArray<PreparationFile>>([])
+  const [selected, setSelected] = useState<ReadonlySet<number>>(new Set())
 
   const prepare = useCallback(async () => {
     setBusy(true)
@@ -59,6 +64,64 @@ export function AddTorrent({
     setPreparation(outcome.value)
   }, [url])
 
+  // The first page of the manifest is enough to review a typical torrent;
+  // larger torrents keep their remaining files deselected until committed.
+  useEffect(() => {
+    if (!preparation) return undefined
+
+    let active = true
+    const timer = setTimeout(() => {
+      void runCommand({
+        command: 'get-preparation-files',
+        payload: {
+          cursor: 0,
+          limit: FILE_PAGE_LIMIT,
+          preparationId: preparation.preparationId
+        }
+      }).then(outcome => {
+        if (!active || !outcome.ok) return
+        setFiles(outcome.value.items)
+        setSelected(
+          new Set(
+            outcome.value.items
+              .filter(file => file.selected)
+              .map(file => file.index)
+          )
+        )
+      })
+    }, 0)
+
+    return () => {
+      active = false
+      clearTimeout(timer)
+    }
+  }, [preparation])
+
+  const toggleFile = useCallback(
+    async (file: PreparationFile) => {
+      if (!preparation) return
+      const next = !selected.has(file.index)
+      const outcome = await runCommand({
+        command: 'update-preparation-selection',
+        payload: {
+          changes: [{ index: file.index, selected: next }],
+          preparationId: preparation.preparationId
+        }
+      })
+      if (!outcome.ok) {
+        setFailure(outcome.error)
+        return
+      }
+      setSelected(current => {
+        const updated = new Set(current)
+        if (next) updated.add(file.index)
+        else updated.delete(file.index)
+        return updated
+      })
+    },
+    [preparation, selected]
+  )
+
   const discard = useCallback(async () => {
     if (!preparation) return
     setBusy(true)
@@ -68,6 +131,8 @@ export function AddTorrent({
     })
     setBusy(false)
     setPreparation(null)
+    setFiles([])
+    setSelected(new Set())
   }, [preparation])
 
   const commit = useCallback(async () => {
@@ -87,6 +152,8 @@ export function AddTorrent({
       return
     }
     setPreparation(null)
+    setFiles([])
+    setSelected(new Set())
     setUrl('')
     onAdded()
   }, [downloadRoot, onAdded, preparation])
@@ -107,6 +174,22 @@ export function AddTorrent({
             <ul className="warnings">
               {preparation.warnings.map(warning => (
                 <li key={warning}>{WARNING_LABELS[warning] ?? warning}</li>
+              ))}
+            </ul>
+          ) : null}
+          {files.length > 0 ? (
+            <ul className="file-list">
+              {files.map(file => (
+                <li key={file.index}>
+                  <label>
+                    <input
+                      checked={selected.has(file.index)}
+                      onChange={() => void toggleFile(file)}
+                      type="checkbox"
+                    />
+                    {` ${file.path} (${file.length} bytes)`}
+                  </label>
+                </li>
               ))}
             </ul>
           ) : null}

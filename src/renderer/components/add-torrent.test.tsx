@@ -64,6 +64,52 @@ function response(operation: EngineCommand): TorrentCommandResult {
           }
         }
       } as TorrentCommandResult
+    case 'get-preparation-files':
+      return {
+        ...envelope(),
+        ok: true,
+        value: {
+          ok: true,
+          result: {
+            command: 'get-preparation-files',
+            value: {
+              items: [
+                {
+                  downloaded: 0,
+                  index: 0,
+                  length: 20,
+                  path: 'payload/first.bin',
+                  progress: 0,
+                  selected: true
+                },
+                {
+                  downloaded: 0,
+                  index: 1,
+                  length: 20,
+                  path: 'payload/second.bin',
+                  progress: 0,
+                  selected: false
+                }
+              ],
+              nextCursor: null,
+              preparationId: PREPARATION_ID,
+              total: 2
+            }
+          }
+        }
+      } as TorrentCommandResult
+    case 'update-preparation-selection':
+      return {
+        ...envelope(),
+        ok: true,
+        value: {
+          ok: true,
+          result: {
+            command: 'update-preparation-selection',
+            value: { preparationId: PREPARATION_ID, selectedFileCount: 2 }
+          }
+        }
+      } as TorrentCommandResult
     case 'discard-preparation':
       return {
         ...envelope(),
@@ -160,6 +206,35 @@ describe('AddTorrent', () => {
     ).toBeDefined()
     expect(screen.getByText(`Saving to ${DOWNLOAD_ROOT}`)).toBeDefined()
     expect(onAdded).not.toHaveBeenCalled()
+  })
+
+  it('lists the manifest and toggles a file through the engine', async () => {
+    const user = userEvent.setup()
+    render(<AddTorrent downloadRoot={DOWNLOAD_ROOT} onAdded={vi.fn()} ready />)
+
+    await user.type(
+      screen.getByLabelText('Torrent file URL'),
+      'https://example.com/file.torrent'
+    )
+    await user.click(screen.getByRole('button', { name: 'Prepare' }))
+
+    const first = await screen.findByLabelText(/payload\/first\.bin/u)
+    const second = screen.getByLabelText(/payload\/second\.bin/u)
+    expect(first).toHaveProperty('checked', true)
+    expect(second).toHaveProperty('checked', false)
+
+    await user.click(second)
+    await waitFor(() =>
+      expect(
+        commands.some(
+          command =>
+            command.command === 'update-preparation-selection' &&
+            command.payload.changes[0]?.index === 1 &&
+            command.payload.changes[0].selected === true
+        )
+      ).toBe(true)
+    )
+    await waitFor(() => expect(second).toHaveProperty('checked', true))
   })
 
   it('commits the reviewed preparation into the chosen root', async () => {
