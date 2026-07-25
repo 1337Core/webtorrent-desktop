@@ -14,6 +14,7 @@ type MetadataAcquisitionErrorCode =
   | 'CAPACITY_EXCEEDED'
   | 'CLOSED'
   | 'DISCOVERY_FAILED'
+  | 'STAGING_UNAVAILABLE'
   | 'TIMED_OUT'
   | 'TORRENT_ERROR'
 
@@ -44,6 +45,19 @@ export type AcquisitionClient = {
 }
 
 /**
+ * One staging client held for the length of a single acquisition. The lease
+ * is released in the same teardown that destroys the staging torrent, so an
+ * idle engine keeps no staging listener.
+ */
+type AcquisitionLease = Readonly<{
+  client: AcquisitionClient
+  /** The staging client's own identity, which its announces must carry. */
+  peerId: Uint8Array
+  port: number
+  release: () => Promise<void>
+}>
+
+/**
  * Starts app-owned discovery for one acquisition and resolves to its stop
  * function. Trackers and, only with consent, the DHT are reached through the
  * same mediated boundaries an owned torrent uses; nothing here talks to the
@@ -54,13 +68,15 @@ type MetadataDiscovery = (
     admitPeer: (address: string) => boolean
     allowDht: boolean
     infoHash: string
+    peerId: Uint8Array
+    port: number
     trackers: ReadonlyArray<string>
   }>
 ) => Promise<() => Promise<void>>
 
 export type MetadataAcquisitionOptions = Readonly<{
-  createClient: () => AcquisitionClient
   discover: MetadataDiscovery
+  openStaging: () => Promise<AcquisitionLease>
   /** The staging directory a torrent is destroyed out of before it is used. */
   stagingPath: string
   timeoutMs?: number
@@ -114,7 +130,14 @@ export class MetadataAcquisition {
     prepared: PreparedMagnet,
     signal?: AbortSignal
   ): Promise<Uint8Array> {
-    const torrent = this.#options.createClient().add(prepared.magnetUri, {
+    let lease: AcquisitionLease
+    try {
+      lease = await this.#options.openStaging()
+    } catch {
+      throw new MetadataAcquisitionError('STAGING_UNAVAILABLE')
+    }
+
+    const torrent = lease.client.add(prepared.magnetUri, {
       announce: [],
       path: this.#options.stagingPath
     })
@@ -191,6 +214,8 @@ export class MetadataAcquisition {
             },
             allowDht: prepared.dhtEnabled,
             infoHash: prepared.infoHash,
+            peerId: lease.peerId,
+            port: lease.port,
             trackers: prepared.trackers
           })
           .then(stop => {
@@ -220,6 +245,8 @@ export class MetadataAcquisition {
           resolve()
         }
       })
+      // The staging client goes last, after its own torrent is gone.
+      await lease.release().catch(() => undefined)
     }
   }
 }

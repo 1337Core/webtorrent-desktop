@@ -187,6 +187,29 @@ describe('torrent lifecycle', () => {
     expect(empty.value?.total).toBe(0)
   })
 
+  it('accepts a magnet source and reports why it fails, not that it is unknown', async () => {
+    // No peer can answer inside a test, so the acquisition must time out or
+    // report an unreachable tracker. What matters is that the magnet reaches
+    // the staging path at all rather than returning a fixed unsupported.
+    const opened = await run({
+      command: 'open-preparation',
+      payload: {
+        source: {
+          allowDhtExposure: false,
+          allowPrivateNetwork: false,
+          kind: 'magnet',
+          magnet:
+            `magnet:?xt=urn:btih:${'a'.repeat(40)}` +
+            '&tr=https%3A%2F%2Ftracker.invalid%2Fannounce'
+        }
+      }
+    })
+
+    expect(opened.ok).toBe(false)
+    expect(opened.code).not.toBe('UNSUPPORTED')
+    expect(opened.code).toBe('METADATA_UNAVAILABLE')
+  })
+
   it('refuses a preparation source outside the validated shapes', async () => {
     const refused = await run({
       command: 'open-preparation',

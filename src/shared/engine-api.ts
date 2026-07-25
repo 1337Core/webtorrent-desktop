@@ -677,6 +677,7 @@ const engineCommandErrorSchema = z.strictObject({
     'ENGINE_NOT_READY',
     'INPUT_INVALID',
     'INTERNAL',
+    'METADATA_UNAVAILABLE',
     'NOT_FOUND',
     'PATH_NOT_AUTHORIZED',
     'STATE_CONFLICT',

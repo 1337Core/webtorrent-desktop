@@ -2314,11 +2314,24 @@ at most two at once, destroying its staging torrent inside the metadata
 handler — is now implemented and unit-tested, and the preparation service
 accepts it and runs the full review path for a magnet when one is supplied.
 
-What remains before the magnet flow works end to end is the staging client
-itself: `EngineClientLifecycle` manages only the public and private clients,
-so the engine has nothing to hand the acquisition, and the tracker and
-consented-DHT discovery adapter for a staging acquisition is not written. Both
-are the last substantial implementation work in this milestone.
+The staging client and its discovery adapter are now in place. Staging is not
+a long-lived participant: the client is spawned on the first acquisition,
+shared by at most two, and destroyed as soon as the last one finishes, so an
+idle engine holds no staging listener. Its announces go through the same
+mediated tracker transport an owned torrent uses, under the staging client's
+own identity, and the second refusal that sat above the preparation service is
+gone — a magnet now reaches staging and reports why it failed rather than
+claiming the operation is unknown.
+
+One design decision remains before magnets are useful, and it is the owner's
+to make. The renderer bridge bounds every command to five seconds, so an
+acquisition that needs longer cannot answer through it; the engine currently
+reports `METADATA_UNAVAILABLE` at four seconds rather than letting the bridge
+fail with a protocol error. For a magnet to succeed in practice, preparation
+must become an asynchronous operation — opened immediately, reported by engine
+event when metadata arrives — which changes the command contract and needs a
+pending state in the add dialog. That is a visible change to an otherwise
+under-the-hood migration, so it is recorded here rather than assumed.
 
 ### Milestone 4 — storage, resume, and legacy import
 

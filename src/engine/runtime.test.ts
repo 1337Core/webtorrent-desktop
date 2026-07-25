@@ -709,8 +709,10 @@ describe('EngineRuntime', () => {
     expect(errorCode(result)).toBe('ENGINE_NOT_READY')
   })
 
-  it('rejects magnet and info-hash preparation without invoking the service', async () => {
-    const open = vi.fn()
+  it('sends magnet and info-hash preparation to the service that owns staging', async () => {
+    const open = vi.fn(() => {
+      throw new TorrentPreparationServiceError('UNSUPPORTED')
+    })
     const runtime = new EngineRuntime({
       createPreparationService: () => ({ open })
     })
@@ -742,9 +744,38 @@ describe('EngineRuntime', () => {
     for (const operation of operations) {
       const result = await runtime.execute(operation, signal())
       expectStrictResult(operation, result)
+      // An engine with no staging capability still answers UNSUPPORTED, but
+      // the decision belongs to the service rather than to a second refusal
+      // above it.
       expect(errorCode(result)).toBe('UNSUPPORTED')
     }
-    expect(open).not.toHaveBeenCalled()
+    expect(open).toHaveBeenCalledTimes(operations.length)
+  })
+
+  it('reports metadata that staging could not acquire', async () => {
+    const runtime = new EngineRuntime({
+      createPreparationService: () => ({
+        open: () => {
+          throw new TorrentPreparationServiceError('METADATA_UNAVAILABLE')
+        }
+      })
+    })
+    const operation = {
+      command: 'open-preparation',
+      payload: {
+        source: {
+          allowDhtExposure: false,
+          allowPrivateNetwork: false,
+          infoHash: INFO_HASH,
+          kind: 'info-hash'
+        }
+      }
+    } satisfies EngineCommand
+
+    const result = await runtime.execute(operation, signal())
+
+    expectStrictResult(operation, result)
+    expect(errorCode(result)).toBe('METADATA_UNAVAILABLE')
   })
 
   it('commits an open preparation into an owned torrent session', async () => {

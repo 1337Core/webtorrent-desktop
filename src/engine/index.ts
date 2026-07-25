@@ -20,6 +20,9 @@ import { TrackerActivation } from './tracker-activation'
 import { TrackerHttpRequestGate, TrackerHttpTransport } from './tracker-http'
 import { PeerBudget } from './peer-budget'
 import { TorrentManager } from './torrent-manager'
+import { MetadataAcquisition } from './metadata-acquisition'
+import { StagingClientPool } from './staging-client'
+import { TorrentPreparationService } from './torrent-preparation-service'
 import {
   PendingSignalingBudget,
   WebrtcSignaling,
@@ -301,10 +304,74 @@ async function startClients(): Promise<EngineRuntimeInfo> {
   }
 }
 
+/**
+ * Staging exists only while metadata is being acquired for a magnet or info
+ * hash. The client is spawned on demand, shared by at most two concurrent
+ * acquisitions, and destroyed as soon as the last one finishes.
+ */
+const stagingClients = new StagingClientPool({
+  createClient: options => new WebTorrent(options) as never
+})
+
+const metadataAcquisition = new MetadataAcquisition({
+  /**
+   * A staging acquisition discovers peers exactly as an owned torrent does:
+   * through the app's mediated tracker transport, under the staging client's
+   * own identity, and never through WebTorrent's disabled tracker client.
+   */
+  discover: async ({ admitPeer, infoHash, peerId, port, trackers }) => {
+    const activation = new TrackerActivation({
+      allowHttp: false,
+      allowPrivateNetwork: false,
+      infoHash,
+      onPeers: delivery => {
+        for (const peer of delivery.peers) {
+          admitPeer(`${peer.address}:${peer.port}`)
+        }
+      },
+      peerId,
+      port,
+      private: false,
+      progress: () => ({ downloaded: 0, left: 0, uploaded: 0 }),
+      sessionSeed,
+      tiers: trackers.map(tracker => [tracker]),
+      transport: trackerTransport
+    })
+    activation.start()
+    return async () => {
+      await activation.stop()
+    }
+  },
+  openStaging: async () => {
+    const lease = await stagingClients.lease()
+    return {
+      client: lease.client as never,
+      peerId: lease.peerId,
+      port: lease.port,
+      release: lease.release
+    }
+  },
+  stagingPath: path.join(forkDirectory, 'staging'),
+  /**
+   * The renderer's bridge gives every command five seconds, so an acquisition
+   * must answer inside that or the user sees a protocol failure instead of a
+   * reason. Metadata that needs longer therefore reports as unavailable: for
+   * magnets to succeed in practice, preparation has to become an
+   * asynchronous, event-reported operation rather than one bounded request.
+   */
+  timeoutMs: 4_000
+})
+
 const mediaProxy = new MediaProxy()
 
 let emitRuntimeEvent = (_event: EngineEvent): void => undefined
 const runtime = new EngineRuntime({
+  createPreparationService: store =>
+    new TorrentPreparationService({
+      acquireMetadata: (prepared, signal) =>
+        metadataAcquisition.acquire(prepared, signal),
+      store
+    }),
   creationService: new TorrentCreationService({ policy: egress }),
   legacyImports: new LegacyImportService({ policy: egress }),
   mediaProxy,
@@ -331,6 +398,8 @@ const controller = new EngineProtocolController({
     try {
       await runtime.close()
     } finally {
+      metadataAcquisition.close()
+      await stagingClients.close()
       await mediaProxy.shutdown()
       dht.close()
       dhtSessions.clear()

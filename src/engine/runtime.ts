@@ -217,6 +217,11 @@ const PUBLIC_ERRORS = Object.freeze({
       'The torrent preparation cannot be changed in its current state.',
     retryable: false
   },
+  metadataUnavailable: {
+    code: 'METADATA_UNAVAILABLE',
+    displayMessage: 'The torrent metadata could not be retrieved.',
+    retryable: true
+  },
   unsupported: {
     code: 'UNSUPPORTED',
     displayMessage: 'This torrent operation is not available yet.',
@@ -901,13 +906,6 @@ export class EngineRuntime {
     operation: Extract<EngineCommand, { command: 'open-preparation' }>,
     signal: AbortSignal
   ): Promise<EngineCommandResult> {
-    if (
-      operation.payload.source.kind === 'info-hash' ||
-      operation.payload.source.kind === 'magnet'
-    ) {
-      return errorResult(operation, PUBLIC_ERRORS.unsupported)
-    }
-
     const snapshot = await this.#preparationService.open(
       operation.payload.source,
       signal
@@ -966,6 +964,8 @@ export class EngineRuntime {
           return errorResult(operation, PUBLIC_ERRORS.inputInvalid)
         case 'LOCAL_TORRENT_UNAVAILABLE':
           return errorResult(operation, PUBLIC_ERRORS.localTorrentUnavailable)
+        case 'METADATA_UNAVAILABLE':
+          return errorResult(operation, PUBLIC_ERRORS.metadataUnavailable)
         case 'REMOTE_CONCURRENCY_LIMIT':
           return errorResult(operation, PUBLIC_ERRORS.remoteConcurrencyLimit)
         case 'REMOTE_TORRENT_UNAVAILABLE':

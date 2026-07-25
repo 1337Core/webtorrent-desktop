@@ -71,21 +71,26 @@ class FakeTorrent extends EventEmitter implements AcquisitionTorrent {
 type Harness = {
   acquisition: MetadataAcquisition
   discovery: { started: number; stopped: number }
+  staging: { leased: number; released: number }
   torrents: FakeTorrent[]
 }
 
-function harness(options: { discoverFails?: boolean } = {}): Harness {
+function harness(
+  options: { discoverFails?: boolean; stagingFails?: boolean } = {}
+): Harness {
   const torrents: FakeTorrent[] = []
   const discovery = { started: 0, stopped: 0 }
+  const staging = { leased: 0, released: 0 }
+
+  const client: AcquisitionClient = {
+    add: () => {
+      const torrent = new FakeTorrent()
+      torrents.push(torrent)
+      return torrent
+    }
+  }
 
   const acquisition = new MetadataAcquisition({
-    createClient: (): AcquisitionClient => ({
-      add: () => {
-        const torrent = new FakeTorrent()
-        torrents.push(torrent)
-        return torrent
-      }
-    }),
     discover: async () => {
       if (options.discoverFails) throw new Error('unreachable')
       discovery.started += 1
@@ -93,11 +98,23 @@ function harness(options: { discoverFails?: boolean } = {}): Harness {
         discovery.stopped += 1
       }
     },
+    openStaging: async () => {
+      if (options.stagingFails) throw new Error('no staging client')
+      staging.leased += 1
+      return {
+        client,
+        peerId: new Uint8Array(20).fill(7),
+        port: 51_413,
+        release: async () => {
+          staging.released += 1
+        }
+      }
+    },
     stagingPath: '/tmp/staging',
     timeoutMs: 50
   })
 
-  return { acquisition, discovery, torrents }
+  return { acquisition, discovery, staging, torrents }
 }
 
 function preparedFor(infoHash: string): PreparedMagnet {
@@ -128,6 +145,8 @@ describe('MetadataAcquisition', () => {
     expect(context.torrents[0]?.destroyed).toBe(true)
     expect(context.torrents[0]?.destroyedStore).toBe(true)
     expect(context.discovery).toEqual({ started: 1, stopped: 1 })
+    // The staging client is leased for the acquisition and given back with it.
+    expect(context.staging).toEqual({ leased: 1, released: 1 })
   })
 
   it('refuses metadata whose canonical info hash is not the one requested', async () => {
@@ -194,6 +213,16 @@ describe('MetadataAcquisition', () => {
 
     await expect(first).rejects.toMatchObject({ code: 'TIMED_OUT' })
     await expect(second).rejects.toMatchObject({ code: 'TIMED_OUT' })
+    expect(context.acquisition.activeCount).toBe(0)
+  })
+
+  it('reports a staging client it cannot obtain', async () => {
+    const context = harness({ stagingFails: true })
+
+    await expect(
+      context.acquisition.acquire(preparedFor('a'.repeat(40)))
+    ).rejects.toMatchObject({ code: 'STAGING_UNAVAILABLE' })
+    expect(context.torrents).toHaveLength(0)
     expect(context.acquisition.activeCount).toBe(0)
   })
 
