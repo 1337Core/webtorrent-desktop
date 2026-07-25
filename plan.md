@@ -2427,9 +2427,23 @@ supervisor and utility engine.
 
 One process plays both the engine and its local peer in the engine soak, so
 each sample covers strictly more retained state than the shipped utility
-process holds and the caps are applied conservatively. What remains is the
-milestone's own workload: two hours of lawful real v1 torrents on the owner's
-Mac, which no fixture can stand in for.
+process holds and the caps are applied conservatively.
+
+Both workloads pass at the branch head on the owner's Mac. The engine soak
+completed the two hundred lifecycle cycles and the full thirty-minute
+sustained run inside every recorded cap, in 1,837 seconds. The restart soak
+completed all twenty-five supervised restarts with no engine process left
+after any stop, a maximum graceful shutdown of 2 ms, and a 95th percentile of
+2 ms, against limits of 5,000 ms and 2,000 ms.
+
+A supervised restart here is the pair the application itself uses — the
+graceful shutdown that application quit performs, then a fresh supervised
+start. The supervisor's `restart()` is the separate crash-recovery path and is
+accepted only from a stopped status, which is what the crash-loop smoke
+scenario already proves.
+
+What remains is the milestone's own workload: two hours of lawful real v1
+torrents on the owner's Mac, which no fixture can stand in for.
 
 ## 21. Branch and giant pull-request strategy
 
@@ -2524,9 +2538,11 @@ The interrupted `package:check` and the unobserved CI result recorded in the
 previous handoff are both resolved: they were rerun from the beginning and
 passed.
 
-The section 18.5 soak suite is implemented and runs as its own gate. See the
-Milestone 8 progress note for what it covers and what it deliberately does
-not.
+- `npm run soak`: the engine soak passed its two hundred lifecycle cycles and
+  the full thirty-minute sustained transfer-and-seek run inside every recorded
+  cap, and the restart soak passed all twenty-five supervised restarts. See the
+  Milestone 8 progress note for what these cover and what they deliberately do
+  not.
 
 ### 24.2 What still requires the owner
 

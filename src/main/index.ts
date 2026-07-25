@@ -676,9 +676,24 @@ function liveEngineProcessCount(): number {
   }
 }
 
-async function waitForEngineReady(deadlineMs: number): Promise<void> {
+function readyGenerationId(): string | null {
+  const status = latestEngineStatusEvent.status
+  return status.state === 'ready' ? status.generationId : null
+}
+
+/**
+ * Waits for a genuinely new generation. Waiting for `ready` alone would settle
+ * on the status the previous engine last published, so a restart that never
+ * came back would still look successful.
+ */
+async function waitForEngineReady(
+  deadlineMs: number,
+  previousGenerationId: string | null
+): Promise<void> {
   const deadline = Date.now() + deadlineMs
-  while (latestEngineStatusEvent.status.state !== 'ready') {
+  for (;;) {
+    const generationId = readyGenerationId()
+    if (generationId !== null && generationId !== previousGenerationId) return
     if (Date.now() > deadline) {
       throw new Error('The engine never returned to ready after a restart')
     }
@@ -701,6 +716,7 @@ async function runRestartSoak(): Promise<void> {
       throw new Error(`Restart ${restart} did not begin with one live engine`)
     }
 
+    const previousGenerationId = readyGenerationId()
     const startedAt = Date.now()
     const result = await supervisor.stop()
     const durationMs = Date.now() - startedAt
@@ -716,10 +732,14 @@ async function runRestartSoak(): Promise<void> {
       throw new Error(`Restart ${restart} exceeded the shutdown deadline`)
     }
 
-    if (!supervisor.restart()) {
-      throw new Error(`Restart ${restart} was refused by the supervisor`)
-    }
-    await waitForEngineReady(RESTART_SOAK_READY_TIMEOUT_MS)
+    // `restart()` is the crash-recovery path and is only accepted from a
+    // stopped status. A supervised restart is the pair the application itself
+    // uses: the graceful shutdown above, then a fresh supervised start.
+    supervisor.start()
+    await waitForEngineReady(
+      RESTART_SOAK_READY_TIMEOUT_MS,
+      previousGenerationId
+    )
   }
 
   const ordered = [...shutdownDurationsMs].sort((left, right) => left - right)
