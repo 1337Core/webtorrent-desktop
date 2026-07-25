@@ -105,6 +105,8 @@ export type RuntimeInfo = z.infer<typeof runtimeInfoSchema>
 
 const engineRuntimeInfoSchema = z.strictObject({
   architecture: z.literal('arm64'),
+  /** The loopback media proxy port the renderer's CSP must authorize. */
+  mediaPort: z.number().int().min(1).max(65_535),
   electronVersion: z.literal('43.2.0'),
   nodeVersion: z.literal('24.18.0'),
   processType: z.literal('utility'),

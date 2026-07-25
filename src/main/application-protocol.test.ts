@@ -14,6 +14,7 @@ vi.mock('electron', () => ({
 
 import {
   APPLICATION_CSP,
+  buildApplicationCsp,
   RENDERER_CONNECTION_ALLOWLIST,
   parseApplicationRequestPath,
   registerApplicationProtocol
@@ -163,5 +164,17 @@ describe('registerApplicationProtocol', () => {
 
     expect(unhandle).toHaveBeenCalledOnce()
     expect(unhandle).toHaveBeenCalledWith('app')
+  })
+
+  it('authorizes only the exact loopback media port', () => {
+    expect(APPLICATION_CSP).toContain("media-src 'none'")
+    expect(buildApplicationCsp(52_000)).toContain(
+      'media-src http://127.0.0.1:52000'
+    )
+    expect(buildApplicationCsp(52_000)).not.toContain('localhost')
+
+    for (const invalid of [0, 65_536, -1, 1.5, Number.NaN]) {
+      expect(buildApplicationCsp(invalid)).toContain("media-src 'none'")
+    }
   })
 })

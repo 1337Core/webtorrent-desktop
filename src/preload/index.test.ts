@@ -92,6 +92,7 @@ function readyStatus(generation = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa') {
     generationId: generation,
     restartCount: 0,
     architecture: 'arm64',
+    mediaPort: 52_000,
     electronVersion: '43.2.0',
     nodeVersion: '24.18.0',
     processType: 'utility',

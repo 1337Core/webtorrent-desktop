@@ -63,6 +63,7 @@ function createHarness(options: { stateRevision?: number } = {}): {
     generationId,
     restartCount: 0,
     architecture: 'arm64',
+    mediaPort: 52_000,
     electronVersion: '43.2.0',
     nodeVersion: '24.18.0',
     processType: 'utility',

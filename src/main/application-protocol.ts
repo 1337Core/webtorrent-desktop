@@ -3,20 +3,36 @@ import { realpath } from 'node:fs/promises'
 import { pathToFileURL } from 'node:url'
 import { net, type Session } from 'electron'
 
-export const APPLICATION_CSP = [
-  "default-src 'none'",
-  "script-src 'self'",
-  "style-src 'self'",
-  "img-src 'self' data:",
-  "font-src 'self'",
-  "connect-src 'none'",
-  "media-src 'none'",
-  "frame-src 'none'",
-  "frame-ancestors 'none'",
-  "object-src 'none'",
-  "base-uri 'none'",
-  "form-action 'none'"
-].join('; ')
+/**
+ * The renderer may load media only from the engine's exact loopback port.
+ * A wildcard localhost port is never authorized, and before the engine
+ * reports one the directive stays `'none'`.
+ */
+export function buildApplicationCsp(mediaPort: number | null): string {
+  const mediaSource =
+    mediaPort !== null &&
+    Number.isSafeInteger(mediaPort) &&
+    mediaPort >= 1 &&
+    mediaPort <= 65_535
+      ? `http://127.0.0.1:${mediaPort}`
+      : "'none'"
+  return [
+    "default-src 'none'",
+    "script-src 'self'",
+    "style-src 'self'",
+    "img-src 'self' data:",
+    "font-src 'self'",
+    "connect-src 'none'",
+    `media-src ${mediaSource}`,
+    "frame-src 'none'",
+    "frame-ancestors 'none'",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "form-action 'none'"
+  ].join('; ')
+}
+
+export const APPLICATION_CSP = buildApplicationCsp(null)
 export const RENDERER_CONNECTION_ALLOWLIST = '(response-origin);webrtc=block'
 
 const APPLICATION_SECURITY_HEADERS = {

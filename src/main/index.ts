@@ -717,7 +717,14 @@ async function initializeApplication(): Promise<void> {
   if (stateStore.snapshot().preferences.downloadRoot === null) {
     stateStore.setDownloadRoot(app.getPath('downloads'))
   }
-  uiSession = createUiSession(diagnostics)
+  // The renderer's media-src names the engine's exact loopback port, so the
+  // header is built from the live engine status rather than a fixed policy.
+  uiSession = createUiSession(diagnostics, {
+    getMediaPort: () => {
+      const status = engineSupervisor?.status()
+      return status?.state === 'ready' ? status.mediaPort : null
+    }
+  })
   unregisterApplicationProtocol = registerApplicationProtocol(
     uiSession,
     rendererRoot()

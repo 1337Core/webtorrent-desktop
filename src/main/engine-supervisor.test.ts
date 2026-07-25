@@ -96,6 +96,7 @@ function emitReady(
       type: 'engine:ready',
       payload: {
         architecture: 'arm64',
+        mediaPort: 52_000,
         electronVersion: '43.2.0',
         nodeVersion: '24.18.0',
         processType: 'utility',

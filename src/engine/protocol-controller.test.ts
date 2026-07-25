@@ -13,6 +13,7 @@ import { EngineProtocolController } from './protocol-controller'
 const generationId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const runtime: EngineRuntimeInfo = {
   architecture: 'arm64',
+  mediaPort: 52_000,
   electronVersion: '43.2.0',
   nodeVersion: '24.18.0',
   processType: 'utility',

@@ -7,7 +7,7 @@ import {
   type WebPreferences
 } from 'electron'
 import {
-  APPLICATION_CSP,
+  buildApplicationCsp,
   RENDERER_CONNECTION_ALLOWLIST
 } from './application-protocol'
 import type { Diagnostics } from './diagnostics'
@@ -116,7 +116,16 @@ export function configureRendererWebRtcBlocking(): void {
   }
 }
 
-export function createUiSession(diagnostics: Diagnostics): Session {
+export type UiSessionOptions = Readonly<{
+  /** The engine's loopback media port, or null before it reports one. */
+  getMediaPort?: () => number | null
+}>
+
+export function createUiSession(
+  diagnostics: Diagnostics,
+  options: UiSessionOptions = {}
+): Session {
+  const getMediaPort = options.getMediaPort ?? ((): number | null => null)
   const uiSession = session.fromPartition(UI_SESSION_PARTITION, {
     cache: false
   })
@@ -152,7 +161,7 @@ export function createUiSession(diagnostics: Diagnostics): Session {
         responseHeaders: {
           ...details.responseHeaders,
           'Connection-Allowlist': [RENDERER_CONNECTION_ALLOWLIST],
-          'Content-Security-Policy': [APPLICATION_CSP],
+          'Content-Security-Policy': [buildApplicationCsp(getMediaPort())],
           'Cross-Origin-Opener-Policy': ['same-origin'],
           'Permissions-Policy': [
             'camera=(), microphone=(), geolocation=(), display-capture=(), fullscreen=(), payment=(), usb=()'

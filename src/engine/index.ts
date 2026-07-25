@@ -172,7 +172,7 @@ async function startClients(): Promise<EngineRuntimeInfo> {
   }
 
   await lifecycle.start()
-  await mediaProxy.start()
+  const mediaPort = await mediaProxy.start()
   const publicClient = clients.get('public')
   const privateClient = clients.get('private')
   if (
@@ -185,6 +185,7 @@ async function startClients(): Promise<EngineRuntimeInfo> {
 
   return {
     architecture: 'arm64',
+    mediaPort,
     electronVersion: '43.2.0',
     nodeVersion: '24.18.0',
     processType: 'utility',
