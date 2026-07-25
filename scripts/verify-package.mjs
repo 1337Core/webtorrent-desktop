@@ -230,6 +230,24 @@ const rendererBundle = extractFile(
   asarPath,
   rendererBundlePath.slice(1)
 ).toString('utf8')
+const engineBundle = extractFile(asarPath, 'build/engine/index.mjs').toString(
+  'utf8'
+)
+
+// Integration fixtures may reach the exact loopback endpoints a test creates.
+// Nothing in the shipped engine may enable that: no flag, switch, or
+// preference turns it on, and this proves no packaged call site does either.
+for (const fixtureCapability of [
+  'testOnlyAllowLoopback: true',
+  'testOnlyAllowLoopback:true',
+  'bindAddress:'
+]) {
+  if (engineBundle.includes(fixtureCapability)) {
+    throw new Error(
+      `Packaged engine enables a test-only fixture capability: ${fixtureCapability}`
+    )
+  }
+}
 
 for (const requiredMarker of [
   'desktop:bootstrap:v1',
