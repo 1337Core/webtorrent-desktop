@@ -1,6 +1,13 @@
 import { randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile
+} from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
@@ -111,6 +118,30 @@ async function seedLocally(fileCount = 1): Promise<Fixture> {
     seeder,
     torrentBytes
   }
+}
+
+/** A minimal encoder, so a hostile fixture can be written by hand. */
+function bencode(value: unknown): Buffer {
+  if (typeof value === 'number') return Buffer.from(`i${value}e`)
+  if (Buffer.isBuffer(value)) {
+    return Buffer.concat([Buffer.from(`${value.length}:`), value])
+  }
+  if (typeof value === 'string') return bencode(Buffer.from(value, 'utf8'))
+  if (Array.isArray(value)) {
+    return Buffer.concat([
+      Buffer.from('l'),
+      ...value.map(entry => bencode(entry)),
+      Buffer.from('e')
+    ])
+  }
+  const entries = Object.entries(value as Record<string, unknown>).sort(
+    ([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)
+  )
+  return Buffer.concat([
+    Buffer.from('d'),
+    ...entries.flatMap(([key, entry]) => [bencode(key), bencode(entry)]),
+    Buffer.from('e')
+  ])
 }
 
 function payloadName(index: number): string {
@@ -513,6 +544,50 @@ describe('engine transfer', () => {
         remote.destroy()
         await downloader.manager.closeAll()
       }
+    },
+    TRANSFER_TIMEOUT_MS
+  )
+
+  it(
+    'writes nothing outside the destination root, hostile or not',
+    async () => {
+      const fixture = await seedLocally()
+      const metadata = await validateTorrentMetadata(
+        fixture.torrentBytes,
+        new EgressPolicy()
+      )
+
+      // A sentinel the engine has no business touching, one level above the
+      // root it was authorized to write in.
+      const sentinelPath = path.join(fixture.root, 'sentinel.txt')
+      await writeFile(sentinelPath, 'untouched')
+
+      const hostile = bencode({
+        info: {
+          files: [{ length: 8, path: ['..', '..', 'sentinel.txt'] }],
+          name: 'hostile',
+          'piece length': 16_384,
+          pieces: Buffer.alloc(20)
+        }
+      })
+      await expect(
+        validateTorrentMetadata(new Uint8Array(hostile), new EgressPolicy())
+      ).rejects.toMatchObject({ code: 'UNSAFE_PATH' })
+
+      const downloader = await downloaderFor(fixture, metadata, [0])
+      expect(downloader.session().admitPeer(fixture.allowedPeer)).toBe(true)
+      await waitFor(
+        () => downloader.manager.summary(metadata.infoHash).progress >= 1,
+        'The transfer never completed'
+      )
+      await downloader.manager.closeAll()
+
+      expect(await readFile(sentinelPath, 'utf8')).toBe('untouched')
+      // Everything the completed transfer created lives under its own root.
+      const created = await readdir(downloader.destinationRoot)
+      expect(created).toEqual([payloadName(0)])
+      const roots = (await readdir(fixture.root)).sort()
+      expect(roots).toEqual(['download', 'seed', 'sentinel.txt'])
     },
     TRANSFER_TIMEOUT_MS
   )
