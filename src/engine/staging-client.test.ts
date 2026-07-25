@@ -137,6 +137,54 @@ describe('StagingClientPool', () => {
     expect(clients[0]?.destroyed).toBe(true)
   })
 
+  it('accepts the listener-already-closed callback caused by the inbound guard', async () => {
+    const unhealthy = vi.fn()
+    const pool = new StagingClientPool<FakeClient>({
+      closeInbound: async () => undefined,
+      createClient: () => {
+        const client = new FakeClient(51_413)
+        client.destroy = callback => {
+          client.destroyed = true
+          callback?.(
+            Object.assign(new Error('Server is not running.'), {
+              code: 'ERR_SERVER_NOT_RUNNING'
+            })
+          )
+        }
+        setTimeout(() => client.emit('listening'), 0)
+        return client
+      },
+      onUnhealthy: unhealthy
+    })
+
+    await expect((await pool.lease()).release()).resolves.toBeUndefined()
+    expect(pool.leaseCount).toBe(0)
+    expect(unhealthy).not.toHaveBeenCalled()
+  })
+
+  it('keeps a failed-destroy slot and marks the pool unhealthy', async () => {
+    const unhealthy = vi.fn()
+    const pool = new StagingClientPool<FakeClient>({
+      createClient: () => {
+        const client = new FakeClient(51_413)
+        client.destroy = callback => {
+          client.destroyed = true
+          callback?.(new Error('destroy failed'))
+        }
+        setTimeout(() => client.emit('listening'), 0)
+        return client
+      },
+      onUnhealthy: unhealthy
+    })
+
+    await expect((await pool.lease()).release()).rejects.toMatchObject({
+      code: 'DESTROY_FAILED'
+    })
+    expect(pool.leaseCount).toBe(1)
+    expect(unhealthy).toHaveBeenCalledOnce()
+    await expect(pool.lease()).rejects.toMatchObject({ code: 'UNHEALTHY' })
+  })
+
   it('gives up on a client that never reports a listener', async () => {
     const context = harness({ silent: true })
 

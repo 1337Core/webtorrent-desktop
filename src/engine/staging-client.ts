@@ -26,6 +26,14 @@ class StagingClientError extends Error {
   }
 }
 
+function isExpectedClosedInboundError(error: Error | undefined): boolean {
+  return (
+    error !== undefined &&
+    typeof Reflect.get(error, 'code') === 'string' &&
+    Reflect.get(error, 'code') === 'ERR_SERVER_NOT_RUNNING'
+  )
+}
+
 /** The exact staging client surface metadata acquisition consumes. */
 export type StagingWebTorrentClient = {
   add(uri: string, options: Record<string, unknown>): unknown
@@ -202,8 +210,14 @@ export class StagingClientPool<
     client: TClient
   ): Promise<void> {
     const teardown = this.#destroy(client)
-    void teardown.completed.then(() => {
-      this.#active.delete(starting)
+    void teardown.completed.then(error => {
+      if (
+        error === undefined ||
+        (this.#options.closeInbound !== undefined &&
+          isExpectedClosedInboundError(error))
+      ) {
+        this.#active.delete(starting)
+      }
     })
     await teardown.bounded
   }
@@ -239,7 +253,13 @@ export class StagingClientPool<
       timer.unref?.()
       void completion.promise.then(error => {
         if (timer) clearTimeout(timer)
-        if (error) {
+        if (
+          error &&
+          !(
+            this.#options.closeInbound !== undefined &&
+            isExpectedClosedInboundError(error)
+          )
+        ) {
           const failure = new StagingClientError('DESTROY_FAILED')
           this.#markUnhealthy(failure)
           reject(failure)

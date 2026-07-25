@@ -77,6 +77,7 @@ describe('WebTorrent Updated', () => {
     expect(globals.require).toBe('undefined')
     expect(globals.capabilities).toEqual([
       'choosePath',
+      'exportTorrent',
       'getBootstrap',
       'onEngineStatus',
       'onMenuAction',

@@ -2507,6 +2507,13 @@ Verified after the final local edits:
 - `npm test`: **74 files and 766 tests passed**, including format, lint,
   TypeScript, Knip, unit, component, local TLS, tracker, DHT, media, and
   lifecycle checks.
+- `npm run e2e`: **4 specs and 17 tests passed** after adding the torrent-export
+  bridge capability to the inventory and normalizing WebTorrent's expected
+  `ERR_SERVER_NOT_RUNNING` destroy callback when the staging inbound guard has
+  already closed its listener.
+- the focused staging-client suite passed **12 tests**, and a real WebTorrent
+  teardown probe confirmed that the guarded listener is released normally
+  despite the upstream callback.
 - The first live CI run at checkpoint `c145cda` passed clean install, artifact
   acquisition, deterministic checks, and all 16 Electron E2E tests. Its package
   stage found the invalid remote-debugging-pipe probe; that harness is fixed in
@@ -2514,12 +2521,18 @@ Verified after the final local edits:
 
 Not rerun after the final staging/media edits:
 
-- `npm run e2e`;
-- `npm run package:check`;
+- `npm run package:check` was started but interrupted during `postPackage` when
+  the owner reiterated the pause; this is not a passing result and must be
+  rerun from the beginning;
 - launch of the rebuilt `.app` through Computer Use;
 - a real lawful magnet in the packaged app;
 - the post-push GitHub CI result; and
 - a final Greptile review of this snapshot.
+
+Post-handoff closure: work briefly resumed after this handoff was first written.
+Only the two narrowly scoped fixes above and their regression tests were kept.
+No further review, CI polling, packaging, application launch, or acceptance work
+was performed after the owner reiterated the pause.
 
 Recommended continuation order:
 
