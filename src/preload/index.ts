@@ -5,16 +5,19 @@ import {
   choosePathResultSchema,
   DESKTOP_CHOOSE_PATH_CHANNEL,
   DESKTOP_ENGINE_RESTART_CHANNEL,
+  DESKTOP_PREFERENCES_CHANNEL,
   DESKTOP_TORRENT_COMMAND_CHANNEL,
   ENGINE_STATUS_CHANNEL,
   engineStatusEventSchema,
   preloadTrustProofSchema,
   PROTOCOL_VERSION,
   restartEngineResultSchema,
+  setPreferencesResultSchema,
   torrentCommandResultSchema,
   type BootstrapResult,
   type ChoosePathResult,
   type EngineCommand,
+  type SetPreferencesResult,
   type TorrentCommandResult,
   type EngineStatusEvent,
   type EngineStatus,
@@ -273,6 +276,34 @@ async function choosePath(
   }
 }
 
+/** Records a chosen download folder; main validates and persists it. */
+async function setDownloadRoot(
+  downloadRoot: string
+): Promise<SetPreferencesResult> {
+  const requestId = crypto.randomUUID()
+  try {
+    const value = await invokeBounded(DESKTOP_PREFERENCES_CHANNEL, {
+      protocolVersion: PROTOCOL_VERSION,
+      requestId,
+      command: 'setPreferences',
+      payload: { downloadRoot }
+    })
+    const result = setPreferencesResultSchema.safeParse(value)
+    if (!result.success || result.data.requestId !== requestId) {
+      return protocolError(
+        requestId,
+        'The application returned invalid preferences.'
+      ) as SetPreferencesResult
+    }
+    return result.data
+  } catch {
+    return protocolError(
+      requestId,
+      'The download folder could not be saved.'
+    ) as SetPreferencesResult
+  }
+}
+
 contextBridge.exposeInMainWorld(
   'desktop',
   Object.freeze({
@@ -280,6 +311,7 @@ contextBridge.exposeInMainWorld(
     getBootstrap,
     restartEngine,
     runTorrentCommand,
+    setDownloadRoot,
     onEngineStatus
   })
 )

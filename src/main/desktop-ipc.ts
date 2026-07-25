@@ -8,10 +8,13 @@ import {
   choosePathResultSchema,
   DESKTOP_CHOOSE_PATH_CHANNEL,
   DESKTOP_ENGINE_RESTART_CHANNEL,
+  DESKTOP_PREFERENCES_CHANNEL,
   DESKTOP_TORRENT_COMMAND_CHANNEL,
   PROTOCOL_VERSION,
   restartEngineRequestSchema,
   restartEngineResultSchema,
+  setPreferencesRequestSchema,
+  setPreferencesResultSchema,
   torrentCommandRequestSchema,
   torrentCommandResultSchema,
   type BootstrapResult,
@@ -320,9 +323,51 @@ export function registerDesktopIpc(options: DesktopIpcOptions): () => void {
     }
   )
 
+  frameIpc.handle(DESKTOP_PREFERENCES_CHANNEL, (event, value: unknown) => {
+    const rejected = authorize(event, value)
+    if (rejected) return setPreferencesResultSchema.parse(rejected)
+
+    const request = setPreferencesRequestSchema.safeParse(value)
+    if (!request.success) {
+      return setPreferencesResultSchema.parse(
+        errorResult(
+          candidateRequestId(value),
+          'INVALID_REQUEST',
+          'The application received invalid preferences.',
+          false
+        )
+      )
+    }
+
+    const duplicate = rememberRequest(request.data.requestId)
+    if (duplicate) return setPreferencesResultSchema.parse(duplicate)
+
+    try {
+      const state = stateStore.setDownloadRoot(
+        request.data.payload.downloadRoot
+      )
+      return setPreferencesResultSchema.parse({
+        protocolVersion: PROTOCOL_VERSION,
+        requestId: request.data.requestId,
+        ok: true,
+        value: { preferences: state.preferences }
+      })
+    } catch {
+      return setPreferencesResultSchema.parse(
+        errorResult(
+          request.data.requestId,
+          'INVALID_REQUEST',
+          'That download folder cannot be used.',
+          false
+        )
+      )
+    }
+  })
+
   return () => {
     frameIpc.removeHandler(DESKTOP_BOOTSTRAP_CHANNEL)
     frameIpc.removeHandler(DESKTOP_CHOOSE_PATH_CHANNEL)
+    frameIpc.removeHandler(DESKTOP_PREFERENCES_CHANNEL)
     frameIpc.removeHandler(DESKTOP_ENGINE_RESTART_CHANNEL)
     frameIpc.removeHandler(DESKTOP_TORRENT_COMMAND_CHANNEL)
   }

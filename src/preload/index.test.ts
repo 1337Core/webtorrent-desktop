@@ -195,7 +195,8 @@ describe('preload desktop bridge', () => {
       'getBootstrap',
       'onEngineStatus',
       'restartEngine',
-      'runTorrentCommand'
+      'runTorrentCommand',
+      'setDownloadRoot'
     ])
     expect(Object.isFrozen(api)).toBe(true)
   })

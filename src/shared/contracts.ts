@@ -14,6 +14,7 @@ export const DESKTOP_ENGINE_RESTART_CHANNEL = 'desktop:engine-restart:v1'
 export const ENGINE_STATUS_CHANNEL = 'desktop:engine-status:v1'
 export const DESKTOP_TORRENT_COMMAND_CHANNEL = 'desktop:torrent-command:v1'
 export const DESKTOP_CHOOSE_PATH_CHANNEL = 'desktop:choose-path:v1'
+export const DESKTOP_PREFERENCES_CHANNEL = 'desktop:preferences:v1'
 export const ENGINE_MESSAGE_BUDGET = {
   maxBytes: 128 * 1024,
   maxDepth: 16,
@@ -404,6 +405,32 @@ export const choosePathResultSchema = z.discriminatedUnion('ok', [
 ])
 
 export type ChoosePathResult = z.infer<typeof choosePathResultSchema>
+
+export const setPreferencesRequestSchema = z.strictObject({
+  protocolVersion: protocolVersionSchema,
+  requestId: requestIdSchema,
+  command: z.literal('setPreferences'),
+  payload: z.strictObject({
+    downloadRoot: z.string().min(1).max(4_096)
+  })
+})
+
+export const setPreferencesResultSchema = z.discriminatedUnion('ok', [
+  z.strictObject({
+    protocolVersion: protocolVersionSchema,
+    requestId: requestIdSchema,
+    ok: z.literal(true),
+    value: z.strictObject({ preferences: preferencesSchema })
+  }),
+  z.strictObject({
+    protocolVersion: protocolVersionSchema,
+    requestId: requestIdSchema.nullable(),
+    ok: z.literal(false),
+    error: desktopErrorSchema
+  })
+])
+
+export type SetPreferencesResult = z.infer<typeof setPreferencesResultSchema>
 
 export function isEngineStatus(value: unknown): value is EngineStatus {
   return engineStatusSchema.safeParse(value).success

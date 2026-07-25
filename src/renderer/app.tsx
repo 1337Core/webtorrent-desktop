@@ -3,6 +3,7 @@ import type { BootstrapSnapshot, EngineStatus } from '../shared/contracts'
 import { AddTorrent } from './components/add-torrent'
 import { CreateTorrent } from './components/create-torrent'
 import { MediaPlayer } from './components/media-player'
+import { Preferences } from './components/preferences'
 import { TorrentList } from './components/torrent-list'
 
 function engineLabel(status: EngineStatus): string {
@@ -39,6 +40,7 @@ export function App(): React.JSX.Element {
   )
   const [restartPending, setRestartPending] = useState(false)
   const [listRevision, setListRevision] = useState(0)
+  const [downloadRoot, setDownloadRoot] = useState<string | null>(null)
   const [playing, setPlaying] = useState<{
     fileIndex: number
     fileName: string
@@ -65,6 +67,7 @@ export function App(): React.JSX.Element {
       }
 
       setBootstrap(result.value)
+      setDownloadRoot(result.value.state.preferences.downloadRoot)
       setEngineStatus(result.value.engineStatusEvent.status)
     })
 
@@ -135,8 +138,10 @@ export function App(): React.JSX.Element {
         </div>
       </section>
 
+      <Preferences downloadRoot={downloadRoot} onChanged={setDownloadRoot} />
+
       <AddTorrent
-        downloadRoot={bootstrap?.state.preferences.downloadRoot ?? null}
+        downloadRoot={downloadRoot}
         onAdded={() => setListRevision(revision => revision + 1)}
         ready={engineStatus.state === 'ready'}
       />

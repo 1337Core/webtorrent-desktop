@@ -4,6 +4,7 @@ import type {
   EngineCommand,
   EngineStatus,
   RestartEngineResult,
+  SetPreferencesResult,
   TorrentCommandResult
 } from '../shared/contracts'
 
@@ -19,6 +20,7 @@ declare global {
       runTorrentCommand: (
         operation: EngineCommand
       ) => Promise<TorrentCommandResult>
+      setDownloadRoot: (downloadRoot: string) => Promise<SetPreferencesResult>
     }
   }
 }
