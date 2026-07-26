@@ -42,6 +42,7 @@ export default [
     ignores: [
       // Scratch worktrees an assistant may leave beside the repository are
       // not this project's source.
+      '.cache/**',
       '.claude/**',
       '.github/**',
       'bin/**',

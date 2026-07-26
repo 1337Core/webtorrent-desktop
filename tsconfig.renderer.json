@@ -1,8 +1,10 @@
 {
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
+    "incremental": true,
     "jsx": "react-jsx",
     "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "tsBuildInfoFile": ".cache/tsbuildinfo/renderer.tsbuildinfo",
     "types": ["vite/client"]
   },
   "include": [

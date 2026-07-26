@@ -2,12 +2,16 @@ name: CI
 
 on:
   pull_request:
+  # Actions caches are readable from the branch that wrote them and from the
+  # default branch. Without a run on master, every pull request starts cold.
+  push:
+    branches: [master]
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number }}
+  group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -39,8 +43,25 @@ jobs:
       - name: Install dependencies without lifecycle scripts
         run: npm ci --ignore-scripts
 
+      # Every archive is re-hashed against the pins in acquire-artifacts.mjs
+      # before use, and discarded on mismatch, so a restored entry is checked
+      # exactly as a freshly downloaded one is.
+      - name: Restore reviewed native artifacts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .artifacts
+          key: artifacts-${{ runner.os }}-${{ hashFiles('scripts/acquire-artifacts.mjs') }}
+
       - name: Acquire reviewed native artifacts
         run: npm run artifacts
+
+      - name: Restore incremental check caches
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .cache
+          key: checks-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-${{ github.sha }}
+          restore-keys: |
+            checks-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-
 
       - name: Run deterministic checks
         run: npm test

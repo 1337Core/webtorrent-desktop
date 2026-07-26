@@ -53,7 +53,7 @@
     "e2e": "node scripts/assert-toolchain.mjs && npm run package:e2e && wdio run wdio.conf.ts",
     "format": "node scripts/assert-toolchain.mjs && prettier --check .",
     "format:write": "node scripts/assert-toolchain.mjs && prettier --write .",
-    "lint": "node scripts/assert-toolchain.mjs && eslint .",
+    "lint": "node scripts/assert-toolchain.mjs && eslint . --cache --cache-location .cache/eslint",
     "package": "node scripts/assert-toolchain.mjs && npm run artifacts:verify && electron-forge package --platform=darwin --arch=arm64",
     "package:check": "node scripts/assert-toolchain.mjs && npm run package && npm run verify:package && npm run smoke:package && npm run qualify:install",
     "package:e2e": "node scripts/assert-toolchain.mjs && npm run artifacts:verify && WEBTORRENT_UPDATED_E2E=1 electron-forge package --platform=darwin --arch=arm64",
