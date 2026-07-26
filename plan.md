@@ -2595,15 +2595,25 @@ duplicate.
 Two were privacy or reachability rules the engine stated but did not enforce: a
 private torrent's WSS trackers ran without private mode while its HTTP trackers
 were serialized, and a private torrent whose only trackers were plain HTTP was
-committed although nothing would ever announce it. The remainder were the
+committed although nothing would ever announce it. The first is now subsumed by
+the cross-transport chain described below. The remainder were the
 missing one-shot `completed` announce, a data deletion acting on a partial
 manifest, a watched folder re-reporting every existing file on each launch, and
 two audio formats the engine serves that the renderer treated as unplayable.
 
-One limitation is recorded rather than fixed: a private torrent's HTTP chain and
-its WSS chain are each serial, but they are not serialized against each other,
-so up to two endpoints can be in contact at once. Making that a single
-cross-transport chain is a design change and needs owner direction.
+**Owner instruction, 2026-07-25: build the cross-transport private scheduler.**
+The limitation this round first recorded — that a private torrent's HTTP chain
+and WSS chain were each serial but not serialized against each other — is now
+closed. A private torrent no longer runs an HTTP activation beside a WSS one.
+It runs one `PrivateTrackerChain` over every declared endpoint in metadata
+order, whatever the transport, with exactly one member alive at a time. The
+active member is fully stopped, and its peers and sockets retired with it,
+before the next endpoint is constructed; a failing endpoint advances the chain,
+and exhausting the sequence retries it after a bounded jittered delay so a
+torrent whose only tracker is down keeps retrying that tracker instead of
+widening its exposure. Each member is a single-endpoint activation of the
+appropriate transport: retry order and backoff belong to the chain, which is
+the only thing that knows what else the torrent must not contact meanwhile.
 
 ### 24.3 What still requires the owner
 

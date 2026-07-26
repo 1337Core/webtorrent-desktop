@@ -29,6 +29,10 @@ import {
   WebrtcSignaling,
   type SignalingPeer
 } from './webrtc-signaling'
+import {
+  PrivateTrackerChain,
+  type PrivateChainMember
+} from './private-tracker-chain'
 import { WssActivation } from './wss-activation'
 import { WssSocketFactory } from './wss-socket'
 import SimplePeer from '@thaunknown/simple-peer'
@@ -238,7 +242,95 @@ const peerBudget = new PeerBudget({
   stagingLiveTransports
 })
 
+type LifecycleHandle = ReturnType<typeof lifecycle.handle>
+
+function sessionProgress(session: DiskTorrentSession): {
+  downloaded: number
+  left: number
+  uploaded: number
+} {
+  const stats = session.stats()
+  return {
+    downloaded: stats.downloaded,
+    left: Math.max(session.metadata.length - stats.downloaded, 0),
+    uploaded: stats.uploaded
+  }
+}
+
+/**
+ * One HTTPS endpoint of a private chain.
+ *
+ * `singlePass` is what makes the member report failure instead of retrying on
+ * its own: retry order and backoff belong to the chain, which is the only
+ * thing that knows what else the torrent must not contact meanwhile.
+ */
+function privateHttpMember(
+  session: DiskTorrentSession,
+  handle: LifecycleHandle,
+  url: string,
+  onFailed: () => void
+): PrivateChainMember {
+  const activation = new TrackerActivation({
+    allowHttp: false,
+    allowPrivateNetwork: false,
+    infoHash: session.infoHash,
+    onExhausted: onFailed,
+    onPeers: delivery => {
+      for (const peer of delivery.peers) {
+        session.admitPeer(`${peer.address}:${peer.port}`)
+      }
+    },
+    peerId: handle.peerId,
+    port: handle.port,
+    private: true,
+    progress: () => sessionProgress(session),
+    sessionSeed,
+    singlePass: true,
+    tiers: [[url]],
+    transport: trackerTransport
+  })
+  return {
+    notifyCompleted: () => activation.notifyCompleted(),
+    start: () => activation.start(),
+    stop: () => activation.stop()
+  }
+}
+
+/** One WSS endpoint of a private chain, on the same terms. */
+function privateWssMember(
+  session: DiskTorrentSession,
+  handle: LifecycleHandle,
+  signaling: WebrtcSignaling,
+  url: string,
+  onFailed: () => void
+): PrivateChainMember {
+  const activation = new WssActivation({
+    allowPrivateNetwork: false,
+    connectSocket: input => wssSockets.connect(input),
+    createOffers: (count, trackerUrl) =>
+      signaling.createOffers(count, trackerUrl),
+    infoHash: session.infoHash,
+    onAnswer: answer => {
+      signaling.acceptAnswer(answer)
+    },
+    onExhausted: onFailed,
+    onOffer: (offer, trackerUrl, respond) => {
+      signaling.acceptOffer(offer, trackerUrl, respond)
+    },
+    peerId: peerIdentity(handle.peerId),
+    private: true,
+    progress: () => sessionProgress(session),
+    serialRetirement: true,
+    tiers: [[url]]
+  })
+  return {
+    start: () => activation.start(),
+    stop: () => activation.stop()
+  }
+}
+
 const trackerActivations = new WeakMap<DiskTorrentSession, TrackerActivation>()
+const privateChains = new WeakMap<DiskTorrentSession, PrivateTrackerChain>()
 
 const torrentManager: TorrentManager = new TorrentManager({
   resolveClient,
@@ -251,6 +343,44 @@ const torrentManager: TorrentManager = new TorrentManager({
       const tiers = session.metadata.announceTiers
 
       const handle = lifecycle.handle(diskOwner(session.owner))
+      const signaling = new WebrtcSignaling({
+        createPeer: ({ initiator }) => createSignalingPeer(initiator),
+        handoff: peer => session.admitConnection(peer),
+        // A peer identity belonging to either client is this engine itself.
+        isSelfPeerId: peerId =>
+          peerId === localPeerIdentity('public') ||
+          peerId === localPeerIdentity('private'),
+        pending: pendingSignaling
+      })
+
+      if (session.metadata.private) {
+        // A private torrent runs one cross-transport chain rather than an
+        // HTTP activation beside a WSS one, so it is never in contact with
+        // more than one tracker at a time. It also never reaches the DHT.
+        const chain = new PrivateTrackerChain({
+          createMember: ({ onFailed, url }) =>
+            url.startsWith('wss://')
+              ? privateWssMember(session, handle, signaling, url, onFailed)
+              : privateHttpMember(session, handle, url, onFailed),
+          endpoints: tiers.flat()
+        })
+        privateChains.set(session, chain)
+        return {
+          start: () => {
+            void chain.start().catch(() => {
+              // A chain-scoped failure is a warning, never a torrent failure.
+            })
+          },
+          stop: async () => {
+            signaling.close()
+            if (privateChains.get(session) === chain) {
+              privateChains.delete(session)
+            }
+            await chain.stop()
+          }
+        }
+      }
+
       const activation = new TrackerActivation({
         allowHttp: false,
         allowPrivateNetwork: false,
@@ -262,27 +392,11 @@ const torrentManager: TorrentManager = new TorrentManager({
         },
         peerId: handle.peerId,
         port: handle.port,
-        private: session.metadata.private,
-        progress: () => {
-          const stats = session.stats()
-          return {
-            downloaded: stats.downloaded,
-            left: Math.max(session.metadata.length - stats.downloaded, 0),
-            uploaded: stats.uploaded
-          }
-        },
+        private: false,
+        progress: () => sessionProgress(session),
         sessionSeed,
         tiers,
         transport: trackerTransport
-      })
-      const signaling = new WebrtcSignaling({
-        createPeer: ({ initiator }) => createSignalingPeer(initiator),
-        handoff: peer => session.admitConnection(peer),
-        // A peer identity belonging to either client is this engine itself.
-        isSelfPeerId: peerId =>
-          peerId === localPeerIdentity('public') ||
-          peerId === localPeerIdentity('private'),
-        pending: pendingSignaling
       })
       const wss = new WssActivation({
         allowPrivateNetwork: false,
@@ -297,19 +411,7 @@ const torrentManager: TorrentManager = new TorrentManager({
           signaling.acceptOffer(offer, trackerUrl, respond)
         },
         peerId: peerIdentity(handle.peerId),
-        // A private torrent's WSS endpoints form one serial chain, exactly as
-        // its HTTP endpoints do. Without this a private torrent announced to
-        // several WSS trackers at once while the HTTP side was contacting one.
-        private: session.metadata.private,
-        progress: () => {
-          const stats = session.stats()
-          return {
-            downloaded: stats.downloaded,
-            left: Math.max(session.metadata.length - stats.downloaded, 0),
-            uploaded: stats.uploaded
-          }
-        },
-        serialRetirement: session.metadata.private,
+        progress: () => sessionProgress(session),
         tiers
       })
 
@@ -320,7 +422,6 @@ const torrentManager: TorrentManager = new TorrentManager({
           void wss.start().catch(() => {
             // A WSS-scoped failure is a warning, never a torrent failure.
           })
-          if (session.metadata.private) return
           activateCommittedDht(session, handle.port)
         },
         stop: async () => {
@@ -335,6 +436,7 @@ const torrentManager: TorrentManager = new TorrentManager({
     },
     onCompleted: session => {
       trackerActivations.get(session)?.notifyCompleted()
+      privateChains.get(session)?.notifyCompleted()
     },
     peerFilter: address => {
       const [host] = address.split(':')
