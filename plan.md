@@ -2582,6 +2582,29 @@ Section 10.2's first-launch offer is the one part of that last item still
 outstanding. The settings route it defers to now exists; the detection prompt
 on first launch does not.
 
+A second round raised eleven more, also all confirmed and fixed. Three of them
+lost owner state across a restart: an imported legacy torrent was never
+archived, so its library record was deleted as unrestorable; no resume sidecar
+was ever written, so a restore selected every file and downloaded what had been
+deselected; and a record the owner left running came back paused, because every
+add begins paused and restore only ever paused. Pause and resume also emitted no
+lifecycle event, leaving the power-save guard and dock badge stale, and a
+post-commit add failure leaked its reservation so every retry was refused as a
+duplicate.
+
+Two were privacy or reachability rules the engine stated but did not enforce: a
+private torrent's WSS trackers ran without private mode while its HTTP trackers
+were serialized, and a private torrent whose only trackers were plain HTTP was
+committed although nothing would ever announce it. The remainder were the
+missing one-shot `completed` announce, a data deletion acting on a partial
+manifest, a watched folder re-reporting every existing file on each launch, and
+two audio formats the engine serves that the renderer treated as unplayable.
+
+One limitation is recorded rather than fixed: a private torrent's HTTP chain and
+its WSS chain are each serial, but they are not serialized against each other,
+so up to two endpoints can be in contact at once. Making that a single
+cross-transport chain is a design change and needs owner direction.
+
 ### 24.3 What still requires the owner
 
 These cannot be closed by any fixture, and none of them block review:
