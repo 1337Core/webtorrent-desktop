@@ -78,6 +78,8 @@ export type EngineTorrent = {
   length: number
   name: string
   numPeers: number
+  /** WebTorrent's verified-piece bitfield, absent before the torrent is ready. */
+  bitfield?: { buffer?: Uint8Array } | undefined
   on(event: string, listener: (...args: unknown[]) => void): unknown
   pause(): void
   pieceLength: number
@@ -139,6 +141,12 @@ export type DiskTorrentSessionOptions = Readonly<{
   createActivation?: (session: DiskTorrentSession) => TorrentActivation | null
   destroyTimeoutMs?: number
   onCommitFailure?: (infoHash: string, result: CommitBarrierResult) => void
+  /**
+   * The torrent's first transition to complete. Trackers require a one-shot
+   * `completed` event, which a periodic announce with `left=0` does not
+   * satisfy.
+   */
+  onCompleted?: (session: DiskTorrentSession) => void
   /** Runs again immediately before every handoff, whatever discovered it. */
   peerFilter?: (address: string) => boolean
   readyTimeoutMs?: number
@@ -292,6 +300,16 @@ export class DiskTorrentSession {
 
   get state(): DiskTorrentState {
     return this.#state
+  }
+
+  /**
+   * The verified-piece bitfield this generation holds, or an empty view when
+   * the torrent has not reached a state that has one. Resume state is only
+   * ever a hint, so an empty bitfield simply means the next start verifies.
+   */
+  bitfield(): Uint8Array {
+    const buffer = this.#torrent?.bitfield?.buffer
+    return buffer instanceof Uint8Array ? buffer : new Uint8Array()
   }
 
   get selectedIndexes(): ReadonlyArray<number> {
@@ -640,7 +658,19 @@ export class DiskTorrentSession {
         if (torrent && !torrent.destroyed) {
           torrent.destroy({ destroyStore: false }, () => undefined)
         }
-        if (!this.#committed) this.#registry.rollback(this.#reservation)
+        if (this.#committed) {
+          // A failure after the barrier committed still has to give the info
+          // hash back. Rollback no longer applies to a committed reservation,
+          // so the entry is torn down the way removal does it; otherwise every
+          // retry is refused as a duplicate until the engine restarts.
+          this.#registry.beginTeardown(this.#metadata.infoHash)
+          this.#registry.release(this.#metadata.infoHash)
+          this.#budget?.release(
+            `${this.#metadata.infoHash}:${this.#reservation.generationId}`
+          )
+        } else {
+          this.#registry.rollback(this.#reservation)
+        }
         this.#state = 'removed'
         reject(error)
       }
@@ -662,6 +692,14 @@ export class DiskTorrentSession {
       this.#torrent = torrent
       this.#containDiscovery(torrent)
 
+      torrent.on('done', () => {
+        if (this.#state !== 'running') return
+        try {
+          options.onCompleted?.(this)
+        } catch {
+          // Lifecycle observation cannot fail the transfer that triggered it.
+        }
+      })
       torrent.on('error', () => {
         fail(new DiskTorrentError('TORRENT_ERROR'))
       })

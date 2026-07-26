@@ -52,6 +52,12 @@ export type WssActivationOptions = Readonly<{
   peerId: string
   progress: () => WssActivationProgress
   serialRetirement?: boolean
+  /**
+   * A known-private torrent announces to one endpoint at a time. Its tiers
+   * collapse into a single serial chain rather than up to four live sockets,
+   * so its identity reaches only the endpoint currently selected.
+   */
+  private?: boolean
   tiers: ReadonlyArray<ReadonlyArray<string>>
 }>
 
@@ -192,10 +198,10 @@ export class WssActivation {
    * URLs are its failovers, so an active tier is never opened twice.
    */
   #nextCandidate(): Candidate | null {
-    if (
-      !this.#started ||
-      this.#live.size >= WSS_ACTIVATION_LIMITS.maxLiveEndpoints
-    ) {
+    const liveLimit = this.#options.private
+      ? 1
+      : WSS_ACTIVATION_LIMITS.maxLiveEndpoints
+    if (!this.#started || this.#live.size >= liveLimit) {
       return null
     }
     const perTier = new Map<number, number>()

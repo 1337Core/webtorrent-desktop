@@ -52,7 +52,9 @@ export class FolderWatcher {
           },
           depth: 0,
           followSymlinks: false,
-          ignoreInitial: false,
+          // Only files that arrive after the watcher starts are reported.
+          // Otherwise every launch reopens an add for each existing file.
+          ignoreInitial: true,
           persistent: true
         }))
     this.#diagnostics = options.diagnostics

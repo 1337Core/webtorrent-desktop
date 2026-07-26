@@ -98,6 +98,13 @@ export class TorrentContextMenu {
    */
   async #remove(record: TorrentRecord, deleteData: boolean): Promise<void> {
     const files = deleteData ? await this.#manifest(record.infoHash) : []
+    // Deleting on a partial manifest would trash some of the payload and
+    // orphan the rest, with the torrent gone and no way to retry. An
+    // incomplete read fails the whole operation instead.
+    if (deleteData && files === null) {
+      this.#options.diagnostics.warn('context-menu.manifest-incomplete')
+      return
+    }
 
     const operation: EngineCommand = {
       command: 'remove-torrent',
@@ -111,7 +118,7 @@ export class TorrentContextMenu {
       })
       return
     }
-    if (!deleteData || files.length === 0) return
+    if (!deleteData || files === null || files.length === 0) return
 
     try {
       await this.#options.payloadTrash.delete({
@@ -130,19 +137,28 @@ export class TorrentContextMenu {
     }
   }
 
-  /** Every manifest path, walked page by page while the torrent still lives. */
-  async #manifest(infoHash: string): Promise<ReadonlyArray<string>> {
+  /**
+   * Every manifest path, walked page by page while the torrent still lives, or
+   * null when the walk could not be completed. A caller about to delete data
+   * needs the whole manifest or none of it.
+   */
+  async #manifest(infoHash: string): Promise<ReadonlyArray<string> | null> {
     const files: string[] = []
     let cursor: number | null = 0
 
-    while (cursor !== null && files.length < MAX_MANIFEST_FILES) {
+    while (cursor !== null) {
+      if (files.length >= MAX_MANIFEST_FILES) return null
       const result: EngineCommandResult = await this.#options.execute({
         command: 'get-torrent-files',
         payload: { cursor, infoHash, limit: PAGE_LIMIT }
       })
-      if (!result.ok || result.result.command !== 'get-torrent-files') break
+      if (!result.ok || result.result.command !== 'get-torrent-files') {
+        return null
+      }
       for (const file of result.result.value.items) files.push(file.path)
-      cursor = result.result.value.nextCursor
+      const next = result.result.value.nextCursor
+      if (next !== null && next <= cursor) return null
+      cursor = next
     }
 
     return files

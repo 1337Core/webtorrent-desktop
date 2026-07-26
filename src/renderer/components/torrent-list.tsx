@@ -9,7 +9,7 @@ import {
 
 const TORRENT_LIST_REFRESH_MS = 1_000
 const PAGE_LIMIT = 64
-const PLAYABLE = /\.(m4a|m4b|m4p|m4v|mkv|mov|mp3|mp4|ogg|wav|webm)$/iu
+const PLAYABLE = /\.(m4a|m4b|m4p|m4v|mkv|mov|mp3|mp4|oga|ogg|opus|wav|webm)$/iu
 
 type TorrentSummary = EngineValue<'list-torrents'>['items'][number]
 type TorrentFile = EngineValue<'get-torrent-files'>['items'][number]

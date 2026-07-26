@@ -441,6 +441,7 @@ describe('EngineRuntime', () => {
     const manager = {
       add: vi.fn(async () => summary),
       pause: vi.fn(async () => summary),
+      resume: vi.fn(async () => summary),
       summary: vi.fn(() => summary)
     }
     const archive = {
@@ -471,7 +472,9 @@ describe('EngineRuntime', () => {
       metadata: restored,
       selectedIndexes: [0, 2]
     })
-    expect(manager.pause).toHaveBeenCalledWith(INFO_HASH)
+    // Every add already begins paused, so a paused record needs no action.
+    expect(manager.pause).not.toHaveBeenCalled()
+    expect(manager.resume).not.toHaveBeenCalled()
     expect(result).toEqual({
       ok: true,
       result: {
@@ -479,6 +482,66 @@ describe('EngineRuntime', () => {
         value: { infoHash: INFO_HASH, torrent: summary }
       }
     })
+  })
+
+  it('resumes a restored record that was running', async () => {
+    const restored = {
+      files: [{ index: 0, length: 4, path: 'root/file-0.txt' }],
+      infoHash: INFO_HASH,
+      length: 4,
+      name: 'root',
+      private: false
+    } as unknown as ValidatedTorrentMetadata
+    const summary = {
+      downloadSpeed: 0,
+      downloaded: 0,
+      fileCount: 1,
+      infoHash: INFO_HASH,
+      length: 4,
+      name: 'root',
+      peerCount: 0,
+      private: false,
+      progress: 0,
+      selectedFileCount: 1,
+      state: 'downloading' as const,
+      timeRemainingMs: null,
+      uploadSpeed: 0,
+      uploaded: 0
+    }
+    const manager = {
+      add: vi.fn(async () => summary),
+      pause: vi.fn(async () => summary),
+      resume: vi.fn(async () => summary),
+      summary: vi.fn(() => summary)
+    }
+    const runtime = new EngineRuntime({
+      resumeSelection: async () => null,
+      torrentArchive: {
+        load: vi.fn(async () => new Uint8Array([1, 2, 3])),
+        remove: vi.fn(async () => undefined),
+        save: vi.fn(async () => undefined)
+      } as unknown as TorrentArchive,
+      torrentManager: manager as unknown as TorrentManager,
+      validateArchivedMetadata: async () => restored
+    })
+
+    const result = await runtime.execute(
+      {
+        command: 'restore-torrent',
+        payload: {
+          destinationRoot: '/authorized/downloads',
+          infoHash: INFO_HASH,
+          paused: false
+        }
+      },
+      signal()
+    )
+
+    expect(result.ok).toBe(true)
+    // Without this the restart silently stops every transfer the owner left
+    // running, because an add always begins paused.
+    expect(manager.resume).toHaveBeenCalledWith(INFO_HASH)
+    expect(manager.pause).not.toHaveBeenCalled()
   })
 
   it('reports a missing archive rather than adding an unknown torrent', async () => {

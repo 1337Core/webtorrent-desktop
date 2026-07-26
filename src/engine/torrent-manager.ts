@@ -91,6 +91,8 @@ export class TorrentManager {
   readonly #resume: TorrentResumeSupport | null
   readonly #sessionOptions: Omit<DiskTorrentSessionOptions, 'registry'>
   readonly #sessions = new Map<string, DiskTorrentSession>()
+  /** The add-time expectation each session's sidecar is written against. */
+  readonly #expectations = new Map<string, ResumeExpectation>()
 
   constructor(options: TorrentManagerOptions) {
     this.#registry = options.registry ?? new TorrentRegistry()
@@ -134,6 +136,7 @@ export class TorrentManager {
       { ...this.#sessionOptions, registry: this.#registry }
     )
     this.#sessions.set(session.infoHash, session)
+    this.#expectations.set(session.infoHash, this.#expectation(request))
     return this.#summary(session)
   }
 
@@ -216,6 +219,7 @@ export class TorrentManager {
   async pause(infoHash: string): Promise<TorrentSummary> {
     const session = this.#require(infoHash)
     await this.#guard(() => session.pause())
+    await this.#persistResume(session, true)
     return this.#summary(session)
   }
 
@@ -231,6 +235,7 @@ export class TorrentManager {
     const session = this.#require(infoHash)
     await this.#guard(() => session.remove())
     this.#sessions.delete(infoHash)
+    this.#expectations.delete(infoHash)
     await this.#resume?.remove(infoHash).catch(() => undefined)
   }
 
@@ -268,6 +273,16 @@ export class TorrentManager {
       throw new TorrentManagerError('INPUT_INVALID')
     }
     session.updateSelection(selectedIndexes)
+    // The sidecar carries the selection a restore reads back. Without this
+    // write the next start selects every file and downloads what the owner
+    // deliberately left out.
+    this.#expectations.set(infoHash, {
+      ...this.#requireExpectation(infoHash),
+      selectedPaths: session.metadata.files
+        .filter(file => new Set(selectedIndexes).has(file.index))
+        .map(file => file.path)
+    })
+    void this.#persistResume(session, false)
     return this.#summary(session)
   }
 
@@ -276,12 +291,49 @@ export class TorrentManager {
     const sessions = [...this.#sessions.values()]
     this.#sessions.clear()
     for (const session of sessions) {
+      // The sidecar is written before teardown, while the torrent still holds
+      // its verified pieces, and marked as a clean shutdown.
+      await this.#persistResume(session, true)
       try {
         await session.remove()
       } catch {
         // Shutdown continues through a failing teardown and reports later.
       }
     }
+    this.#expectations.clear()
+  }
+
+  /**
+   * Records this session's verified pieces and current selection.
+   *
+   * Resume state is only ever a hint: `evaluate` revalidates every field on
+   * the way back in, so a failed write costs a verification rather than
+   * correctness, and is never allowed to fail the operation that triggered it.
+   */
+  async #persistResume(
+    session: DiskTorrentSession,
+    cleanShutdown: boolean
+  ): Promise<void> {
+    const resume = this.#resume
+    const expectation = this.#expectations.get(session.infoHash)
+    if (!resume || !expectation) return
+    try {
+      await resume.save(
+        await resume.describe({
+          bitfield: session.bitfield(),
+          cleanShutdown,
+          expectation
+        })
+      )
+    } catch {
+      // A sidecar that cannot be written simply means the next start verifies.
+    }
+  }
+
+  #requireExpectation(infoHash: string): ResumeExpectation {
+    const expectation = this.#expectations.get(infoHash)
+    if (!expectation) throw new TorrentManagerError('NOT_FOUND')
+    return expectation
   }
 
   #expectation(request: TorrentAddRequest): ResumeExpectation {

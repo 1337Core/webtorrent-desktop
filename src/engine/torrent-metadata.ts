@@ -366,6 +366,24 @@ function rawWebSeeds(root: Dictionary): string[] {
   return value.map(decodeUrl)
 }
 
+/**
+ * Whether any tier holds a tracker the engine will actually announce to. The
+ * shipped HTTP and WSS activations both refuse plain HTTP, so such an endpoint
+ * is present in the metadata but never contacted.
+ */
+function hasAnnounceableTracker(
+  tiers: ReadonlyArray<ReadonlyArray<string>>
+): boolean {
+  return tiers.flat().some(tracker => {
+    try {
+      const { protocol } = new URL(tracker)
+      return protocol === 'https:' || protocol === 'wss:'
+    } catch {
+      return false
+    }
+  })
+}
+
 function validateTrackerTiers(
   tiers: readonly (readonly string[])[],
   policy: EgressPolicy
@@ -592,7 +610,11 @@ export async function validateTorrentMetadata(
   }
 
   const trackers = validateTrackerTiers(rawTrackers, policy)
-  if (isPrivate && trackers.tiers.length === 0) {
+  if (isPrivate && !hasAnnounceableTracker(trackers.tiers)) {
+    // A private torrent never uses the DHT, and no shipped activation
+    // announces over plain HTTP. One whose only trackers are HTTP would be
+    // accepted and committed but could never reach a peer, so it is refused
+    // here rather than added as a torrent that can never start.
     throw new TorrentInputError('PRIVATE_TRACKER_REQUIRED')
   }
   const webSeeds = validateWebSeeds(rawSeedUrls, policy)

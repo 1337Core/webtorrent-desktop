@@ -238,11 +238,15 @@ const peerBudget = new PeerBudget({
   stagingLiveTransports
 })
 
+const trackerActivations = new WeakMap<DiskTorrentSession, TrackerActivation>()
+
 const torrentManager: TorrentManager = new TorrentManager({
   resolveClient,
   resume: resumeStore,
   sessionOptions: {
     budget: peerBudget,
+    // The tracker activation currently serving each session, so a completion
+    // transition can reach the announce that has to report it.
     createActivation: session => {
       const tiers = session.metadata.announceTiers
 
@@ -293,6 +297,10 @@ const torrentManager: TorrentManager = new TorrentManager({
           signaling.acceptOffer(offer, trackerUrl, respond)
         },
         peerId: peerIdentity(handle.peerId),
+        // A private torrent's WSS endpoints form one serial chain, exactly as
+        // its HTTP endpoints do. Without this a private torrent announced to
+        // several WSS trackers at once while the HTTP side was contacting one.
+        private: session.metadata.private,
         progress: () => {
           const stats = session.stats()
           return {
@@ -301,9 +309,11 @@ const torrentManager: TorrentManager = new TorrentManager({
             uploaded: stats.uploaded
           }
         },
+        serialRetirement: session.metadata.private,
         tiers
       })
 
+      trackerActivations.set(session, activation)
       return {
         start: () => {
           activation.start()
@@ -316,9 +326,15 @@ const torrentManager: TorrentManager = new TorrentManager({
         stop: async () => {
           deactivateCommittedDht(session)
           signaling.close()
+          if (trackerActivations.get(session) === activation) {
+            trackerActivations.delete(session)
+          }
           await Promise.all([activation.stop(), wss.stop()])
         }
       }
+    },
+    onCompleted: session => {
+      trackerActivations.get(session)?.notifyCompleted()
     },
     peerFilter: address => {
       const [host] = address.split(':')

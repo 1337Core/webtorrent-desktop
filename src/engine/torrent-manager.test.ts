@@ -355,6 +355,55 @@ describe('TorrentManager', () => {
     expect(addOptions[1]?.bitfield).toBeUndefined()
   })
 
+  it('records the selection and pieces a restore reads back', async () => {
+    const saved: Array<{ cleanShutdown: boolean; selectedPaths: string[] }> = []
+    manager = new TorrentManager({
+      resolveClient: () => ({
+        add: (_torrentId: Uint8Array, options: TorrentOptions) => {
+          addOptions.push(options)
+          const torrent = new FakeTorrent(pendingMetadata)
+          torrents.push(torrent)
+          return torrent
+        }
+      }),
+      resume: {
+        describe: input =>
+          Promise.resolve({
+            cleanShutdown: input.cleanShutdown,
+            selectedPaths: [...input.expectation.selectedPaths]
+          } as never),
+        evaluate: () =>
+          Promise.resolve({
+            reason: 'SCHEMA_MISMATCH' as const,
+            usable: false as const
+          }),
+        load: () => Promise.resolve(null),
+        remove: () => Promise.resolve(),
+        save: (sidecar: unknown) => {
+          saved.push(
+            sidecar as { cleanShutdown: boolean; selectedPaths: string[] }
+          )
+          return Promise.resolve()
+        }
+      }
+    })
+
+    await addTorrent(multi)
+    const wanted = multi.files[0]
+    if (!wanted) throw new Error('The fixture has no files')
+    manager.updateSelection(multi.infoHash, [wanted.index])
+
+    // Nothing wrote a sidecar before this change, so a restart selected every
+    // file again and downloaded what the owner had deselected.
+    // updateSelection persists without blocking its caller.
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(saved.length).toBeGreaterThan(0)
+    expect(saved.at(-1)?.selectedPaths).toEqual([wanted.path])
+
+    await manager.closeAll()
+    expect(saved.at(-1)?.cleanShutdown).toBe(true)
+  })
+
   it('closes every session on shutdown', async () => {
     await addTorrent(single)
     await addTorrent(multi)

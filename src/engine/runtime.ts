@@ -636,6 +636,10 @@ export class EngineRuntime {
           metadata: entry.metadata,
           selectedIndexes: entry.selectedIndexes
         })
+        // The archive is what a later restore reads. Without it main keeps a
+        // library record the next launch cannot load, and the record is
+        // deleted as unrestorable.
+        await this.#archive(entry.metadata)
         this.#emit({ event: 'torrent-updated', payload: torrent })
         return {
           ok: true,
@@ -781,8 +785,10 @@ export class EngineRuntime {
           ? selectedIndexes
           : metadata.files.map(file => file.index)
     })
-    if (operation.payload.paused) {
-      await manager.pause(metadata.infoHash)
+    // Every add begins paused, so a record that was running has to be started
+    // again explicitly; otherwise a restart silently stops every transfer.
+    if (!operation.payload.paused) {
+      await manager.resume(metadata.infoHash)
     }
 
     const restored = manager.summary(metadata.infoHash)
