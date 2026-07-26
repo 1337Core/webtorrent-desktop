@@ -2448,11 +2448,11 @@ torrents on the owner's Mac, which no fixture can stand in for.
 ## 21. Branch and giant pull-request strategy
 
 The work is intentionally isolated from `master` on the
-`feat/webtorrent-updated` branch. Draft pull request
+`feat/webtorrent-updated` branch. Pull request
 [`1337Core/webtorrent-desktop#1`](https://github.com/1337Core/webtorrent-desktop/pull/1)
 is the single integration vehicle. The owner approved ongoing conventional
-commits and pushes to that branch; draft status remains until the acceptance
-gates pass.
+commits and pushes to that branch, and on 2026-07-25 marked the request ready
+for review once every deterministic gate passed.
 
 The user-requested integration shape is one large pull request into `master`.
 Manage its reviewability through:
@@ -2462,11 +2462,12 @@ Manage its reviewability through:
 - an always-current PR checklist linked to these acceptance gates;
 - milestone summaries and architecture-decision updates;
 - no force-push that destroys reviewed history without agreement;
-- draft status until all required work is present; and
+- draft status until every deterministic gate passes; and
 - no merge until final explicit owner approval.
 
-Do not mark the PR ready, merge it, publish an application release, or modify
-`master` without separate explicit owner approval.
+Do not merge the request, publish an application release, or modify `master`
+without separate explicit owner approval. The owner released draft status on
+2026-07-25; that decision does not extend to any of the three.
 
 ## 22. Risk register and predetermined responses
 
@@ -2511,8 +2512,11 @@ endpoints. If not, the current assets and empty endpoint defaults remain.
 
 ## 24. Session handoff — review readiness, 2026-07-25
 
-The branch remains a draft. Do not mark it ready, merge it, or publish an
-application without explicit owner direction.
+**Owner instruction, 2026-07-25: the pull request is marked ready for review.**
+It left draft status once every deterministic gate — including the section 18.5
+soak suite — passed at the branch head and on CI. Merging, publishing an
+application release, and modifying `master` remain separately controlled and
+still require explicit owner approval.
 
 ### 24.1 Current snapshot
 
@@ -2592,7 +2596,8 @@ destroy callback.
    `out/WebTorrent Updated-darwin-arm64/WebTorrent Updated.app`. A
    public-domain v1 magnet can be cancelled after metadata review rather than
    downloading a large payload.
-4. Keep the pull request in draft until the owner explicitly accepts it.
+4. The request is ready for review. Merging it, publishing a release, and
+   touching `master` each still need separate explicit owner approval.
 
 ## 25. Maintenance policy after 1.0
 
