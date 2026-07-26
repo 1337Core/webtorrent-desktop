@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { calculateEta, prettyBytes } from '../lib/format'
 import {
+  collectFilePages,
   runCommand,
   type EngineFailure,
   type EngineValue
@@ -103,17 +104,21 @@ export function TorrentList({
   }, [active, refresh, refreshMs])
 
   const loadFiles = useCallback(async (infoHash: string) => {
-    const outcome = await runCommand({
-      command: 'get-torrent-files',
-      payload: { cursor: 0, infoHash, limit: PAGE_LIMIT }
-    })
+    // Every page of the manifest: a playable file past the first page would
+    // otherwise be invisible, and the torrent would look like it had none.
+    const outcome = await collectFilePages(cursor =>
+      runCommand({
+        command: 'get-torrent-files',
+        payload: { cursor, infoHash, limit: PAGE_LIMIT }
+      })
+    )
     if (!mounted.current) return null
     if (!outcome.ok) {
       setFailure(outcome.error)
       return null
     }
-    setFiles(outcome.value.items)
-    return outcome.value.items
+    setFiles(outcome.items)
+    return outcome.items
   }, [])
 
   const select = useCallback(

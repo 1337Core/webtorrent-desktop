@@ -66,3 +66,46 @@ export async function runCommand<TOperation extends EngineCommand>(
     value: result.result.value as EngineValue<TOperation['command']>
   }
 }
+
+/** One manifest page, whichever command produced it. */
+type FilePage<TItem> = Readonly<{
+  items: ReadonlyArray<TItem>
+  nextCursor: number | null
+}>
+
+/**
+ * A whole file manifest, not just its first page.
+ *
+ * The engine pages its manifests, so a torrent with more files than one page
+ * holds would otherwise leave the rest unreviewable and unselectable. Paging
+ * stops at the engine's own end marker, and a cursor that fails to advance
+ * ends the walk rather than repeating a page forever.
+ */
+export async function collectFilePages<TItem>(
+  fetchPage: (
+    cursor: number
+  ) => Promise<
+    | Readonly<{ ok: true; value: FilePage<TItem> }>
+    | Readonly<{ error: EngineFailure; ok: false }>
+  >
+): Promise<
+  | Readonly<{ items: ReadonlyArray<TItem>; ok: true }>
+  | Readonly<{ error: EngineFailure; ok: false }>
+> {
+  const items: TItem[] = []
+  let cursor: number | null = 0
+
+  while (cursor !== null) {
+    const outcome = await fetchPage(cursor)
+    if (!outcome.ok) return { error: outcome.error, ok: false }
+
+    items.push(...outcome.value.items)
+    const next = outcome.value.nextCursor
+    if (next === null || next <= cursor || outcome.value.items.length === 0) {
+      break
+    }
+    cursor = next
+  }
+
+  return { items, ok: true }
+}

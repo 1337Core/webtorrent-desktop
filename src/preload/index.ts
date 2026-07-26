@@ -43,6 +43,23 @@ import { checkPayloadBudget } from '../shared/payload-budget'
 const INVOKE_TIMEOUT_MS = 5_000
 /** Native open/save panels may remain open while the owner makes a choice. */
 const INTERACTIVE_INVOKE_TIMEOUT_MS = 15 * 60_000
+/**
+ * Main allows an engine operation two minutes. Hashing a creation source or
+ * verifying an existing payload at commit routinely outlasts the ordinary
+ * bound, and giving up early would report a failure while the operation is
+ * still running — and may still succeed — behind it.
+ */
+const ENGINE_OPERATION_TIMEOUT_MS = 2 * 60_000
+const LONG_RUNNING_COMMANDS: ReadonlySet<string> = new Set([
+  'commit-preparation',
+  'create-torrent'
+])
+
+function torrentCommandTimeout(command: string): number {
+  return LONG_RUNNING_COMMANDS.has(command)
+    ? ENGINE_OPERATION_TIMEOUT_MS
+    : INVOKE_TIMEOUT_MS
+}
 /** A drop carries a bounded number of torrents, never a whole folder tree. */
 const MAX_DROPPED_FILES = 32
 const RESULT_BUDGET = {
@@ -239,12 +256,16 @@ async function runTorrentCommand(
 ): Promise<TorrentCommandResult> {
   const requestId = crypto.randomUUID()
   try {
-    const value = await invokeBounded(DESKTOP_TORRENT_COMMAND_CHANNEL, {
-      protocolVersion: PROTOCOL_VERSION,
-      requestId,
-      command: 'torrentCommand',
-      payload: { operation }
-    })
+    const value = await invokeBounded(
+      DESKTOP_TORRENT_COMMAND_CHANNEL,
+      {
+        protocolVersion: PROTOCOL_VERSION,
+        requestId,
+        command: 'torrentCommand',
+        payload: { operation }
+      },
+      torrentCommandTimeout(operation.command)
+    )
     if (!checkPayloadBudget(value, RESULT_BUDGET).ok) {
       return protocolError(
         requestId,

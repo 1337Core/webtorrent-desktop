@@ -171,8 +171,46 @@ describe('secure Electron configuration', () => {
     expect(downloadEvent.preventDefault).toHaveBeenCalledOnce()
 
     const requestCallback = vi.fn()
-    handlers.beforeRequest?.({}, requestCallback)
+    handlers.beforeRequest?.(
+      { url: 'https://example.invalid/' },
+      requestCallback
+    )
     expect(requestCallback).toHaveBeenCalledWith({ cancel: true })
+  })
+
+  it('lets the renderer reach the engine media origin and nothing else', () => {
+    const { handlers } = createSessionHarness()
+    createUiSession(diagnostics(), { getMediaPort: () => 51_234 })
+
+    const allowed = vi.fn()
+    handlers.beforeRequest?.(
+      { url: 'http://127.0.0.1:51234/v1/media/token' },
+      allowed
+    )
+    // The CSP already names this origin; cancelling it would make packaged
+    // playback impossible however valid the lease was.
+    expect(allowed).toHaveBeenCalledWith({})
+
+    for (const url of [
+      'http://127.0.0.1:51235/v1/media/token',
+      'http://127.0.0.2:51234/v1/media/token',
+      'https://127.0.0.1:51234/v1/media/token',
+      'http://user:secret@127.0.0.1:51234/v1/media/token',
+      'https://example.invalid/'
+    ]) {
+      const denied = vi.fn()
+      handlers.beforeRequest?.({ url }, denied)
+      expect(denied).toHaveBeenCalledWith({ cancel: true })
+    }
+  })
+
+  it('denies every request while the engine reports no media port', () => {
+    const { handlers } = createSessionHarness()
+    createUiSession(diagnostics(), { getMediaPort: () => null })
+
+    const denied = vi.fn()
+    handlers.beforeRequest?.({ url: 'http://127.0.0.1:51234/' }, denied)
+    expect(denied).toHaveBeenCalledWith({ cancel: true })
   })
 
   it('reasserts response security headers at the session boundary', () => {
@@ -196,7 +234,9 @@ describe('secure Electron configuration', () => {
         ],
         'Connection-Allowlist': [RENDERER_CONNECTION_ALLOWLIST],
         'Content-Type': ['text/html'],
-        'Permissions-Policy': [expect.stringContaining('camera=()')],
+        // Fullscreen is permitted for the application origin itself so the
+        // player's own control works; every other feature stays disabled.
+        'Permissions-Policy': [expect.stringContaining('fullscreen=(self)')],
         'X-DNS-Prefetch-Control': ['off'],
         'X-Content-Type-Options': ['nosniff']
       })

@@ -227,6 +227,41 @@ module.exports = {
       }
     },
     executableName: APP_NAME,
+    /**
+     * LaunchServices routes a `.torrent` file or a `magnet:` link by what the
+     * bundle declares, not by which runtime callbacks the app installs. Both
+     * are declared as viewers/alternates, so the app becomes a candidate the
+     * owner can choose without ever claiming the handler by itself.
+     */
+    extendInfo: {
+      CFBundleDocumentTypes: [
+        {
+          CFBundleTypeIconFile: 'WebTorrent.icns',
+          CFBundleTypeName: 'BitTorrent Document',
+          CFBundleTypeRole: 'Viewer',
+          LSHandlerRank: 'Alternate',
+          LSItemContentTypes: ['org.bittorrent.torrent']
+        }
+      ],
+      CFBundleURLTypes: [
+        {
+          CFBundleTypeRole: 'Viewer',
+          CFBundleURLName: 'BitTorrent Magnet URL',
+          CFBundleURLSchemes: ['magnet']
+        }
+      ],
+      UTImportedTypeDeclarations: [
+        {
+          UTTypeConformsTo: ['public.data'],
+          UTTypeDescription: 'BitTorrent Document',
+          UTTypeIdentifier: 'org.bittorrent.torrent',
+          UTTypeTagSpecification: {
+            'public.filename-extension': ['torrent'],
+            'public.mime-type': ['application/x-bittorrent']
+          }
+        }
+      ]
+    },
     icon: path.join(__dirname, 'static', 'WebTorrent'),
     ignore: ignorePackagePath,
     name: APP_NAME,

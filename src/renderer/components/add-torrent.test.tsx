@@ -23,6 +23,8 @@ const ACQUISITION_ID = '00000000-0000-4000-8000-000000000020'
 let commands: EngineCommand[] = []
 let failNext: string | null = null
 let requireDhtConsent = false
+/** Serves the manifest one file per page, as a large torrent would. */
+let pagedManifest = false
 
 function envelope(): { protocolVersion: 1; requestId: string } {
   return {
@@ -134,6 +136,34 @@ function response(operation: EngineCommand): TorrentCommandResult {
         }
       } as TorrentCommandResult
     case 'get-preparation-files':
+      if (pagedManifest) {
+        const cursor = operation.payload.cursor
+        return {
+          ...envelope(),
+          ok: true,
+          value: {
+            ok: true,
+            result: {
+              command: 'get-preparation-files',
+              value: {
+                items: [
+                  {
+                    downloaded: 0,
+                    index: cursor,
+                    length: 20,
+                    path: `payload/page-${cursor}.bin`,
+                    progress: 0,
+                    selected: cursor === 1
+                  }
+                ],
+                nextCursor: cursor < 2 ? cursor + 1 : null,
+                preparationId: PREPARATION_ID,
+                total: 3
+              }
+            }
+          }
+        } as TorrentCommandResult
+      }
       return {
         ...envelope(),
         ok: true,
@@ -228,6 +258,7 @@ beforeEach(() => {
   commands = []
   failNext = null
   requireDhtConsent = false
+  pagedManifest = false
   Object.defineProperty(window, 'desktop', {
     configurable: true,
     value: {
@@ -512,7 +543,6 @@ describe('AddTorrentModal', () => {
   it('asks before retrying a trackerless info hash through the DHT', async () => {
     vi.useFakeTimers()
     requireDhtConsent = true
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
     render(
       <AddTorrentModal
         downloadRoot={DOWNLOAD_ROOT}
@@ -532,8 +562,14 @@ describe('AddTorrentModal', () => {
       await vi.runAllTimersAsync()
     })
 
+    // The window disables native dialogs, so the question is asked in the
+    // modal's own markup and answered by the owner there.
+    fireEvent.click(screen.getByRole('button', { name: 'LOOK UP' }))
+    await act(async () => {
+      await vi.runAllTimersAsync()
+    })
+
     expect(screen.getByText('Prepared payload')).toBeTruthy()
-    expect(confirm).toHaveBeenCalledOnce()
     const starts = commands.filter(
       command => command.command === 'start-acquisition'
     )
@@ -576,4 +612,33 @@ describe('AddTorrentModal', () => {
 
     expect(commands).toEqual([])
   })
+})
+
+it('reviews every page of a manifest larger than one page', async () => {
+  pagedManifest = true
+  render(
+    <AddTorrentModal
+      downloadRoot={DOWNLOAD_ROOT}
+      onCancel={vi.fn()}
+      onAdded={vi.fn()}
+      ready
+    />
+  )
+
+  fireEvent.change(
+    screen.getByLabelText('Enter torrent address or magnet link'),
+    { target: { value: 'https://example.invalid/one.torrent' } }
+  )
+  fireEvent.click(screen.getByRole('button', { name: 'OK' }))
+
+  // A file on the third page is reviewable and its selection is reflected,
+  // which one page alone could never show.
+  expect(await screen.findByText(/page-2\.bin/u)).toBeTruthy()
+  expect(screen.getByText(/page-0\.bin/u)).toBeTruthy()
+  expect(screen.getByText(/page-1\.bin/u)).toBeTruthy()
+
+  const cursors = commands
+    .filter(command => command.command === 'get-preparation-files')
+    .map(command => command.payload.cursor)
+  expect(cursors).toEqual([0, 1, 2])
 })

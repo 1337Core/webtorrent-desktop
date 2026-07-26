@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { constants as fsConstants } from 'node:fs'
-import { access, lstat } from 'node:fs/promises'
+import { access, lstat, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import type { Diagnostics } from './diagnostics'
 
@@ -81,9 +81,17 @@ export class ExternalPlayer {
       throw new ExternalPlayerError('PLAYER_NOT_AUTHORIZED')
     }
 
+    // The macOS open panel returns an application bundle, which is a
+    // directory. Its declared executable is resolved here so an ordinary Mac
+    // player can be chosen at all; every check below then applies to that
+    // executable rather than to the bundle.
+    const resolvedPath = playerPath.endsWith('.app')
+      ? await this.#bundleExecutable(playerPath)
+      : playerPath
+
     let entry
     try {
-      entry = await lstat(playerPath)
+      entry = await lstat(resolvedPath)
     } catch {
       throw new ExternalPlayerError('PLAYER_NOT_AUTHORIZED')
     }
@@ -91,6 +99,57 @@ export class ExternalPlayer {
     if (!entry.isFile()) {
       throw new ExternalPlayerError('PLAYER_NOT_AUTHORIZED')
     }
+    return this.#executable(resolvedPath)
+  }
+
+  /**
+   * The executable inside a macOS application bundle.
+   *
+   * `CFBundleExecutable` is read from the bundle's own `Info.plist` and must
+   * be a plain file name: a separator, traversal segment, or null byte would
+   * leave `Contents/MacOS`, so it is refused rather than resolved. When the
+   * key is absent the bundle's own name is the documented default.
+   */
+  async #bundleExecutable(bundlePath: string): Promise<string> {
+    let bundle
+    try {
+      bundle = await lstat(bundlePath)
+    } catch {
+      throw new ExternalPlayerError('PLAYER_NOT_AUTHORIZED')
+    }
+    if (!bundle.isDirectory()) {
+      throw new ExternalPlayerError('PLAYER_NOT_AUTHORIZED')
+    }
+
+    let declaredName: string | null
+    try {
+      const plist = await readFile(
+        path.join(bundlePath, 'Contents', 'Info.plist'),
+        'utf8'
+      )
+      declaredName =
+        /<key>CFBundleExecutable<\/key>\s*<string>([^<]*)<\/string>/u.exec(
+          plist
+        )?.[1] ?? null
+    } catch {
+      declaredName = null
+    }
+
+    const executableName = declaredName ?? path.basename(bundlePath, '.app')
+    if (
+      executableName === '' ||
+      executableName.includes('/') ||
+      executableName.includes('\0') ||
+      executableName === '.' ||
+      executableName === '..'
+    ) {
+      throw new ExternalPlayerError('PLAYER_NOT_AUTHORIZED')
+    }
+
+    return path.join(bundlePath, 'Contents', 'MacOS', executableName)
+  }
+
+  async #executable(playerPath: string): Promise<string> {
     try {
       await access(playerPath, fsConstants.X_OK)
     } catch {

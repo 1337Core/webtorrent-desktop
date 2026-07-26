@@ -45,7 +45,7 @@ const APPLICATION_SECURITY_HEADERS = {
   'Content-Security-Policy': APPLICATION_CSP,
   'Cross-Origin-Opener-Policy': 'same-origin',
   'Permissions-Policy':
-    'camera=(), microphone=(), geolocation=(), display-capture=(), fullscreen=(), payment=(), usb=()',
+    'camera=(), microphone=(), geolocation=(), display-capture=(), fullscreen=(self), payment=(), usb=()',
   'Referrer-Policy': 'no-referrer',
   'X-Content-Type-Options': 'nosniff',
   'X-DNS-Prefetch-Control': 'off'

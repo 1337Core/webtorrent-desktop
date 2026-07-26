@@ -116,6 +116,36 @@ export function configureRendererWebRtcBlocking(): void {
   }
 }
 
+/**
+ * Exactly the engine's current loopback media origin, and nothing else. The
+ * port has to match the one the engine reported, so a stale or guessed port is
+ * refused along with every other host, scheme, and credential form.
+ */
+function isEngineMediaRequest(url: string, mediaPort: number | null): boolean {
+  if (
+    mediaPort === null ||
+    !Number.isSafeInteger(mediaPort) ||
+    mediaPort < 1 ||
+    mediaPort > 65_535
+  ) {
+    return false
+  }
+
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return false
+  }
+  return (
+    parsed.protocol === 'http:' &&
+    parsed.hostname === '127.0.0.1' &&
+    parsed.port === String(mediaPort) &&
+    parsed.username === '' &&
+    parsed.password === ''
+  )
+}
+
 export type UiSessionOptions = Readonly<{
   /** The engine's loopback media port, or null before it reports one. */
   getMediaPort?: () => number | null
@@ -149,7 +179,14 @@ export function createUiSession(
     {
       urls: ['file://*/*', 'http://*/*', 'https://*/*', 'ws://*/*', 'wss://*/*']
     },
-    (_details, callback) => {
+    (details, callback) => {
+      // The player's media and artwork are served by the engine's own loopback
+      // proxy, which the CSP already names. Exactly that origin is allowed
+      // through; everything else the renderer attempts is still denied.
+      if (isEngineMediaRequest(details.url, getMediaPort())) {
+        callback({})
+        return
+      }
       diagnostics.warn('security.renderer-network-denied')
       callback({ cancel: true })
     }
@@ -164,7 +201,7 @@ export function createUiSession(
           'Content-Security-Policy': [buildApplicationCsp(getMediaPort())],
           'Cross-Origin-Opener-Policy': ['same-origin'],
           'Permissions-Policy': [
-            'camera=(), microphone=(), geolocation=(), display-capture=(), fullscreen=(), payment=(), usb=()'
+            'camera=(), microphone=(), geolocation=(), display-capture=(), fullscreen=(self), payment=(), usb=()'
           ],
           'Referrer-Policy': ['no-referrer'],
           'X-DNS-Prefetch-Control': ['off'],

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { prettyBytes } from '../lib/format'
 import {
+  collectFilePages,
   runCommand,
   type EngineFailure,
   type EngineValue
@@ -73,14 +74,41 @@ export function AddTorrentModal({
   const [files, setFiles] = useState<ReadonlyArray<PreparationFile>>([])
   const [selected, setSelected] = useState<ReadonlySet<number>>(new Set())
   const [acquiring, setAcquiring] = useState(false)
+  /**
+   * The pending DHT exposure question. `disableDialogs` is on for this window,
+   * so `window.confirm` can never present it; the modal asks in its own markup
+   * and this resolver carries the answer back to the waiting acquisition.
+   */
+  const [dhtConsent, setDhtConsent] = useState<{
+    resolve: (granted: boolean) => void
+  } | null>(null)
   const cancelled = useRef(false)
+  const dhtConsentRef = useRef<((granted: boolean) => void) | null>(null)
 
   useEffect(() => {
     cancelled.current = false
     return () => {
       cancelled.current = true
+      // An unmount answers the outstanding question rather than leaving the
+      // acquisition awaiting a promise nothing will ever settle.
+      dhtConsentRef.current?.(false)
+      dhtConsentRef.current = null
     }
   }, [])
+
+  const askDhtConsent = useCallback(
+    () =>
+      new Promise<boolean>(resolve => {
+        const settle = (granted: boolean): void => {
+          dhtConsentRef.current = null
+          setDhtConsent(null)
+          resolve(granted)
+        }
+        dhtConsentRef.current = settle
+        setDhtConsent({ resolve: settle })
+      }),
+    []
+  )
 
   /**
    * A magnet carries no manifest, so its metadata is fetched before there is
@@ -92,12 +120,17 @@ export function AddTorrentModal({
       setAcquiring(true)
       setFailure(null)
       let source = initialSource
-      while (!cancelled.current) {
+      // Polling continues even after the modal closes. A settled acquisition
+      // is reported once and forgotten by the engine, so consuming the result
+      // releases its slot immediately instead of leaving it to expire, and any
+      // preparation it produced is discarded rather than stranded.
+      for (;;) {
         const started = await runCommand({
           command: 'start-acquisition',
           payload: { source }
         })
         if (!started.ok) {
+          if (cancelled.current) return
           setAcquiring(false)
           setFailure(started.error)
           return
@@ -105,31 +138,40 @@ export function AddTorrentModal({
 
         const deadline = Date.now() + ACQUISITION_DEADLINE_MS
         let retryWithDht = false
-        while (!cancelled.current && Date.now() < deadline) {
+        while (Date.now() < deadline) {
           await new Promise(resolve => setTimeout(resolve, ACQUISITION_POLL_MS))
-          if (cancelled.current) return
           const polled = await runCommand({
             command: 'get-acquisition',
             payload: { acquisitionId: started.value.acquisitionId }
           })
           if (!polled.ok) {
+            if (cancelled.current) return
             setAcquiring(false)
             setFailure(polled.error)
             return
           }
           if (polled.value.state === 'ready') {
+            if (cancelled.current) {
+              await runCommand({
+                command: 'discard-preparation',
+                payload: {
+                  preparationId: polled.value.preparation.preparationId
+                }
+              })
+              return
+            }
             setAcquiring(false)
             setPreparation(polled.value.preparation)
             return
           }
           if (polled.value.state !== 'failed') continue
+          if (cancelled.current) return
           if (
             polled.value.code === 'DHT_CONSENT_REQUIRED' &&
             !source.allowDhtExposure &&
-            window.confirm(
-              'This torrent has no usable tracker. Look up its info hash on the public DHT?'
-            )
+            (await askDhtConsent())
           ) {
+            if (cancelled.current) return
             source = { ...source, allowDhtExposure: true }
             retryWithDht = true
             break
@@ -157,7 +199,7 @@ export function AddTorrentModal({
         return
       }
     },
-    []
+    [askDhtConsent]
   )
 
   const prepare = useCallback(async () => {
@@ -240,21 +282,23 @@ export function AddTorrentModal({
 
     let active = true
     const timer = setTimeout(() => {
-      void runCommand({
-        command: 'get-preparation-files',
-        payload: {
-          cursor: 0,
-          limit: FILE_PAGE_LIMIT,
-          preparationId: preparation.preparationId
-        }
-      }).then(outcome => {
+      // The whole manifest, not one page: a file past the first page would
+      // otherwise be impossible to review or select before committing.
+      void collectFilePages(cursor =>
+        runCommand({
+          command: 'get-preparation-files',
+          payload: {
+            cursor,
+            limit: FILE_PAGE_LIMIT,
+            preparationId: preparation.preparationId
+          }
+        })
+      ).then(outcome => {
         if (!active || !outcome.ok) return
-        setFiles(outcome.value.items)
+        setFiles(outcome.items)
         setSelected(
           new Set(
-            outcome.value.items
-              .filter(file => file.selected)
-              .map(file => file.index)
+            outcome.items.filter(file => file.selected).map(file => file.index)
           )
         )
       })
@@ -375,6 +419,34 @@ export function AddTorrentModal({
             {downloadRoot === null
               ? 'No download folder is available yet.'
               : `Saving to ${downloadRoot}`}
+          </div>
+        </div>
+      ) : dhtConsent ? (
+        <div className="dht-consent" role="group">
+          <p>
+            <label>
+              This torrent has no usable tracker. Look up its info hash on the
+              public DHT?
+            </label>
+          </p>
+          <div className="torrent-info">
+            This exposes the info hash to public DHT nodes.
+          </div>
+          <div className="float-right">
+            <button
+              className="control cancel"
+              onClick={() => dhtConsent.resolve(false)}
+              type="button"
+            >
+              NO
+            </button>
+            <button
+              className="control"
+              onClick={() => dhtConsent.resolve(true)}
+              type="button"
+            >
+              LOOK UP
+            </button>
           </div>
         </div>
       ) : acquiring ? (

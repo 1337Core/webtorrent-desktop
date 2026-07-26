@@ -65,6 +65,25 @@ function volumeIconName(volume: number): string {
 }
 
 /**
+ * Starts an element playing without assuming the request can be honored.
+ *
+ * A runtime may refuse with a rejected promise, and one without media support
+ * throws outright, so both are treated as still paused rather than as an error
+ * the owner has to see.
+ */
+function startPlayback(
+  media: HTMLVideoElement,
+  onRefused: () => void = () => undefined
+): void {
+  try {
+    const started: unknown = media.play()
+    if (started instanceof Promise) started.catch(onRefused)
+  } catch {
+    onRefused()
+  }
+}
+
+/**
  * The original player: the video letterboxed over a black page, with the
  * control bar the original drew itself — playback bar, previous, play/pause,
  * next, volume, elapsed time, and full screen.
@@ -488,10 +507,23 @@ export function MediaPlayer({
     }
   }, [subtitleIndex, subtitles])
 
+  /**
+   * Choosing a file is the request to play it. The element is mounted only
+   * once its lease URL exists, so playback starts here rather than through an
+   * `autoPlay` attribute that would race the assignment. A refused promise
+   * leaves the element paused and the controls follow through `onPause`.
+   */
+  useEffect(() => {
+    if (url === null) return
+    const media = mediaRef.current
+    if (!media) return
+    startPlayback(media, () => setPaused(true))
+  }, [url])
+
   const playPause = useCallback(() => {
     const media = mediaRef.current
     if (!media) return
-    if (media.paused) void media.play().catch(() => undefined)
+    if (media.paused) startPlayback(media)
     else media.pause()
   }, [])
 

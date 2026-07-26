@@ -214,6 +214,34 @@ async function isUntrustedNavigationDenied(
   })
 }
 
+function routeActivation(kind: 'file' | 'url', value: string): void {
+  const handlers = torrentHandlers
+  if (!handlers) {
+    if (pendingActivations.length < MAX_PENDING_ACTIVATIONS) {
+      pendingActivations.push({ kind, value })
+    }
+    return
+  }
+  if (kind === 'url') handlers.handleUrl(value)
+  else void handlers.handleFile(value)
+}
+
+function drainPendingActivations(): void {
+  const queued = pendingActivations.splice(0, pendingActivations.length)
+  for (const activation of queued) {
+    routeActivation(activation.kind, activation.value)
+  }
+}
+
+app.on('open-url', (event, url) => {
+  event.preventDefault()
+  routeActivation('url', url)
+})
+app.on('open-file', (event, filePath) => {
+  event.preventDefault()
+  routeActivation('file', filePath)
+})
+
 app.setName(APP_NAME)
 if (smokeDataRoot) app.setPath('appData', smokeDataRoot)
 /**
@@ -277,6 +305,24 @@ let smokeInterventionTimer: NodeJS.Timeout | null = null
 let smokeForcedCrashes = 0
 let smokeFinalizationStarted = false
 let restartSoakStarted = false
+/**
+ * Cold-start activations.
+ *
+ * macOS can emit `open-file` and `open-url` before the app is ready, so the
+ * listeners are installed at load rather than with the window, and anything
+ * that arrives before the handlers exist waits here. A bounded queue keeps a
+ * flood of activations from growing without limit.
+ */
+const MAX_PENDING_ACTIVATIONS = 32
+const pendingActivations: Array<
+  Readonly<{ kind: 'file' | 'url'; value: string }>
+> = []
+let torrentHandlers: TorrentHandlers | null = null
+type OpenIntent = Parameters<
+  NonNullable<ConstructorParameters<typeof TorrentHandlers>[0]['onIntent']>
+>[0]
+const pendingIntents: OpenIntent[] = []
+let deliverPendingIntents: () => void = () => undefined
 let lastReadyEngineStatus: Extract<EngineStatus, { state: 'ready' }> | null =
   null
 let rendererBootstrapped = false
@@ -841,6 +887,7 @@ function scheduleSmokeCompletion(): void {
 function markRendererBootstrapped(trustProof: PreloadTrustProof): void {
   preloadTrustProof = trustProof
   rendererBootstrapped = true
+  deliverPendingIntents()
   scheduleSmokeCompletion()
 }
 
@@ -914,9 +961,18 @@ function createMainWindow(runtime: RuntimeInfo): BrowserWindow {
     }
   })
 
-  const torrentHandlers = new TorrentHandlers({
+  torrentHandlers = new TorrentHandlers({
     diagnostics,
     onIntent: intent => {
+      // The renderer installs its intent listener during bootstrap. An intent
+      // that arrives first is held rather than sent into a frame that cannot
+      // yet receive it.
+      if (!rendererBootstrapped) {
+        if (pendingIntents.length < MAX_PENDING_ACTIVATIONS) {
+          pendingIntents.push(intent)
+        }
+        return
+      }
       window.webContents.mainFrame.send(DESKTOP_OPEN_INTENT_CHANNEL, {
         protocolVersion: PROTOCOL_VERSION,
         intent
@@ -925,18 +981,25 @@ function createMainWindow(runtime: RuntimeInfo): BrowserWindow {
       window.focus()
     }
   })
+  deliverPendingIntents = (): void => {
+    const queued = pendingIntents.splice(0, pendingIntents.length)
+    for (const intent of queued) {
+      window.webContents.mainFrame.send(DESKTOP_OPEN_INTENT_CHANNEL, {
+        protocolVersion: PROTOCOL_VERSION,
+        intent
+      })
+    }
+    if (queued.length === 0) return
+    if (window.isMinimized()) window.restore()
+    window.focus()
+  }
 
-  app.on('open-url', (event, url) => {
-    event.preventDefault()
-    torrentHandlers.handleUrl(url)
-  })
-  app.on('open-file', (event, filePath) => {
-    event.preventDefault()
-    void torrentHandlers.handleFile(filePath)
-  })
   app.on('second-instance', (_event, argv) => {
-    void torrentHandlers.handleArguments(argv)
+    void torrentHandlers?.handleArguments(argv)
   })
+  // Anything macOS delivered before the handlers existed is routed now, along
+  // with the arguments this launch itself carried.
+  drainPendingActivations()
   void torrentHandlers.handleArguments(process.argv)
 
   const sendMenuAction = (
@@ -964,7 +1027,7 @@ function createMainWindow(runtime: RuntimeInfo): BrowserWindow {
   const folderWatcher = new FolderWatcher({
     diagnostics,
     onTorrent: torrentPath => {
-      void torrentHandlers.handleFile(torrentPath)
+      routeActivation('file', torrentPath)
     }
   })
   const applyWatchPreference = (folder: string | null): void => {
@@ -1133,6 +1196,8 @@ async function initializeApplication(): Promise<void> {
   const notifier = new DesktopNotifier({ diagnostics })
   const runningTorrents = new Map<string, boolean>()
   const notifiedComplete = new Set<string>()
+  /** Torrents this session has actually seen short of complete. */
+  const incompleteTorrents = new Set<string>()
 
   engineSupervisor = new EngineSupervisor({
     appVersion: runtime.appVersion,
@@ -1144,13 +1209,24 @@ async function initializeApplication(): Promise<void> {
       if (event.event === 'torrent-removed') {
         runningTorrents.delete(event.payload.infoHash)
         notifiedComplete.delete(event.payload.infoHash)
+        incompleteTorrents.delete(event.payload.infoHash)
       } else if (event.event === 'torrent-updated') {
         const torrent = event.payload
         runningTorrents.set(
           torrent.infoHash,
           torrent.state === 'checking' || torrent.state === 'downloading'
         )
-        if (torrent.progress >= 1 && !notifiedComplete.has(torrent.infoHash)) {
+        const wasIncomplete = incompleteTorrents.has(torrent.infoHash)
+        if (torrent.progress < 1) incompleteTorrents.add(torrent.infoHash)
+        else incompleteTorrents.delete(torrent.infoHash)
+        // Only a torrent this session watched finish is announced. A restored
+        // library and a freshly created seed both arrive already complete, and
+        // neither is a download that just completed.
+        if (
+          torrent.progress >= 1 &&
+          wasIncomplete &&
+          !notifiedComplete.has(torrent.infoHash)
+        ) {
           notifiedComplete.add(torrent.infoHash)
           notifier.notify({ body: torrent.name, title: 'Download complete' })
         }

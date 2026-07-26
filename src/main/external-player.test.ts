@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -115,5 +115,83 @@ describe('ExternalPlayer', () => {
     await expect(
       failing.open({ mediaUrl: MEDIA_URL, playerPath })
     ).rejects.toMatchObject({ code: 'LAUNCH_FAILED' })
+  })
+})
+
+describe('macOS application bundles', () => {
+  /** A bundle shaped the way the open panel returns one. */
+  async function createBundle(
+    name: string,
+    options: Readonly<{
+      executableName?: string
+      declared?: string | null
+    }> = {}
+  ): Promise<string> {
+    const bundlePath = path.join(root, `${name}.app`)
+    await mkdir(path.join(bundlePath, 'Contents', 'MacOS'), {
+      recursive: true
+    })
+    const declared = options.declared === undefined ? name : options.declared
+    if (declared !== null) {
+      await writeFile(
+        path.join(bundlePath, 'Contents', 'Info.plist'),
+        `<plist><dict><key>CFBundleExecutable</key><string>${declared}</string></dict></plist>`
+      )
+    }
+    const executable = path.join(
+      bundlePath,
+      'Contents',
+      'MacOS',
+      options.executableName ?? name
+    )
+    await writeFile(executable, '#!/bin/sh\n')
+    await chmod(executable, 0o700)
+    return bundlePath
+  }
+
+  it('launches the executable a chosen bundle declares', async () => {
+    const bundlePath = await createBundle('Player')
+
+    await createPlayer().open({ mediaUrl: MEDIA_URL, playerPath: bundlePath })
+
+    expect(launches).toEqual([
+      {
+        args: [MEDIA_URL],
+        file: path.join(bundlePath, 'Contents', 'MacOS', 'Player')
+      }
+    ])
+  })
+
+  it('falls back to the bundle name when no executable is declared', async () => {
+    const bundlePath = await createBundle('Fallback', { declared: null })
+
+    await createPlayer().open({ mediaUrl: MEDIA_URL, playerPath: bundlePath })
+
+    expect(launches[0]?.file).toBe(
+      path.join(bundlePath, 'Contents', 'MacOS', 'Fallback')
+    )
+  })
+
+  it('refuses a declared executable that leaves the bundle', async () => {
+    const bundlePath = await createBundle('Escape', {
+      declared: '../../../../usr/bin/env',
+      executableName: 'Escape'
+    })
+
+    await expect(
+      createPlayer().open({ mediaUrl: MEDIA_URL, playerPath: bundlePath })
+    ).rejects.toMatchObject({ code: 'PLAYER_NOT_AUTHORIZED' })
+    expect(launches).toEqual([])
+  })
+
+  it('refuses a bundle whose declared executable is missing', async () => {
+    const bundlePath = await createBundle('Missing', {
+      executableName: 'Other'
+    })
+
+    await expect(
+      createPlayer().open({ mediaUrl: MEDIA_URL, playerPath: bundlePath })
+    ).rejects.toBeInstanceOf(ExternalPlayerError)
+    expect(launches).toEqual([])
   })
 })
