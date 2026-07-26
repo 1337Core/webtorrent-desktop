@@ -2548,7 +2548,41 @@ passed.
   Milestone 8 progress note for what these cover and what they deliberately do
   not.
 
-### 24.2 What still requires the owner
+### 24.2 External review round, 2026-07-25
+
+An external review of the pull request raised thirteen findings. All thirteen
+were confirmed against the code and fixed. They clustered where a test harness
+stands in for the packaged runtime, which is exactly where the existing suites
+were blind:
+
+- the UI session cancelled every renderer HTTP request, including the engine's
+  own loopback media origin that the CSP names, so packaged playback and
+  artwork could not work at all; the player also never called `play()`, and the
+  response policy disabled the Fullscreen API for the app's own origin;
+- the external player rejected every ordinary Mac application, because the open
+  panel returns an `.app` bundle and a bundle is a directory;
+- both file manifests requested only the first page, so a file past the first
+  sixty-four could not be reviewed, selected, or played;
+- trackerless magnet consent used `window.confirm`, which `disableDialogs`
+  makes unanswerable, so the DHT branch could never be approved;
+- the preload bounded every torrent command to five seconds although main
+  allows an engine operation two minutes, so creation and commit reported
+  failure while still running;
+- cancelling a magnet mid-acquisition stranded it until its TTL expired, and
+  four cancellations exhausted the engine's capacity;
+- the bundle declared neither document nor URL types, so LaunchServices never
+  routed a `.torrent` file or `magnet:` link to it, and cold-start activations
+  were lost because the listeners were installed after readiness;
+- every already-complete torrent announced a finished download on each launch;
+  and
+- legacy import and the startup preference were implemented and tested but
+  unreachable — no renderer code called either, so neither could be used.
+
+Section 10.2's first-launch offer is the one part of that last item still
+outstanding. The settings route it defers to now exists; the detection prompt
+on first launch does not.
+
+### 24.3 What still requires the owner
 
 These cannot be closed by any fixture, and none of them block review:
 
@@ -2562,7 +2596,7 @@ These cannot be closed by any fixture, and none of them block review:
 - the two-hour Milestone 8 soak with real torrents; and
 - owner acceptance of the migrated app.
 
-### 24.3 Earlier snapshot
+### 24.4 Earlier snapshot
 
 Completed before the review-readiness pass:
 
@@ -2586,7 +2620,7 @@ Also verified in that snapshot: the focused staging-client suite passed
 listener is released normally despite the upstream `ERR_SERVER_NOT_RUNNING`
 destroy callback.
 
-### 24.4 Working notes for the next session
+### 24.5 Working notes for the next session
 
 1. Use `PATH=/opt/homebrew/opt/node@24/bin:$PATH` and confirm Node 24.18.0 /
    npm 11.16.0. Every script asserts this itself and fails closed.
