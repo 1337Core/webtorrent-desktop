@@ -76,6 +76,11 @@ const preferencesSchema = z.strictObject({
   downloadRoot: z.string().min(1).max(4_096).nullable().default(null),
   /** A user-selected media player; absent until the owner picks one. */
   externalPlayer: z.string().min(1).max(4_096).nullable().default(null),
+  /**
+   * Whether the app opens at login. An imported legacy value is only ever a
+   * stored choice: macOS is not touched until the owner confirms it here.
+   */
+  openAtLogin: z.boolean().default(false),
   /** A watched folder for `.torrent` files; the feature is off by default. */
   torrentsFolder: z.string().min(1).max(4_096).nullable().default(null)
 })
@@ -128,6 +133,7 @@ export const DEFAULT_APP_STATE: AppState = {
   preferences: {
     downloadRoot: null,
     externalPlayer: null,
+    openAtLogin: false,
     torrentsFolder: null
   },
   window: {

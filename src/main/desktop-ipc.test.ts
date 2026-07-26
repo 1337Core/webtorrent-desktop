@@ -133,6 +133,7 @@ function createHarness(
       preferences: {
         downloadRoot: null,
         externalPlayer: null,
+        openAtLogin: false,
         torrentsFolder: null
       },
       window: { main: { normalBounds: null } }

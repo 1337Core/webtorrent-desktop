@@ -106,6 +106,7 @@ beforeEach(() => {
               preferences: {
                 downloadRoot: '/Users/owner/Downloads',
                 externalPlayer: null,
+                openAtLogin: false,
                 torrentsFolder: null
               }
             },

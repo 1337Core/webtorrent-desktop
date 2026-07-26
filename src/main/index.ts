@@ -51,7 +51,12 @@ import { findDangerousLaunchSwitch } from './launch-policy'
 import { installAppMenu } from './app-menu'
 import { ExternalPlayer } from './external-player'
 import { FolderWatcher } from './folder-watcher'
-import { DesktopNotifier, DockBadge, PowerSaveGuard } from './os-integration'
+import {
+  DesktopNotifier,
+  DockBadge,
+  PowerSaveGuard,
+  StartupPreference
+} from './os-integration'
 import { measureSource } from './source-summary'
 import { TorrentHandlers } from './torrent-handlers'
 import { AppStateStore } from './state-store'
@@ -1030,6 +1035,19 @@ function createMainWindow(runtime: RuntimeInfo): BrowserWindow {
       routeActivation('file', torrentPath)
     }
   })
+  // macOS owns the login item. The stored preference is the owner's choice and
+  // is applied only from here, never inferred from an import.
+  const startupPreference = new StartupPreference({ diagnostics })
+  const applyStartupPreference = (openAtLogin: boolean): void => {
+    if (startupPreference.enabled() === openAtLogin) return
+    if (!startupPreference.set(openAtLogin)) {
+      diagnostics.warn('startup.apply-failed')
+    }
+  }
+  applyStartupPreference(
+    stateStore?.snapshot().preferences.openAtLogin ?? false
+  )
+
   const applyWatchPreference = (folder: string | null): void => {
     if (folder === null) {
       void folderWatcher.stop()
@@ -1112,6 +1130,7 @@ function createMainWindow(runtime: RuntimeInfo): BrowserWindow {
     },
     onPreferencesChanged: preferences => {
       applyWatchPreference(preferences.torrentsFolder)
+      applyStartupPreference(preferences.openAtLogin)
     },
     engineSupervisor,
     getEngineStatusEvent: () => structuredClone(latestEngineStatusEvent),

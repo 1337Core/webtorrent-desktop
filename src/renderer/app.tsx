@@ -13,6 +13,7 @@ type Location = 'create-torrent' | 'home' | 'player' | 'preferences'
 type Preferences = {
   downloadRoot: string | null
   externalPlayer: string | null
+  openAtLogin: boolean
   torrentsFolder: string | null
 }
 
@@ -79,6 +80,7 @@ export function App(): React.JSX.Element {
   const [preferences, setPreferences] = useState<Preferences>({
     downloadRoot: null,
     externalPlayer: null,
+    openAtLogin: false,
     torrentsFolder: null
   })
   // The original navigated a history the header's chevrons walked, so the
@@ -340,6 +342,7 @@ export function App(): React.JSX.Element {
         {location === 'preferences' ? (
           <PreferencesPage
             onChanged={setPreferences}
+            onImported={() => setListRevision(revision => revision + 1)}
             preferences={preferences}
           />
         ) : null}

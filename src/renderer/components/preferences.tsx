@@ -1,13 +1,25 @@
 import { useCallback, useState } from 'react'
+import {
+  collectFilePages,
+  runCommand,
+  type EngineValue
+} from '../lib/engine-client'
+
+type LegacyEntry = EngineValue<'list-legacy-imports'>['items'][number]
+
+const LEGACY_PAGE_LIMIT = 64
 
 type PreferenceValues = Readonly<{
   downloadRoot: string | null
   externalPlayer: string | null
+  openAtLogin: boolean
   torrentsFolder: string | null
 }>
 
 export type PreferencesPageProps = Readonly<{
   onChanged: (preferences: PreferenceValues) => void
+  /** Raised after an import so the library reloads what it gained. */
+  onImported?: () => void
   preferences: PreferenceValues
 }>
 
@@ -89,16 +101,24 @@ function PreferencesSection({
  */
 export function PreferencesPage({
   onChanged,
+  onImported,
   preferences
 }: PreferencesPageProps): React.JSX.Element {
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState<string | null>(null)
+  const [legacyRoot, setLegacyRoot] = useState<string | null>(null)
+  const [legacyEntries, setLegacyEntries] = useState<
+    ReadonlyArray<LegacyEntry>
+  >([])
+  const [legacySkipped, setLegacySkipped] = useState(0)
+  const [importReport, setImportReport] = useState<string | null>(null)
 
   const save = useCallback(
     async (
       update: Readonly<{
         downloadRoot?: string
         externalPlayer?: string | null
+        openAtLogin?: boolean
         torrentsFolder?: string | null
       }>
     ) => {
@@ -135,6 +155,82 @@ export function PreferencesPage({
     [save]
   )
 
+  /**
+   * Section 10.2's "Later" route: the original profile is chosen explicitly,
+   * read without being opened for writing, and reported before anything is
+   * imported. Nothing here touches the original app's data.
+   */
+  const scanLegacyRoot = useCallback(async () => {
+    setBusy(true)
+    setFailure(null)
+    setImportReport(null)
+    const chosen = await window.desktop.choosePath('directory')
+    if (!chosen.ok) {
+      setBusy(false)
+      setFailure(chosen.error.displayMessage)
+      return
+    }
+    if (chosen.value.path === null) {
+      setBusy(false)
+      return
+    }
+
+    const root = chosen.value.path
+    let skipped = 0
+    const listed = await collectFilePages<LegacyEntry>(async cursor => {
+      const page = await runCommand({
+        command: 'list-legacy-imports',
+        payload: { cursor, legacyRoot: root, limit: LEGACY_PAGE_LIMIT }
+      })
+      if (page.ok) skipped = page.value.skippedCount
+      return page
+    })
+    setBusy(false)
+    if (!listed.ok) {
+      setFailure(listed.error.displayMessage)
+      return
+    }
+    setLegacyRoot(root)
+    setLegacyEntries(listed.items)
+    setLegacySkipped(skipped)
+  }, [])
+
+  const importLegacy = useCallback(async () => {
+    const destinationRoot = preferences.downloadRoot
+    if (legacyRoot === null || destinationRoot === null) return
+    setBusy(true)
+    setFailure(null)
+
+    let imported = 0
+    let failed = 0
+    for (const entry of legacyEntries) {
+      if (entry.kind !== 'importable') continue
+      const outcome = await runCommand({
+        command: 'import-legacy-torrent',
+        payload: { destinationRoot, infoHash: entry.infoHash, legacyRoot }
+      })
+      if (outcome.ok) imported += 1
+      else failed += 1
+    }
+
+    setBusy(false)
+    // Invalid entries are reported rather than aborting the whole import.
+    setImportReport(
+      `Imported ${imported} torrent${imported === 1 ? '' : 's'}` +
+        (failed > 0 ? `, ${failed} could not be imported` : '') +
+        (legacySkipped > 0 ? `, ${legacySkipped} skipped by the reader` : '') +
+        '.'
+    )
+    setLegacyEntries([])
+    if (imported > 0) onImported?.()
+  }, [
+    legacyEntries,
+    legacyRoot,
+    legacySkipped,
+    onImported,
+    preferences.downloadRoot
+  ])
+
   const clear = useCallback(
     async (update: Parameters<typeof save>[0]) => {
       setBusy(true)
@@ -168,6 +264,82 @@ export function PreferencesPage({
             value={preferences.torrentsFolder}
           />
           <p>New .torrent files in this folder are added immediately.</p>
+        </div>
+      </PreferencesSection>
+
+      <PreferencesSection title="Import">
+        <div className="preference">
+          <p>
+            Bring settings and torrents over from the original WebTorrent
+            Desktop. Its data is only read: nothing there is moved, changed, or
+            deleted.
+          </p>
+          <div className="path-selector">
+            <div className="label">
+              <label htmlFor="legacy-profile">Original profile:</label>
+            </div>
+            <input
+              className="control"
+              disabled
+              id="legacy-profile"
+              readOnly
+              value={legacyRoot ?? ''}
+            />
+            <button
+              className="control"
+              disabled={busy}
+              onClick={() => void scanLegacyRoot()}
+              type="button"
+            >
+              Choose
+            </button>
+          </div>
+          {legacyEntries.length > 0 ? (
+            <>
+              <div className="file-list">
+                {legacyEntries.map((entry, index) => (
+                  <div key={`${entry.name}-${index}`}>
+                    {entry.kind === 'importable'
+                      ? `${entry.name} (${entry.fileCount} files)`
+                      : `${entry.name} — cannot be imported`}
+                  </div>
+                ))}
+              </div>
+              <button
+                className="control"
+                disabled={busy || preferences.downloadRoot === null}
+                onClick={() => void importLegacy()}
+                type="button"
+              >
+                Import
+              </button>
+              {preferences.downloadRoot === null ? (
+                <p>Choose a download location before importing.</p>
+              ) : null}
+            </>
+          ) : null}
+          {importReport ? <p role="status">{importReport}</p> : null}
+        </div>
+      </PreferencesSection>
+
+      <PreferencesSection title="Startup">
+        <div className="preference">
+          <label className="control checkbox">
+            <input
+              checked={preferences.openAtLogin}
+              disabled={busy}
+              onChange={event => {
+                setBusy(true)
+                void save({ openAtLogin: event.target.checked })
+              }}
+              type="checkbox"
+            />
+            <span>Open WebTorrent Updated at login</span>
+          </label>
+          <p>
+            An imported setting is only a stored choice until it is confirmed
+            here.
+          </p>
         </div>
       </PreferencesSection>
 

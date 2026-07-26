@@ -135,6 +135,7 @@ function bootstrapSuccess(requestId: string, sequence = 0): BootstrapResult {
         preferences: {
           downloadRoot: null,
           externalPlayer: null,
+          openAtLogin: false,
           torrentsFolder: null
         }
       },

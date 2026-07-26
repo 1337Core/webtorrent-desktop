@@ -155,6 +155,7 @@ describe('renderer IPC contracts', () => {
             preferences: {
               downloadRoot: null,
               externalPlayer: null,
+              openAtLogin: false,
               torrentsFolder: null
             }
           },
