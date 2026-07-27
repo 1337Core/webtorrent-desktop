@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "incremental": true,
+    "jsx": "react-jsx",
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "tsBuildInfoFile": ".cache/tsbuildinfo/renderer.tsbuildinfo",
+    "types": ["vite/client"]
+  },
+  "include": [
+    "src/renderer/**/*.ts",
+    "src/renderer/**/*.tsx",
+    "src/shared/**/*.ts"
+  ],
+  "exclude": ["src/shared/**/*.test.ts"]
+}

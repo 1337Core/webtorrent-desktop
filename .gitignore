@@ -1,9 +1,12 @@
 node_modules/
 build/
 dist/
+out/
+.cache/
 npm-debug.log*
 .vscode/
 
 # JetBrains IntelliJ IDEA project files
 .idea
 *.iml
+.artifacts/

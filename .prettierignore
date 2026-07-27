@@ -1,0 +1,17 @@
+.cache/
+.claude/
+AUTHORS.md
+CHANGELOG.md
+README.md
+RELEASE_PROCESS.md
+.github/
+bin/
+build/
+dist/
+node_modules/
+out/
+package-lock.json
+plan.md
+src/**/*.js
+static/
+test/

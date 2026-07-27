@@ -1,0 +1,19 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "incremental": true,
+    "lib": ["ES2024"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "noEmit": true,
+    "tsBuildInfoFile": ".cache/tsbuildinfo/e2e.tsbuildinfo",
+    "types": [
+      "node",
+      "mocha",
+      "@wdio/globals/types",
+      "@wdio/electron-service",
+      "expect-webdriverio"
+    ]
+  },
+  "include": ["e2e/**/*.ts", "wdio.conf.ts", "src/types/torrent-packages.d.ts"]
+}

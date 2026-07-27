@@ -1,0 +1,833 @@
+import type { Readable } from 'node:stream'
+import type { TorrentOptions } from 'webtorrent'
+import { GuardedStoreSupervisor, type GuardedStoreGrant } from './guarded-store'
+import {
+  runMetadataCommitBarrier,
+  type CommitBarrierResult
+} from './metadata-commit-barrier'
+import { desiredPieceRanges, type PieceRange } from './piece-selection'
+import type { PeerBudget } from './peer-budget'
+import type { ValidatedTorrentMetadata } from './torrent-metadata'
+import {
+  addPeerTracked,
+  type TrackedWebTorrentPeer
+} from './webtorrent-peer-adapter'
+import {
+  TorrentRegistry,
+  type TorrentOwner,
+  type TorrentReservation
+} from './torrent-registry'
+
+export const DISK_TORRENT_TIMEOUTS = Object.freeze({
+  destroyMs: 4_000,
+  readyMs: 300_000
+})
+
+export type DiskTorrentErrorCode =
+  | 'ADD_FAILED'
+  | 'COMMIT_REJECTED'
+  | 'DESTROYED'
+  | 'READY_TIMEOUT'
+  | 'STATE_CONFLICT'
+  | 'TORRENT_ERROR'
+
+export class DiskTorrentError extends Error {
+  readonly code: DiskTorrentErrorCode
+  readonly detail: string
+
+  constructor(code: DiskTorrentErrorCode, detail = '') {
+    super(`Disk torrent operation failed: ${code}.`)
+    this.name = 'DiskTorrentError'
+    this.code = code
+    this.detail = detail
+  }
+}
+
+/** The exact WebTorrent torrent surface the disk-backed session consumes. */
+export type EngineTorrentFile = {
+  createReadStream(options?: { end?: number; start?: number }): Readable
+  downloaded: number
+  length: number
+  path: string
+  select(priority?: number): void
+}
+
+/** A connected WebRTC transport WebTorrent can adopt directly. */
+export type EngineWebRtcPeer = {
+  destroy(): void
+  id?: string
+  readonly remoteAddress?: string
+}
+
+export type EngineTorrent = {
+  addPeer(
+    peer: EngineWebRtcPeer | string,
+    source?: string
+  ): boolean | TrackedWebTorrentPeer
+  deselect(start: number, end: number): void
+  destroy(
+    options: { destroyStore: boolean },
+    callback: (error?: Error) => void
+  ): void
+  destroyed: boolean
+  done: boolean
+  downloadSpeed: number
+  downloaded: number
+  files: ReadonlyArray<EngineTorrentFile>
+  infoHash: string
+  length: number
+  name: string
+  numPeers: number
+  /** WebTorrent's verified-piece bitfield, absent before the torrent is ready. */
+  bitfield?: { buffer?: Uint8Array } | undefined
+  on(event: string, listener: (...args: unknown[]) => void): unknown
+  pause(): void
+  pieceLength: number
+  private: boolean
+  progress: number
+  ready: boolean
+  removePeer?(peer: unknown): void
+  resume(): void
+  select(start: number, end: number, priority?: number): void
+  timeRemaining: number
+  torrentFile: Uint8Array
+  uploadSpeed: number
+  uploaded: number
+}
+
+/** Live counters the engine reports to the renderer as bounded DTOs. */
+export type DiskTorrentStats = Readonly<{
+  done: boolean
+  downloadSpeed: number
+  downloaded: number
+  fileDownloaded: ReadonlyArray<number>
+  numPeers: number
+  progress: number
+  timeRemainingMs: number | null
+  uploadSpeed: number
+  uploaded: number
+}>
+
+export type EngineAddClient = {
+  add(torrentId: Uint8Array, options: TorrentOptions): EngineTorrent
+}
+
+/**
+ * One tracker activation for a torrent generation. Pause destroys it and
+ * resume creates a fresh one, so no announce can cross a generation.
+ */
+export type TorrentActivation = Readonly<{
+  start: () => void
+  stop: () => Promise<void>
+}>
+
+export type DiskTorrentAddInput = Readonly<{
+  /**
+   * A validated fast-resume bitfield. It is passed to WebTorrent only when the
+   * resume store proved every field matches; `skipVerify` is never set.
+   */
+  bitfield?: Uint8Array
+  client: EngineAddClient
+  downloadRoot: string
+  metadata: ValidatedTorrentMetadata
+  owner: TorrentOwner
+  selectedIndexes: ReadonlyArray<number>
+  startPaused?: boolean
+}>
+
+export type DiskTorrentSessionOptions = Readonly<{
+  /** The shared engine-wide admission budget, when one is in force. */
+  budget?: PeerBudget
+  createActivation?: (session: DiskTorrentSession) => TorrentActivation | null
+  destroyTimeoutMs?: number
+  onCommitFailure?: (infoHash: string, result: CommitBarrierResult) => void
+  /**
+   * The torrent's first transition to complete. Trackers require a one-shot
+   * `completed` event, which a periodic announce with `left=0` does not
+   * satisfy.
+   */
+  onCompleted?: (session: DiskTorrentSession) => void
+  /** Runs again immediately before every handoff, whatever discovered it. */
+  peerFilter?: (address: string) => boolean
+  readyTimeoutMs?: number
+  registry: TorrentRegistry
+}>
+
+export type DiskTorrentState =
+  'adding' | 'paused' | 'removed' | 'removing' | 'running'
+
+export type DiskTorrentSnapshot = Readonly<{
+  generationId: string
+  infoHash: string
+  name: string
+  owner: TorrentOwner
+  selectedIndexes: ReadonlyArray<number>
+  state: DiskTorrentState
+}>
+
+function clamp(value: number, minimum: number, maximum: number): number {
+  if (!Number.isFinite(value)) return minimum
+  return Math.min(Math.max(value, minimum), maximum)
+}
+
+function clampRate(value: number | undefined): number {
+  return Number.isFinite(value) && (value ?? 0) > 0 ? (value as number) : 0
+}
+
+/**
+ * A disk-backed torrent for one registry generation.
+ *
+ * The add is always paused and fully deselected: nothing is selected, no
+ * tracker adapter exists, and no peer is admitted until the synchronous
+ * metadata barrier commits the reservation.
+ */
+export class DiskTorrentSession {
+  readonly #createActivation: (
+    session: DiskTorrentSession
+  ) => TorrentActivation | null
+  readonly #destroyTimeoutMs: number
+  readonly #metadata: ValidatedTorrentMetadata
+  readonly #owner: TorrentOwner
+  readonly #budget: PeerBudget | null
+  readonly #peerFilter: (address: string) => boolean
+  readonly #registry: TorrentRegistry
+  readonly #reservation: TorrentReservation
+  readonly #storeSupervisor: GuardedStoreSupervisor
+  #activation: TorrentActivation | null = null
+  #admitting = false
+  #committed = false
+  #selectedIndexes: number[]
+  #state: DiskTorrentState = 'adding'
+  #torrent: EngineTorrent | null = null
+
+  private constructor(
+    metadata: ValidatedTorrentMetadata,
+    owner: TorrentOwner,
+    registry: TorrentRegistry,
+    reservation: TorrentReservation,
+    storeSupervisor: GuardedStoreSupervisor,
+    selectedIndexes: ReadonlyArray<number>,
+    options: DiskTorrentSessionOptions
+  ) {
+    this.#createActivation = options.createActivation ?? (() => null)
+    this.#destroyTimeoutMs =
+      options.destroyTimeoutMs ?? DISK_TORRENT_TIMEOUTS.destroyMs
+    this.#metadata = metadata
+    this.#owner = owner
+    this.#budget = options.budget ?? null
+    this.#peerFilter = options.peerFilter ?? (() => true)
+    this.#registry = registry
+    this.#reservation = reservation
+    this.#selectedIndexes = [...selectedIndexes]
+    this.#storeSupervisor = storeSupervisor
+  }
+
+  static grantFor(
+    metadata: ValidatedTorrentMetadata,
+    downloadRoot: string
+  ): GuardedStoreGrant {
+    return {
+      chunkLength: metadata.pieceLength,
+      files: metadata.files,
+      root: downloadRoot,
+      totalLength: metadata.length
+    }
+  }
+
+  /**
+   * Reserves the info hash, builds the guarded store, and adds the torrent
+   * with the exact qualified options. Resolves once the torrent is ready and
+   * its reservation is committed.
+   */
+  static async add(
+    input: DiskTorrentAddInput,
+    options: DiskTorrentSessionOptions
+  ): Promise<DiskTorrentSession> {
+    const reservation = options.registry.reserve({
+      fileCount: input.metadata.files.length,
+      infoHash: input.metadata.infoHash,
+      owner: input.owner
+    })
+
+    let storeSupervisor: GuardedStoreSupervisor
+    try {
+      storeSupervisor = new GuardedStoreSupervisor(
+        DiskTorrentSession.grantFor(input.metadata, input.downloadRoot)
+      )
+    } catch (error) {
+      options.registry.rollback(reservation)
+      throw new DiskTorrentError(
+        'ADD_FAILED',
+        error instanceof Error ? error.name : 'unknown'
+      )
+    }
+
+    const session = new DiskTorrentSession(
+      input.metadata,
+      input.owner,
+      options.registry,
+      reservation,
+      storeSupervisor,
+      input.selectedIndexes,
+      options
+    )
+
+    try {
+      await session.#run(input, options)
+    } catch (error) {
+      throw error instanceof DiskTorrentError
+        ? error
+        : new DiskTorrentError('ADD_FAILED')
+    }
+    return session
+  }
+
+  get infoHash(): string {
+    return this.#metadata.infoHash
+  }
+
+  get metadata(): ValidatedTorrentMetadata {
+    return this.#metadata
+  }
+
+  get owner(): TorrentOwner {
+    return this.#owner
+  }
+
+  get generationId(): string {
+    return this.#reservation.generationId
+  }
+
+  get state(): DiskTorrentState {
+    return this.#state
+  }
+
+  /**
+   * The verified-piece bitfield this generation holds, or an empty view when
+   * the torrent has not reached a state that has one. Resume state is only
+   * ever a hint, so an empty bitfield simply means the next start verifies.
+   */
+  bitfield(): Uint8Array {
+    const buffer = this.#torrent?.bitfield?.buffer
+    return buffer instanceof Uint8Array ? buffer : new Uint8Array()
+  }
+
+  get selectedIndexes(): ReadonlyArray<number> {
+    return [...this.#selectedIndexes]
+  }
+
+  /**
+   * Bounded live counters. Values are clamped rather than trusted so a
+   * WebTorrent regression cannot produce a DTO the contract rejects.
+   */
+  stats(): DiskTorrentStats {
+    const torrent = this.#torrent
+    const length = this.#metadata.length
+    const downloaded = Math.trunc(clamp(torrent?.downloaded ?? 0, 0, length))
+    const timeRemaining = torrent?.timeRemaining ?? Number.NaN
+    return {
+      done: torrent?.done ?? false,
+      downloadSpeed: clampRate(torrent?.downloadSpeed),
+      downloaded,
+      fileDownloaded: this.#metadata.files.map((file, index) =>
+        Math.trunc(
+          clamp(torrent?.files[index]?.downloaded ?? 0, 0, file.length)
+        )
+      ),
+      numPeers: Math.min(
+        Math.max(Math.trunc(torrent?.numPeers ?? 0), 0),
+        10_000
+      ),
+      progress: length === 0 ? 1 : clamp(downloaded / length, 0, 1),
+      timeRemainingMs:
+        Number.isFinite(timeRemaining) && timeRemaining >= 0
+          ? Math.min(Math.trunc(timeRemaining), Number.MAX_SAFE_INTEGER)
+          : null,
+      uploadSpeed: clampRate(torrent?.uploadSpeed),
+      uploaded: Math.max(Math.trunc(torrent?.uploaded ?? 0), 0)
+    }
+  }
+
+  snapshot(): DiskTorrentSnapshot {
+    return {
+      generationId: this.#reservation.generationId,
+      infoHash: this.#metadata.infoHash,
+      name: this.#metadata.name,
+      owner: this.#owner,
+      selectedIndexes: [...this.#selectedIndexes],
+      state: this.#state
+    }
+  }
+
+  /**
+   * The last gate before WebTorrent sees a discovered peer. A closed, paused,
+   * or superseded generation admits nothing, and the address policy runs again
+   * here rather than trusting whichever transport produced the candidate.
+   */
+  admitPeer(address: string, source = 'tracker'): boolean {
+    const torrent = this.#torrent
+    if (!torrent || this.#state !== 'running') return false
+    if (
+      !this.#registry.admits(
+        this.#metadata.infoHash,
+        this.#reservation.generationId
+      )
+    ) {
+      return false
+    }
+    if (!this.#peerFilter(address)) return false
+    const admission = this.#admitBudget(address, () =>
+      torrent.removePeer?.(address)
+    )
+    if (!admission) return false
+    try {
+      return this.#handoffBudgeted(address, admission.newRecord, () =>
+        addPeerTracked(torrent, address, source)
+      )
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * The same gate for an already connected WebRTC transport. Its remote
+   * address is checked here exactly as a discovered address is, so a peer that
+   * signaled through a tracker cannot bypass the current torrent policy.
+   */
+  admitConnection(peer: EngineWebRtcPeer, source = 'tracker'): boolean {
+    const torrent = this.#torrent
+    if (!torrent || this.#state !== 'running') return false
+    if (
+      !this.#registry.admits(
+        this.#metadata.infoHash,
+        this.#reservation.generationId
+      )
+    ) {
+      return false
+    }
+    const address = peer.remoteAddress
+    if (typeof address !== 'string' || !this.#peerFilter(address)) return false
+    const identity = peer.id ?? address
+    const admission = this.#admitBudget(identity, () =>
+      torrent.removePeer?.(peer)
+    )
+    if (!admission) return false
+    try {
+      return this.#handoffBudgeted(identity, admission.newRecord, () =>
+        addPeerTracked(torrent, peer, source)
+      )
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * The shared engine-wide bound. WebTorrent's own `maxConns` is per torrent,
+   * so without this one torrent could hold the whole engine's capacity.
+   */
+  #admitBudget(
+    peer: string,
+    remove: () => void,
+    scope?: 'pex'
+  ): { newRecord: boolean } | null {
+    if (!this.#budget) return { newRecord: false }
+    const newRecord = !this.#budget.has(this.#budgetKey, peer)
+    if (
+      !this.#budget.admit({
+        key: this.#budgetKey,
+        peer,
+        remove,
+        ...(scope ? { scope } : {})
+      })
+    ) {
+      return null
+    }
+    return { newRecord }
+  }
+
+  get #budgetKey(): string {
+    return `${this.#metadata.infoHash}:${this.#reservation.generationId}`
+  }
+
+  /**
+   * WebTorrent discovers peers of its own through the PEX extension and hands
+   * them straight to `addPeer`, which would bypass this session's address
+   * policy and the engine's shared budget. Wrapping the method keeps the
+   * promise that the gate runs immediately before every handoff, whatever
+   * discovered the peer.
+   */
+  #containDiscovery(torrent: EngineTorrent): void {
+    const target = torrent as {
+      addPeer: (
+        peer: EngineWebRtcPeer | string,
+        source?: string
+      ) => boolean | TrackedWebTorrentPeer
+    }
+    const original = target.addPeer.bind(torrent)
+    target.addPeer = (peer, source) => {
+      if (this.#admitting) return original(peer, source)
+      // Discovery from inside WebTorrent: receive-only, filtered, and counted
+      // against the narrower PEX ceiling.
+      if (typeof peer !== 'string') return false
+      const [host] = peer.split(':')
+      if (!host || this.#state !== 'running') return false
+      if (!this.#peerFilter(peer)) return false
+      const admission = this.#admitBudget(
+        peer,
+        () => torrent.removePeer?.(peer),
+        'pex'
+      )
+      if (!admission) return false
+      return this.#handoffBudgeted(
+        peer,
+        admission.newRecord,
+        () => addPeerTracked(torrent, peer, source),
+        'pex'
+      )
+    }
+  }
+
+  /** Runs one handoff this session authorized, past its own wrapper. */
+  #handoff<T>(run: () => T): T {
+    this.#admitting = true
+    try {
+      return run()
+    } finally {
+      this.#admitting = false
+    }
+  }
+
+  /** Holds aggregate transport capacity across the handoff race. */
+  #handoffBudgeted(
+    peer: string,
+    newRecord: boolean,
+    run: () => false | TrackedWebTorrentPeer,
+    scope?: 'pex'
+  ): boolean {
+    const lease = this.#budget?.reserveTransport({
+      key: this.#budgetKey,
+      peer,
+      ...(scope ? { scope } : {})
+    })
+    if (this.#budget && !lease) {
+      if (newRecord) this.#budget.forget(this.#budgetKey, peer)
+      return false
+    }
+    try {
+      const accepted = this.#handoff(run)
+      if (!accepted) {
+        if (newRecord) this.#budget?.forget(this.#budgetKey, peer)
+        else lease?.release()
+        return false
+      }
+      if (lease) {
+        this.#releaseReservationWhenCounted(accepted, lease.release, () =>
+          this.#budget?.forget(this.#budgetKey, peer)
+        )
+      }
+      return true
+    } catch (error) {
+      if (newRecord) this.#budget?.forget(this.#budgetKey, peer)
+      else lease?.release()
+      throw error
+    }
+  }
+
+  /**
+   * WebTorrent returns its internal Peer from addPeer. Its own connect
+   * listener increments `numPeers` before this listener runs, so releasing
+   * here atomically moves capacity from pending-reserved to sampled-live.
+   * Failed outgoing peers do not emit disconnect before connection; wrapping
+   * destroy closes that path too.
+   */
+  #releaseReservationWhenCounted(
+    peer: TrackedWebTorrentPeer,
+    release: () => void,
+    retire: () => void
+  ): void {
+    if (peer.connected) {
+      release()
+    } else {
+      peer.once?.('connect', release)
+    }
+    const destroy = peer.destroy.bind(peer)
+    peer.destroy = (...args: unknown[]) => {
+      retire()
+      destroy(...args)
+    }
+  }
+
+  /**
+   * The selected file's byte source for the loopback media proxy. WebTorrent's
+   * own server is never exposed, so only this bounded range reader crosses the
+   * boundary.
+   */
+  mediaFile(fileIndex: number): EngineTorrentFile | null {
+    if (this.#state !== 'running' && this.#state !== 'paused') return null
+    const file = this.#torrent?.files[fileIndex]
+    const manifest = this.#metadata.files[fileIndex]
+    if (!file || !manifest || file.length !== manifest.length) return null
+    return file
+  }
+
+  /** Rebuilds and reapplies the complete desired selection. */
+  updateSelection(selectedIndexes: ReadonlyArray<number>): void {
+    if (this.#state === 'removed' || this.#state === 'removing') {
+      throw new DiskTorrentError('STATE_CONFLICT')
+    }
+    this.#selectedIndexes = [...new Set(selectedIndexes)].sort(
+      (left, right) => left - right
+    )
+    if (this.#state === 'running') this.#applySelection()
+  }
+
+  /**
+   * Closes admission, stops tracker work, clears the whole selection, and
+   * pauses the torrent. No continuing transfer is claimed afterwards.
+   */
+  async pause(): Promise<void> {
+    if (this.#state === 'paused') return
+    if (this.#state !== 'running') {
+      throw new DiskTorrentError('STATE_CONFLICT')
+    }
+    this.#state = 'paused'
+    await this.#stopActivation()
+    this.#clearSelection()
+    this.#torrent?.pause()
+  }
+
+  /** Recreates discovery from scratch; a stale generation never resumes. */
+  resume(): void {
+    if (this.#state === 'running') return
+    if (this.#state !== 'paused') {
+      throw new DiskTorrentError('STATE_CONFLICT')
+    }
+    this.#state = 'running'
+    this.#applySelection()
+    this.#torrent?.resume()
+    this.#startActivation()
+  }
+
+  /**
+   * Destroys exactly once with the store preserved, and keeps the registry
+   * tombstone until the destroy callback actually completes.
+   */
+  async remove(): Promise<void> {
+    if (this.#state === 'removed') return
+    if (this.#state === 'removing') {
+      throw new DiskTorrentError('STATE_CONFLICT')
+    }
+    this.#state = 'removing'
+    if (this.#committed) this.#registry.beginTeardown(this.#metadata.infoHash)
+    await this.#stopActivation()
+    this.#clearSelection()
+
+    const torrent = this.#torrent
+    this.#torrent = null
+    if (torrent) await this.#destroyTorrent(torrent)
+    await this.#storeSupervisor.close()
+
+    if (this.#committed) this.#registry.release(this.#metadata.infoHash)
+    // The generation's peer records return to the engine with it.
+    this.#budget?.release(
+      `${this.#metadata.infoHash}:${this.#reservation.generationId}`
+    )
+    this.#state = 'removed'
+  }
+
+  async #run(
+    input: DiskTorrentAddInput,
+    options: DiskTorrentSessionOptions
+  ): Promise<void> {
+    const readyTimeoutMs =
+      options.readyTimeoutMs ?? DISK_TORRENT_TIMEOUTS.readyMs
+
+    await new Promise<void>((resolve, reject) => {
+      let settled = false
+      const timer = setTimeout(() => {
+        fail(new DiskTorrentError('READY_TIMEOUT'))
+      }, readyTimeoutMs)
+      timer.unref()
+
+      const fail = (error: DiskTorrentError): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        const torrent = this.#torrent
+        this.#torrent = null
+        if (torrent && !torrent.destroyed) {
+          torrent.destroy({ destroyStore: false }, () => undefined)
+        }
+        if (this.#committed) {
+          // A failure after the barrier committed still has to give the info
+          // hash back. Rollback no longer applies to a committed reservation,
+          // so the entry is torn down the way removal does it; otherwise every
+          // retry is refused as a duplicate until the engine restarts.
+          this.#registry.beginTeardown(this.#metadata.infoHash)
+          this.#registry.release(this.#metadata.infoHash)
+          this.#budget?.release(
+            `${this.#metadata.infoHash}:${this.#reservation.generationId}`
+          )
+        } else {
+          this.#registry.rollback(this.#reservation)
+        }
+        this.#state = 'removed'
+        reject(error)
+      }
+
+      let torrent: EngineTorrent
+      try {
+        torrent = input.client.add(
+          this.#metadata.torrentBytes,
+          this.#addOptions(input.downloadRoot, input.bitfield)
+        )
+      } catch {
+        settled = true
+        clearTimeout(timer)
+        this.#registry.rollback(this.#reservation)
+        this.#state = 'removed'
+        reject(new DiskTorrentError('ADD_FAILED'))
+        return
+      }
+      this.#torrent = torrent
+      this.#containDiscovery(torrent)
+
+      torrent.on('done', () => {
+        if (this.#state !== 'running') return
+        try {
+          options.onCompleted?.(this)
+        } catch {
+          // Lifecycle observation cannot fail the transfer that triggered it.
+        }
+      })
+      torrent.on('error', () => {
+        fail(new DiskTorrentError('TORRENT_ERROR'))
+      })
+      torrent.on('close', () => {
+        fail(new DiskTorrentError('DESTROYED'))
+      })
+
+      // The commit barrier must complete inside this synchronous handler so a
+      // mismatch is destroyed before WebTorrent can verify a single piece.
+      torrent.on('metadata', () => {
+        if (settled) return
+        const result = runMetadataCommitBarrier({
+          expected: this.#metadata,
+          observed: {
+            files: torrent.files.map(file => ({
+              length: file.length,
+              path: file.path
+            })),
+            infoHash: torrent.infoHash,
+            length: torrent.length,
+            name: torrent.name,
+            pieceLength: torrent.pieceLength,
+            private: torrent.private,
+            torrentFile: torrent.torrentFile
+          },
+          reservation: this.#reservation,
+          storeFaults: this.#storeSupervisor.faults
+        })
+        if (!result.ok) {
+          options.onCommitFailure?.(this.#metadata.infoHash, result)
+          fail(new DiskTorrentError('COMMIT_REJECTED', result.code))
+          return
+        }
+        this.#registry.commit(this.#reservation)
+        this.#committed = true
+      })
+
+      torrent.on('ready', () => {
+        if (settled) return
+        if (!this.#committed) {
+          fail(new DiskTorrentError('COMMIT_REJECTED', 'missing barrier'))
+          return
+        }
+        settled = true
+        clearTimeout(timer)
+        resolve()
+      })
+    })
+
+    await this.#storeSupervisor.materializeSelected(this.#selectedIndexes)
+    this.#state = 'paused'
+    if (input.startPaused === false) this.resume()
+  }
+
+  #addOptions(downloadRoot: string, bitfield?: Uint8Array): TorrentOptions {
+    return {
+      ...(bitfield ? { bitfield } : {}),
+      addUID: false,
+      deselect: true,
+      destroyStoreOnDestroy: false,
+      path: downloadRoot,
+      paused: true,
+      private: this.#metadata.private,
+      skipVerify: false,
+      store: this.#storeSupervisor.storeConstructor(),
+      storeCacheSlots: 0,
+      storeOpts: { ...this.#storeSupervisor.storeOptions }
+    }
+  }
+
+  #ranges(): ReadonlyArray<PieceRange> {
+    return desiredPieceRanges(this.#metadata.files, this.#selectedIndexes, {
+      pieceCount: this.#metadata.pieceCount,
+      pieceLength: this.#metadata.pieceLength,
+      totalLength: this.#metadata.length
+    })
+  }
+
+  #applySelection(): void {
+    const torrent = this.#torrent
+    if (!torrent || this.#metadata.pieceCount === 0) return
+    torrent.deselect(0, this.#metadata.pieceCount - 1)
+    for (const range of this.#ranges()) {
+      torrent.select(range.start, range.end, 1)
+    }
+  }
+
+  #clearSelection(): void {
+    const torrent = this.#torrent
+    if (!torrent || this.#metadata.pieceCount === 0) return
+    torrent.deselect(0, this.#metadata.pieceCount - 1)
+  }
+
+  #startActivation(): void {
+    this.#activation = this.#createActivation(this)
+    this.#activation?.start()
+  }
+
+  async #stopActivation(): Promise<void> {
+    const activation = this.#activation
+    this.#activation = null
+    if (!activation) return
+    try {
+      await activation.stop()
+    } catch {
+      // Tracker teardown failures never block the lifecycle command.
+    }
+  }
+
+  #destroyTorrent(torrent: EngineTorrent): Promise<void> {
+    return new Promise<void>(resolve => {
+      let settled = false
+      const finish = (): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        resolve()
+      }
+      const timer = setTimeout(finish, this.#destroyTimeoutMs)
+      timer.unref()
+
+      try {
+        // Never await client.remove(): `close` is emitted before cleanup
+        // finishes and a second destroy may never invoke its callback.
+        torrent.destroy({ destroyStore: false }, () => finish())
+      } catch {
+        finish()
+      }
+    })
+  }
+}

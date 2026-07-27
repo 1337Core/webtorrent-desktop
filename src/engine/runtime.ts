@@ -1,0 +1,1416 @@
+import {
+  engineCommandResultSchema,
+  engineResultMatchesOperation,
+  type EngineCommand,
+  type EngineCommandResult,
+  type EngineEvent
+} from '../shared/engine-api'
+import {
+  PreparationStore,
+  PreparationStoreError,
+  type PreparationFilePage,
+  type PreparationSnapshot
+} from './preparation-store'
+import { randomUUID } from 'node:crypto'
+import { inspectAudioMetadata } from './audio-metadata'
+import { DiskTorrentError } from './disk-torrent'
+import {
+  ExternalSubtitleError,
+  readExternalSubtitle
+} from './external-subtitle'
+import { LegacyImportError } from './legacy-import'
+import type { LegacyImportService } from './legacy-import-service'
+import { MediaProxy, MediaProxyError } from './media-proxy'
+import { mediaContentType } from './media-types'
+import {
+  TorrentCreationError,
+  TorrentCreationService
+} from './torrent-creation'
+import { Readable } from 'node:stream'
+import { relabelTracks, SUBTITLE_LIMITS, toSubtitleTrack } from './subtitles'
+import { TorrentArchive, TorrentArchiveError } from './torrent-archive'
+import { TorrentManager, TorrentManagerError } from './torrent-manager'
+import type { ValidatedTorrentMetadata } from './torrent-metadata'
+import {
+  TorrentPreparationService,
+  TorrentPreparationServiceError
+} from './torrent-preparation-service'
+import { TorrentRegistryError } from './torrent-registry'
+
+type PreparationService = Pick<TorrentPreparationService, 'open'>
+
+type EngineSuccess = Extract<EngineCommandResult, { ok: true }>['result']
+type PreparationSummary = Extract<
+  EngineSuccess,
+  { command: 'open-preparation' }
+>['value']
+type PublicPreparationFilePage = Extract<
+  EngineSuccess,
+  { command: 'get-preparation-files' }
+>['value']
+
+/** Acquisitions tracked at once, and how long a settled one is kept. */
+const MAX_TRACKED_ACQUISITIONS = 4
+const ACQUISITION_TTL_MS = 5 * 60_000
+
+type AcquisitionState =
+  | Readonly<{ state: 'acquiring' }>
+  | Readonly<{ preparation: PreparationSummary; state: 'ready' }>
+  | Readonly<{
+      code:
+        | 'DHT_CONSENT_REQUIRED'
+        | 'INPUT_INVALID'
+        | 'INTERNAL'
+        | 'METADATA_UNAVAILABLE'
+        | 'PRIVATE_DHT_METADATA'
+      state: 'failed'
+    }>
+
+type AcquisitionRecord = {
+  completion: Promise<void>
+  controller: AbortController
+  expiresAtMs: number
+  state: AcquisitionState
+}
+
+type EngineRuntimeOptions = Readonly<{
+  createPreparationService?: (store: PreparationStore) => PreparationService
+  emitEvent?: (event: EngineEvent) => void
+  creationService?: TorrentCreationService
+  legacyImports?: LegacyImportService
+  mediaProxy?: MediaProxy
+  preparationStore?: PreparationStore
+  /** Keeps committed torrent bytes so a restart can rebuild its sessions. */
+  torrentArchive?: TorrentArchive
+  /** Revalidates archived bytes on the way back in. */
+  validateArchivedMetadata?: (
+    bytes: Uint8Array
+  ) => Promise<ValidatedTorrentMetadata>
+  /** The restored torrent's saved selection, by normalized path. */
+  resumeSelection?: (infoHash: string) => Promise<ReadonlyArray<string> | null>
+  torrentManager?: TorrentManager
+}>
+
+/** Reads one bounded stream fully; anything longer than the bound fails. */
+async function readAll(
+  stream: Readable,
+  maxBytes: number
+): Promise<Uint8Array> {
+  const chunks: Uint8Array[] = []
+  let total = 0
+  for await (const chunk of stream) {
+    const bytes =
+      chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk as ArrayBuffer)
+    total += bytes.byteLength
+    if (total > maxBytes) {
+      stream.destroy()
+      throw new Error('SUBTITLE_TOO_LARGE')
+    }
+    chunks.push(bytes)
+  }
+
+  const merged = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    merged.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return merged
+}
+
+/** Raised when a torrent command arrives before the clients are attached. */
+class EngineRuntimeUnavailableError extends Error {
+  constructor() {
+    super('The torrent engine runtime has no attached clients.')
+    this.name = 'EngineRuntimeUnavailableError'
+  }
+}
+
+type PublicError = Readonly<{
+  code: Extract<EngineCommandResult, { ok: false }>['error']['code']
+  displayMessage: string
+  retryable: boolean
+}>
+
+const PUBLIC_ERRORS = Object.freeze({
+  aborted: {
+    code: 'ABORTED',
+    displayMessage: 'The torrent operation was aborted.',
+    retryable: false
+  },
+  alreadyExists: {
+    code: 'ALREADY_EXISTS',
+    displayMessage: 'This torrent is already being prepared.',
+    retryable: false
+  },
+  archiveUnavailable: {
+    code: 'NOT_FOUND',
+    displayMessage: 'The saved torrent file is missing; add it again.',
+    retryable: false
+  },
+  capacityExceeded: {
+    code: 'STATE_CONFLICT',
+    displayMessage: 'Too many torrent preparations are open.',
+    retryable: true
+  },
+  dhtConsentRequired: {
+    code: 'DHT_CONSENT_REQUIRED',
+    displayMessage:
+      'This torrent has no usable tracker. Public DHT lookup requires consent.',
+    retryable: true
+  },
+  engineNotReady: {
+    code: 'ENGINE_NOT_READY',
+    displayMessage: 'The torrent engine is not ready.',
+    retryable: true
+  },
+  inputInvalid: {
+    code: 'INPUT_INVALID',
+    displayMessage: 'The torrent input is invalid.',
+    retryable: false
+  },
+  internal: {
+    code: 'INTERNAL',
+    displayMessage: 'The torrent engine could not complete the operation.',
+    retryable: false
+  },
+  localTorrentUnavailable: {
+    code: 'PATH_NOT_AUTHORIZED',
+    displayMessage: 'The selected torrent file is not available.',
+    retryable: false
+  },
+  preparationNotFound: {
+    code: 'NOT_FOUND',
+    displayMessage: 'The torrent preparation was not found.',
+    retryable: false
+  },
+  privateDhtMetadata: {
+    code: 'PRIVATE_DHT_METADATA',
+    displayMessage:
+      'The recovered torrent is private. Add a tracker-bearing magnet or torrent file instead.',
+    retryable: false
+  },
+  remoteConcurrencyLimit: {
+    code: 'STATE_CONFLICT',
+    displayMessage: 'Too many remote torrent requests are active.',
+    retryable: true
+  },
+  remoteTorrentUnavailable: {
+    code: 'NOT_FOUND',
+    displayMessage: 'The remote torrent could not be loaded.',
+    retryable: true
+  },
+  legacyUnreadable: {
+    code: 'INPUT_INVALID',
+    displayMessage: 'That previous installation could not be read.',
+    retryable: false
+  },
+  mediaNotFound: {
+    code: 'NOT_FOUND',
+    displayMessage: 'That media stream is no longer available.',
+    retryable: false
+  },
+  mediaUnavailable: {
+    code: 'STATE_CONFLICT',
+    displayMessage: 'No more media streams can be opened right now.',
+    retryable: true
+  },
+  creationFailed: {
+    code: 'INTERNAL',
+    displayMessage: 'The torrent could not be created.',
+    retryable: false
+  },
+  exportFailed: {
+    code: 'INTERNAL',
+    displayMessage: 'The torrent file could not be saved.',
+    retryable: true
+  },
+  sourceNotAuthorized: {
+    code: 'PATH_NOT_AUTHORIZED',
+    displayMessage: 'The selected source is not available.',
+    retryable: false
+  },
+  trackerRejected: {
+    code: 'INPUT_INVALID',
+    displayMessage: 'A selected tracker is not supported.',
+    retryable: false
+  },
+  torrentAddFailed: {
+    code: 'INTERNAL',
+    displayMessage: 'The torrent could not be started.',
+    retryable: false
+  },
+  torrentMetadataRejected: {
+    code: 'INPUT_INVALID',
+    displayMessage: 'The torrent metadata did not match its reservation.',
+    retryable: false
+  },
+  torrentTimedOut: {
+    code: 'TIMEOUT',
+    displayMessage: 'The torrent did not become ready in time.',
+    retryable: true
+  },
+  torrentNotFound: {
+    code: 'NOT_FOUND',
+    displayMessage: 'The torrent was not found.',
+    retryable: false
+  },
+  torrentStateConflict: {
+    code: 'STATE_CONFLICT',
+    displayMessage: 'The torrent cannot change state right now.',
+    retryable: false
+  },
+  stateConflict: {
+    code: 'STATE_CONFLICT',
+    displayMessage:
+      'The torrent preparation cannot be changed in its current state.',
+    retryable: false
+  },
+  metadataUnavailable: {
+    code: 'METADATA_UNAVAILABLE',
+    displayMessage: 'The torrent metadata could not be retrieved.',
+    retryable: true
+  },
+  unsupported: {
+    code: 'UNSUPPORTED',
+    displayMessage: 'This torrent operation is not available yet.',
+    retryable: false
+  }
+} satisfies Record<string, PublicError>)
+
+function errorResult(
+  operation: EngineCommand,
+  error: PublicError
+): EngineCommandResult {
+  return {
+    ok: false,
+    error: {
+      command: operation.command,
+      code: error.code,
+      displayMessage: error.displayMessage,
+      retryable: error.retryable
+    }
+  }
+}
+
+function strictResult(
+  operation: EngineCommand,
+  candidate: EngineCommandResult
+): EngineCommandResult {
+  const parsed = engineCommandResultSchema.safeParse(candidate)
+  if (parsed.success && engineResultMatchesOperation(parsed.data, operation)) {
+    return parsed.data
+  }
+  return errorResult(operation, PUBLIC_ERRORS.internal)
+}
+
+function preparationSummary(snapshot: PreparationSnapshot): PreparationSummary {
+  return {
+    expiresAtMs: snapshot.expiresAtMs,
+    fileCount: snapshot.fileCount,
+    infoHash: snapshot.infoHash,
+    length: snapshot.length,
+    name: snapshot.name,
+    preparationId: snapshot.preparationId,
+    private: snapshot.private,
+    selectedFileCount: snapshot.selectedFileCount,
+    warnings: [...snapshot.warnings]
+  }
+}
+
+function preparationFilePage(
+  page: PreparationFilePage
+): PublicPreparationFilePage {
+  return {
+    items: page.items.map(item => ({
+      downloaded: item.downloaded,
+      index: item.index,
+      length: item.length,
+      path: item.path,
+      progress: item.progress,
+      selected: item.selected
+    })),
+    nextCursor: page.nextCursor,
+    preparationId: page.preparationId,
+    total: page.total
+  }
+}
+
+/**
+ * Owns command-facing torrent state inside the utility process. The protocol
+ * controller provides serialization and deadlines; this boundary translates
+ * internal failures into stable, redacted public results.
+ */
+export class EngineRuntime {
+  readonly #emitEvent: (event: EngineEvent) => void
+  readonly #lifecycleController = new AbortController()
+  readonly #acquisitions = new Map<string, AcquisitionRecord>()
+  readonly #preparationService: PreparationService
+  readonly #preparationStore: PreparationStore
+  readonly #activeExecutions = new Set<Promise<EngineCommandResult>>()
+  readonly #creationService: TorrentCreationService | null
+  readonly #legacyImports: LegacyImportService | null
+  readonly #mediaProxy: MediaProxy | null
+  readonly #torrentArchive: TorrentArchive | null
+  readonly #validateArchivedMetadata:
+    ((bytes: Uint8Array) => Promise<ValidatedTorrentMetadata>) | null
+  readonly #resumeSelection:
+    ((infoHash: string) => Promise<ReadonlyArray<string> | null>) | null
+  readonly #torrentManager: TorrentManager | null
+  #closePromise: Promise<void> | null = null
+  #closed = false
+
+  constructor(options: EngineRuntimeOptions = {}) {
+    this.#emitEvent = options.emitEvent ?? (() => undefined)
+    this.#creationService = options.creationService ?? null
+    this.#legacyImports = options.legacyImports ?? null
+    this.#mediaProxy = options.mediaProxy ?? null
+    this.#torrentArchive = options.torrentArchive ?? null
+    this.#validateArchivedMetadata = options.validateArchivedMetadata ?? null
+    this.#resumeSelection = options.resumeSelection ?? null
+    this.#torrentManager = options.torrentManager ?? null
+    this.#preparationStore = options.preparationStore ?? new PreparationStore()
+    this.#preparationService =
+      options.createPreparationService?.(this.#preparationStore) ??
+      new TorrentPreparationService({ store: this.#preparationStore })
+  }
+
+  execute(
+    operation: EngineCommand,
+    signal: AbortSignal
+  ): Promise<EngineCommandResult> {
+    if (signal.aborted) {
+      return Promise.resolve(
+        strictResult(operation, errorResult(operation, PUBLIC_ERRORS.aborted))
+      )
+    }
+    if (this.#closed) {
+      return Promise.resolve(
+        strictResult(
+          operation,
+          errorResult(operation, PUBLIC_ERRORS.engineNotReady)
+        )
+      )
+    }
+
+    const executionSignal = AbortSignal.any([
+      signal,
+      this.#lifecycleController.signal
+    ])
+    const execution = this.#executeActive(operation, executionSignal)
+    this.#activeExecutions.add(execution)
+    void execution.then(
+      () => {
+        this.#activeExecutions.delete(execution)
+      },
+      () => {
+        this.#activeExecutions.delete(execution)
+      }
+    )
+    return execution
+  }
+
+  close(): Promise<void> {
+    if (this.#closePromise) return this.#closePromise
+
+    this.#closed = true
+    this.#lifecycleController.abort()
+    for (const record of this.#acquisitions.values()) {
+      record.controller.abort()
+    }
+    this.#preparationStore.clear()
+    const activeExecutions = [...this.#activeExecutions]
+    const activeAcquisitions = [...this.#acquisitions.values()].map(
+      record => record.completion
+    )
+    this.#closePromise = Promise.allSettled([
+      ...activeExecutions,
+      ...activeAcquisitions
+    ])
+      .then(async () => {
+        this.#acquisitions.clear()
+        await this.#torrentManager?.closeAll()
+      })
+      .then(() => {
+        this.#preparationStore.clear()
+      })
+    return this.#closePromise
+  }
+
+  async #executeActive(
+    operation: EngineCommand,
+    signal: AbortSignal
+  ): Promise<EngineCommandResult> {
+    try {
+      this.#expirePreparations()
+      if (signal.aborted) {
+        return strictResult(
+          operation,
+          errorResult(operation, PUBLIC_ERRORS.aborted)
+        )
+      }
+      return strictResult(operation, await this.#dispatch(operation, signal))
+    } catch (error) {
+      return strictResult(operation, this.#mapFailure(operation, error, signal))
+    }
+  }
+
+  async #dispatch(
+    operation: EngineCommand,
+    signal: AbortSignal
+  ): Promise<EngineCommandResult> {
+    switch (operation.command) {
+      case 'open-preparation':
+        return await this.#openPreparation(operation, signal)
+      case 'start-acquisition':
+        return this.#startAcquisition(operation)
+      case 'get-acquisition':
+        return this.#getAcquisition(operation)
+      case 'get-preparation-files': {
+        const page = preparationFilePage(
+          this.#preparationStore.pageFiles(operation.payload.preparationId, {
+            cursor: operation.payload.cursor,
+            limit: operation.payload.limit
+          })
+        )
+        return {
+          ok: true,
+          result: {
+            command: 'get-preparation-files',
+            value: page
+          }
+        }
+      }
+      case 'update-preparation-selection': {
+        const snapshot = this.#preparationStore.updateSelection(
+          operation.payload.preparationId,
+          operation.payload.changes
+        )
+        return {
+          ok: true,
+          result: {
+            command: 'update-preparation-selection',
+            value: {
+              preparationId: snapshot.preparationId,
+              selectedFileCount: snapshot.selectedFileCount
+            }
+          }
+        }
+      }
+      case 'discard-preparation': {
+        const snapshot = this.#preparationStore.discard(
+          operation.payload.preparationId
+        )
+        return {
+          ok: true,
+          result: {
+            command: 'discard-preparation',
+            value: {
+              discarded: true,
+              preparationId: snapshot.preparationId
+            }
+          }
+        }
+      }
+      case 'list-torrents': {
+        const manager = this.#requireManager()
+        return {
+          ok: true,
+          result: {
+            command: 'list-torrents',
+            value: manager.list(
+              operation.payload.cursor,
+              operation.payload.limit
+            )
+          }
+        }
+      }
+      case 'get-torrent-files': {
+        const manager = this.#requireManager()
+        return {
+          ok: true,
+          result: {
+            command: 'get-torrent-files',
+            value: manager.files(
+              operation.payload.infoHash,
+              operation.payload.cursor,
+              operation.payload.limit
+            )
+          }
+        }
+      }
+      case 'set-torrent-selection': {
+        const manager = this.#requireManager()
+        // The engine rebuilds the whole selection, so the change list is
+        // folded into the selection the session already holds.
+        const selected = new Set(manager.selection(operation.payload.infoHash))
+        for (const change of operation.payload.changes) {
+          if (change.selected) selected.add(change.index)
+          else selected.delete(change.index)
+        }
+        const summary = manager.updateSelection(operation.payload.infoHash, [
+          ...selected
+        ])
+        return {
+          ok: true,
+          result: {
+            command: 'set-torrent-selection',
+            value: {
+              infoHash: summary.infoHash,
+              selectedFileCount: summary.selectedFileCount
+            }
+          }
+        }
+      }
+      case 'pause-torrent': {
+        const manager = this.#requireManager()
+        this.#mediaProxy?.revokeTorrent(operation.payload.infoHash)
+        return {
+          ok: true,
+          result: {
+            command: 'pause-torrent',
+            value: await manager.pause(operation.payload.infoHash)
+          }
+        }
+      }
+      case 'resume-torrent': {
+        const manager = this.#requireManager()
+        return {
+          ok: true,
+          result: {
+            command: 'resume-torrent',
+            value: await manager.resume(operation.payload.infoHash)
+          }
+        }
+      }
+      case 'remove-torrent': {
+        const manager = this.#requireManager()
+        this.#mediaProxy?.revokeTorrent(operation.payload.infoHash)
+        await manager.remove(operation.payload.infoHash)
+        await this.#torrentArchive?.remove(operation.payload.infoHash)
+        this.#emit({
+          event: 'torrent-removed',
+          payload: { infoHash: operation.payload.infoHash }
+        })
+        return {
+          ok: true,
+          result: {
+            command: 'remove-torrent',
+            value: { infoHash: operation.payload.infoHash, removed: true }
+          }
+        }
+      }
+      case 'restore-torrent':
+        return await this.#restoreTorrent(operation)
+      case 'commit-preparation':
+        return await this.#commitPreparation(operation)
+      case 'create-torrent':
+        return await this.#createTorrent(operation)
+      case 'export-torrent':
+        return await this.#exportTorrent(operation)
+      case 'list-legacy-imports': {
+        const importer = this.#requireLegacyImports()
+        return {
+          ok: true,
+          result: {
+            command: 'list-legacy-imports',
+            value: await importer.page(
+              operation.payload.legacyRoot,
+              operation.payload.cursor,
+              operation.payload.limit
+            )
+          }
+        }
+      }
+      case 'import-legacy-torrent': {
+        const importer = this.#requireLegacyImports()
+        const manager = this.#requireManager()
+        const entry = await importer.take(
+          operation.payload.legacyRoot,
+          operation.payload.infoHash
+        )
+        if (!entry) return errorResult(operation, PUBLIC_ERRORS.torrentNotFound)
+
+        const torrent = await manager.add({
+          destinationRoot: operation.payload.destinationRoot,
+          metadata: entry.metadata,
+          selectedIndexes: entry.selectedIndexes
+        })
+        // The archive is what a later restore reads. Without it main keeps a
+        // library record the next launch cannot load, and the record is
+        // deleted as unrestorable.
+        await this.#archive(entry.metadata)
+        this.#emit({ event: 'torrent-updated', payload: torrent })
+        return {
+          ok: true,
+          result: {
+            command: 'import-legacy-torrent',
+            value: { infoHash: operation.payload.infoHash, torrent }
+          }
+        }
+      }
+      case 'open-media':
+        return this.#openMedia(operation)
+      case 'open-audio-metadata':
+        return await this.#openAudioMetadata(operation, signal)
+      case 'open-subtitles':
+        return await this.#openSubtitles(operation)
+      case 'open-external-subtitle':
+        return await this.#openExternalSubtitle(operation)
+      case 'heartbeat-media': {
+        const proxy = this.#requireMediaProxy()
+        const lease = proxy.heartbeat(operation.payload.leaseId)
+        return {
+          ok: true,
+          result: {
+            command: 'heartbeat-media',
+            value: {
+              expiresAtMs: lease.expiresAtMs,
+              leaseId: lease.leaseId
+            }
+          }
+        }
+      }
+      case 'close-media': {
+        const proxy = this.#requireMediaProxy()
+        if (!proxy.close(operation.payload.leaseId)) {
+          return errorResult(operation, PUBLIC_ERRORS.mediaNotFound)
+        }
+        return {
+          ok: true,
+          result: {
+            command: 'close-media',
+            value: { closed: true, leaseId: operation.payload.leaseId }
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Consumes an open preparation exactly once. A failure before the metadata
+   * barrier rolls the preparation back to open; a successful commitment
+   * consumes its exclusive reservation.
+   */
+  async #commitPreparation(
+    operation: Extract<EngineCommand, { command: 'commit-preparation' }>
+  ): Promise<EngineCommandResult> {
+    const manager = this.#requireManager()
+    const reservation = this.#preparationStore.beginCommit(
+      operation.payload.preparationId
+    )
+
+    let torrent
+    try {
+      torrent = await manager.add({
+        destinationRoot: operation.payload.destinationRoot,
+        metadata: reservation.metadata,
+        selectedIndexes: reservation.selectedIndexes
+      })
+    } catch (error) {
+      try {
+        this.#preparationStore.rollbackCommitBeforeMetadata(reservation)
+      } catch {
+        // An exact TTL boundary may already have removed the preparation.
+      }
+      throw error
+    }
+
+    this.#preparationStore.consumeCommit(reservation)
+    await this.#archive(reservation.metadata)
+    this.#emit({ event: 'torrent-updated', payload: torrent })
+    return {
+      ok: true,
+      result: {
+        command: 'commit-preparation',
+        value: {
+          preparationId: reservation.preparationId,
+          torrent
+        }
+      }
+    }
+  }
+
+  /**
+   * Keeps the committed bytes so a restart can rebuild the session without
+   * asking the network for metadata again. A failed archive costs the restart,
+   * not the add, so it never fails the command.
+   */
+  async #archive(metadata: ValidatedTorrentMetadata): Promise<void> {
+    if (!this.#torrentArchive) return
+    try {
+      await this.#torrentArchive.save(metadata.infoHash, metadata.torrentBytes)
+    } catch {
+      // The torrent is running; only the next restart loses its fast path.
+    }
+  }
+
+  /**
+   * Rebuilds one session from its archived bytes. The bytes re-enter through
+   * the ordinary metadata boundary, and a torrent whose archive is missing or
+   * no longer valid is reported rather than silently skipped.
+   */
+  async #restoreTorrent(
+    operation: Extract<EngineCommand, { command: 'restore-torrent' }>
+  ): Promise<EngineCommandResult> {
+    const manager = this.#requireManager()
+    const archive = this.#torrentArchive
+    const validate = this.#validateArchivedMetadata
+    if (!archive || !validate) throw new EngineRuntimeUnavailableError()
+
+    const bytes = await archive.load(operation.payload.infoHash)
+    if (bytes === null) {
+      return errorResult(operation, PUBLIC_ERRORS.archiveUnavailable)
+    }
+
+    const metadata = await validate(bytes)
+    if (metadata.infoHash !== operation.payload.infoHash) {
+      return errorResult(operation, PUBLIC_ERRORS.archiveUnavailable)
+    }
+
+    // Selections are keyed by normalized path, never by array index, so a
+    // reordered manifest can never select the wrong file. A torrent with no
+    // saved selection restores whole, as it was first added.
+    const saved = (await this.#resumeSelection?.(metadata.infoHash)) ?? null
+    const wanted = new Set(saved ?? [])
+    const selectedIndexes = metadata.files
+      .filter(file => wanted.has(file.path))
+      .map(file => file.index)
+
+    const torrent = await manager.add({
+      destinationRoot: operation.payload.destinationRoot,
+      metadata,
+      selectedIndexes:
+        selectedIndexes.length > 0
+          ? selectedIndexes
+          : metadata.files.map(file => file.index)
+    })
+    // Every add begins paused, so a record that was running has to be started
+    // again explicitly; otherwise a restart silently stops every transfer.
+    if (!operation.payload.paused) {
+      await manager.resume(metadata.infoHash)
+    }
+
+    const restored = manager.summary(metadata.infoHash)
+    this.#emit({ event: 'torrent-updated', payload: restored })
+    return {
+      ok: true,
+      result: {
+        command: 'restore-torrent',
+        value: { infoHash: torrent.infoHash, torrent: restored }
+      }
+    }
+  }
+
+  /**
+   * Creates validated v1 bytes, then adds them through the ordinary guarded
+   * path so the new torrent is fully verified before it seeds in place.
+   */
+  async #createTorrent(
+    operation: Extract<EngineCommand, { command: 'create-torrent' }>
+  ): Promise<EngineCommandResult> {
+    const manager = this.#requireManager()
+    const creation = this.#creationService
+    if (!creation) throw new EngineRuntimeUnavailableError()
+
+    const created = await creation.create({
+      allowHttpTrackers: operation.payload.allowHttpTrackers,
+      announceTiers: operation.payload.announceTiers,
+      filterJunkFiles: operation.payload.filterJunkFiles,
+      private: operation.payload.private,
+      sourcePath: operation.payload.sourcePath,
+      ...(operation.payload.comment === undefined
+        ? {}
+        : { comment: operation.payload.comment }),
+      ...(operation.payload.name === undefined
+        ? {}
+        : { name: operation.payload.name })
+    })
+
+    const torrent = await manager.add({
+      destinationRoot: created.seedRoot,
+      metadata: created.metadata,
+      selectedIndexes: created.metadata.files.map(file => file.index)
+    })
+    await this.#archive(created.metadata)
+    this.#emit({ event: 'torrent-updated', payload: torrent })
+    return {
+      ok: true,
+      result: {
+        command: 'create-torrent',
+        value: { operationId: operation.payload.operationId, torrent }
+      }
+    }
+  }
+
+  /** Writes archived bytes only to the destination approved by main. */
+  async #exportTorrent(
+    operation: Extract<EngineCommand, { command: 'export-torrent' }>
+  ): Promise<EngineCommandResult> {
+    const archive = this.#torrentArchive
+    if (!archive) throw new EngineRuntimeUnavailableError()
+
+    try {
+      const exported = await archive.export(
+        operation.payload.infoHash,
+        operation.payload.destinationPath
+      )
+      if (!exported) {
+        return errorResult(operation, PUBLIC_ERRORS.archiveUnavailable)
+      }
+    } catch {
+      return errorResult(operation, PUBLIC_ERRORS.exportFailed)
+    }
+
+    return {
+      ok: true,
+      result: {
+        command: 'export-torrent',
+        value: { exported: true, infoHash: operation.payload.infoHash }
+      }
+    }
+  }
+
+  /**
+   * Mints one opaque per-file loopback URL. The renderer never receives a
+   * torrent index route, a raw WebTorrent server URL, or a file path.
+   */
+  #openMedia(
+    operation: Extract<EngineCommand, { command: 'open-media' }>
+  ): EngineCommandResult {
+    const manager = this.#requireManager()
+    const proxy = this.#requireMediaProxy()
+    const file = manager.mediaFile(
+      operation.payload.infoHash,
+      operation.payload.fileIndex
+    )
+    if (!file) return errorResult(operation, PUBLIC_ERRORS.mediaNotFound)
+
+    const lease = proxy.open({
+      fileIndex: operation.payload.fileIndex,
+      infoHash: operation.payload.infoHash,
+      source: {
+        contentType: mediaContentType(file.path),
+        createReadStream: range =>
+          file.createReadStream({ end: range.end, start: range.start }),
+        length: file.length
+      }
+    })
+    return {
+      ok: true,
+      result: {
+        command: 'open-media',
+        value: {
+          expiresAtMs: lease.expiresAtMs,
+          fileIndex: lease.fileIndex,
+          infoHash: lease.infoHash,
+          leaseId: lease.leaseId,
+          url: lease.url
+        }
+      }
+    }
+  }
+
+  /**
+   * Parses only a bounded prefix and returns an owned DTO. Embedded artwork
+   * remains behind a separate opaque proxy lease; raw tags and image bytes
+   * never cross the engine command boundary.
+   */
+  async #openAudioMetadata(
+    operation: Extract<EngineCommand, { command: 'open-audio-metadata' }>,
+    signal: AbortSignal
+  ): Promise<EngineCommandResult> {
+    const manager = this.#requireManager()
+    const proxy = this.#requireMediaProxy()
+    const { fileIndex, infoHash } = operation.payload
+    const file = manager.mediaFile(infoHash, fileIndex)
+    if (!file) return errorResult(operation, PUBLIC_ERRORS.mediaNotFound)
+
+    const inspected = await inspectAudioMetadata(
+      {
+        createReadStream: () =>
+          file.createReadStream({ end: file.length - 1, start: 0 }),
+        length: file.length,
+        name: file.path
+      },
+      signal
+    )
+    let artwork = null
+    if (inspected.artwork) {
+      const bytes = inspected.artwork.bytes
+      const lease = proxy.open({
+        fileIndex,
+        infoHash,
+        source: {
+          contentType: inspected.artwork.contentType,
+          createReadStream: range =>
+            Readable.from([bytes.subarray(range.start, range.end + 1)]),
+          length: bytes.byteLength
+        }
+      })
+      artwork = {
+        byteLength: bytes.byteLength,
+        contentType: inspected.artwork.contentType,
+        height: inspected.artwork.height,
+        leaseId: lease.leaseId,
+        url: lease.url,
+        width: inspected.artwork.width
+      }
+    }
+
+    return {
+      ok: true,
+      result: {
+        command: 'open-audio-metadata',
+        value: {
+          artwork,
+          fileIndex,
+          infoHash,
+          metadata: inspected.metadata
+        }
+      }
+    }
+  }
+
+  /**
+   * Converts the torrent's own completed subtitle files and hands each one to
+   * the loopback proxy. The renderer receives opaque URLs, never the text and
+   * never a path, and an unreadable or unsupported file is skipped rather than
+   * failing the others.
+   */
+  async #openSubtitles(
+    operation: Extract<EngineCommand, { command: 'open-subtitles' }>
+  ): Promise<EngineCommandResult> {
+    const manager = this.#requireManager()
+    const proxy = this.#requireMediaProxy()
+    const { infoHash } = operation.payload
+
+    const candidates = manager
+      .subtitleFiles(infoHash)
+      .slice(0, SUBTITLE_LIMITS.maxTracks)
+    const tracks: Array<{
+      fileIndex: number
+      label: string
+      language: string
+      leaseId: string
+      url: string
+    }> = []
+    const openedLeaseIds: string[] = []
+
+    try {
+      for (const candidate of candidates) {
+        const file = manager.mediaFile(infoHash, candidate.index)
+        if (!file || file.length > SUBTITLE_LIMITS.maxSourceBytes) continue
+
+        let track
+        try {
+          track = toSubtitleTrack(
+            await readAll(
+              file.createReadStream({ end: file.length - 1, start: 0 }),
+              SUBTITLE_LIMITS.maxSourceBytes
+            ),
+            { fallbackLabel: candidate.path.split('/').at(-1) ?? 'Subtitle' }
+          )
+        } catch {
+          continue
+        }
+
+        const vtt = new TextEncoder().encode(track.vtt)
+        const lease = proxy.open({
+          fileIndex: candidate.index,
+          infoHash,
+          source: {
+            contentType: 'text/vtt',
+            createReadStream: range =>
+              Readable.from([vtt.subarray(range.start, range.end + 1)]),
+            length: vtt.byteLength
+          }
+        })
+        openedLeaseIds.push(lease.leaseId)
+        tracks.push({
+          fileIndex: candidate.index,
+          label: track.label,
+          language: track.language,
+          leaseId: lease.leaseId,
+          url: lease.url
+        })
+      }
+    } catch (error) {
+      for (const leaseId of openedLeaseIds) proxy.close(leaseId)
+      throw error
+    }
+
+    return {
+      ok: true,
+      result: {
+        command: 'open-subtitles',
+        value: { infoHash, tracks: relabelTracks(tracks) as typeof tracks }
+      }
+    }
+  }
+
+  /** Converts one one-use, chooser-authorized local subtitle into WebVTT. */
+  async #openExternalSubtitle(
+    operation: Extract<EngineCommand, { command: 'open-external-subtitle' }>
+  ): Promise<EngineCommandResult> {
+    const manager = this.#requireManager()
+    const proxy = this.#requireMediaProxy()
+    const { infoHash, mediaFileIndex } = operation.payload
+    if (!manager.mediaFile(infoHash, mediaFileIndex)) {
+      return errorResult(operation, PUBLIC_ERRORS.mediaNotFound)
+    }
+
+    if (!operation.payload.grant) {
+      throw new ExternalSubtitleError('UNAVAILABLE')
+    }
+    const track = await readExternalSubtitle(
+      operation.payload.path,
+      operation.payload.grant
+    )
+    const vtt = new TextEncoder().encode(track.vtt)
+    const lease = proxy.open({
+      fileIndex: mediaFileIndex,
+      infoHash,
+      source: {
+        contentType: 'text/vtt',
+        createReadStream: range =>
+          Readable.from([vtt.subarray(range.start, range.end + 1)]),
+        length: vtt.byteLength
+      }
+    })
+    return {
+      ok: true,
+      result: {
+        command: 'open-external-subtitle',
+        value: {
+          infoHash,
+          mediaFileIndex,
+          track: {
+            label: track.label,
+            language: track.language,
+            leaseId: lease.leaseId,
+            url: lease.url
+          }
+        }
+      }
+    }
+  }
+
+  #requireLegacyImports(): LegacyImportService {
+    if (!this.#legacyImports) throw new EngineRuntimeUnavailableError()
+    return this.#legacyImports
+  }
+
+  #requireMediaProxy(): MediaProxy {
+    if (!this.#mediaProxy) throw new EngineRuntimeUnavailableError()
+    return this.#mediaProxy
+  }
+
+  #requireManager(): TorrentManager {
+    if (!this.#torrentManager) {
+      throw new EngineRuntimeUnavailableError()
+    }
+    return this.#torrentManager
+  }
+
+  #emit(event: EngineEvent): void {
+    try {
+      this.#emitEvent(event)
+    } catch {
+      // A reporting callback cannot fail a completed command.
+    }
+  }
+
+  /**
+   * Starts one acquisition and answers immediately. Metadata cannot arrive
+   * inside the renderer's bounded request, so the caller polls
+   * `get-acquisition` until it settles; nothing is stored until it does.
+   */
+  #startAcquisition(
+    operation: Extract<EngineCommand, { command: 'start-acquisition' }>
+  ): EngineCommandResult {
+    this.#expireAcquisitions()
+    if (this.#acquisitions.size >= MAX_TRACKED_ACQUISITIONS) {
+      return errorResult(operation, PUBLIC_ERRORS.capacityExceeded)
+    }
+
+    const acquisitionId = randomUUID()
+    const controller = new AbortController()
+    const record = {
+      completion: Promise.resolve(),
+      controller,
+      expiresAtMs: Date.now() + ACQUISITION_TTL_MS,
+      state: { state: 'acquiring' }
+    } as AcquisitionRecord
+    this.#acquisitions.set(acquisitionId, record)
+
+    record.completion = this.#preparationService
+      .open(operation.payload.source, controller.signal)
+      .then(snapshot => {
+        if (controller.signal.aborted || this.#closed) {
+          try {
+            this.#preparationStore.discard(snapshot.preparationId)
+          } catch {
+            // Shutdown or expiry may already have released it.
+          }
+          return
+        }
+        record.state = {
+          preparation: preparationSummary(snapshot),
+          state: 'ready'
+        }
+      })
+      .catch((error: unknown) => {
+        record.state = {
+          code:
+            error instanceof TorrentPreparationServiceError &&
+            error.code === 'DHT_CONSENT_REQUIRED'
+              ? 'DHT_CONSENT_REQUIRED'
+              : error instanceof TorrentPreparationServiceError &&
+                  error.code === 'PRIVATE_DHT_METADATA'
+                ? 'PRIVATE_DHT_METADATA'
+                : error instanceof TorrentPreparationServiceError &&
+                    error.code === 'INPUT_INVALID'
+                  ? 'INPUT_INVALID'
+                  : error instanceof TorrentPreparationServiceError &&
+                      error.code === 'METADATA_UNAVAILABLE'
+                    ? 'METADATA_UNAVAILABLE'
+                    : 'INTERNAL',
+          state: 'failed'
+        }
+      })
+      .finally(() => {
+        record.expiresAtMs = Date.now() + ACQUISITION_TTL_MS
+      })
+
+    return {
+      ok: true,
+      result: { command: 'start-acquisition', value: { acquisitionId } }
+    }
+  }
+
+  #getAcquisition(
+    operation: Extract<EngineCommand, { command: 'get-acquisition' }>
+  ): EngineCommandResult {
+    this.#expireAcquisitions()
+    const record = this.#acquisitions.get(operation.payload.acquisitionId)
+    if (!record)
+      return errorResult(operation, PUBLIC_ERRORS.preparationNotFound)
+
+    // A settled acquisition is reported once and then forgotten: its
+    // preparation now lives in the store under its own identifier.
+    if (record.state.state !== 'acquiring') {
+      this.#acquisitions.delete(operation.payload.acquisitionId)
+    }
+    return {
+      ok: true,
+      result: { command: 'get-acquisition', value: record.state }
+    }
+  }
+
+  #expireAcquisitions(): void {
+    const now = Date.now()
+    for (const [id, record] of this.#acquisitions) {
+      if (record.expiresAtMs > now) continue
+      record.controller.abort()
+      this.#acquisitions.delete(id)
+    }
+  }
+
+  async #openPreparation(
+    operation: Extract<EngineCommand, { command: 'open-preparation' }>,
+    signal: AbortSignal
+  ): Promise<EngineCommandResult> {
+    const snapshot = await this.#preparationService.open(
+      operation.payload.source,
+      signal
+    )
+    if (signal.aborted || this.#closed) {
+      try {
+        this.#preparationStore.discard(snapshot.preparationId)
+      } catch {
+        // Closing or an exact TTL boundary may already have released it.
+      }
+      return errorResult(operation, PUBLIC_ERRORS.aborted)
+    }
+
+    return {
+      ok: true,
+      result: {
+        command: 'open-preparation',
+        value: preparationSummary(snapshot)
+      }
+    }
+  }
+
+  #expirePreparations(): void {
+    for (const preparation of this.#preparationStore.expire()) {
+      try {
+        this.#emitEvent({
+          event: 'preparation-expired',
+          payload: {
+            preparationId: preparation.preparationId
+          }
+        })
+      } catch {
+        // A reporting callback cannot restore expired state or fail a command.
+      }
+    }
+  }
+
+  #mapFailure(
+    operation: EngineCommand,
+    error: unknown,
+    signal: AbortSignal
+  ): EngineCommandResult {
+    if (signal.aborted) {
+      return errorResult(operation, PUBLIC_ERRORS.aborted)
+    }
+
+    if (error instanceof TorrentPreparationServiceError) {
+      switch (error.code) {
+        case 'ABORTED':
+          return errorResult(operation, PUBLIC_ERRORS.aborted)
+        case 'ALREADY_EXISTS':
+          return errorResult(operation, PUBLIC_ERRORS.alreadyExists)
+        case 'CAPACITY_EXCEEDED':
+          return errorResult(operation, PUBLIC_ERRORS.capacityExceeded)
+        case 'DHT_CONSENT_REQUIRED':
+          return errorResult(operation, PUBLIC_ERRORS.dhtConsentRequired)
+        case 'INPUT_INVALID':
+          return errorResult(operation, PUBLIC_ERRORS.inputInvalid)
+        case 'LOCAL_TORRENT_UNAVAILABLE':
+          return errorResult(operation, PUBLIC_ERRORS.localTorrentUnavailable)
+        case 'METADATA_UNAVAILABLE':
+          return errorResult(operation, PUBLIC_ERRORS.metadataUnavailable)
+        case 'PRIVATE_DHT_METADATA':
+          return errorResult(operation, PUBLIC_ERRORS.privateDhtMetadata)
+        case 'REMOTE_CONCURRENCY_LIMIT':
+          return errorResult(operation, PUBLIC_ERRORS.remoteConcurrencyLimit)
+        case 'REMOTE_TORRENT_UNAVAILABLE':
+          return errorResult(operation, PUBLIC_ERRORS.remoteTorrentUnavailable)
+        case 'UNSUPPORTED':
+          return errorResult(operation, PUBLIC_ERRORS.unsupported)
+        case 'INTERNAL':
+          return errorResult(operation, PUBLIC_ERRORS.internal)
+      }
+    }
+
+    if (error instanceof EngineRuntimeUnavailableError) {
+      return errorResult(operation, PUBLIC_ERRORS.engineNotReady)
+    }
+
+    if (error instanceof LegacyImportError) {
+      switch (error.code) {
+        case 'ROOT_NOT_AUTHORIZED':
+          return errorResult(operation, PUBLIC_ERRORS.sourceNotAuthorized)
+        case 'STATE_UNREADABLE':
+        case 'TOO_MANY_TORRENTS':
+          return errorResult(operation, PUBLIC_ERRORS.legacyUnreadable)
+      }
+    }
+
+    if (error instanceof MediaProxyError) {
+      switch (error.code) {
+        case 'CAPACITY_EXCEEDED':
+          return errorResult(operation, PUBLIC_ERRORS.mediaUnavailable)
+        case 'CLOSED':
+        case 'START_FAILED':
+          return errorResult(operation, PUBLIC_ERRORS.engineNotReady)
+        case 'NOT_FOUND':
+          return errorResult(operation, PUBLIC_ERRORS.mediaNotFound)
+      }
+    }
+
+    if (error instanceof ExternalSubtitleError) {
+      return errorResult(
+        operation,
+        error.code === 'UNAVAILABLE'
+          ? PUBLIC_ERRORS.sourceNotAuthorized
+          : PUBLIC_ERRORS.inputInvalid
+      )
+    }
+
+    if (error instanceof TorrentCreationError) {
+      switch (error.code) {
+        case 'INPUT_INVALID':
+          return errorResult(operation, PUBLIC_ERRORS.inputInvalid)
+        case 'PRIVATE_TRACKER_REQUIRED':
+        case 'TRACKER_REJECTED':
+          return errorResult(operation, PUBLIC_ERRORS.trackerRejected)
+        case 'SOURCE_NOT_AUTHORIZED':
+          return errorResult(operation, PUBLIC_ERRORS.sourceNotAuthorized)
+        case 'CREATION_FAILED':
+          return errorResult(operation, PUBLIC_ERRORS.creationFailed)
+      }
+    }
+
+    if (error instanceof DiskTorrentError) {
+      switch (error.code) {
+        case 'COMMIT_REJECTED':
+          return errorResult(operation, PUBLIC_ERRORS.torrentMetadataRejected)
+        case 'READY_TIMEOUT':
+          return errorResult(operation, PUBLIC_ERRORS.torrentTimedOut)
+        case 'STATE_CONFLICT':
+          return errorResult(operation, PUBLIC_ERRORS.torrentStateConflict)
+        case 'ADD_FAILED':
+        case 'DESTROYED':
+        case 'TORRENT_ERROR':
+          return errorResult(operation, PUBLIC_ERRORS.torrentAddFailed)
+      }
+    }
+
+    if (error instanceof TorrentManagerError) {
+      switch (error.code) {
+        case 'CAPACITY_EXCEEDED':
+          return errorResult(operation, PUBLIC_ERRORS.capacityExceeded)
+        case 'INPUT_INVALID':
+          return errorResult(operation, PUBLIC_ERRORS.inputInvalid)
+        case 'NOT_FOUND':
+          return errorResult(operation, PUBLIC_ERRORS.torrentNotFound)
+        case 'STATE_CONFLICT':
+          return errorResult(operation, PUBLIC_ERRORS.torrentStateConflict)
+      }
+    }
+
+    if (error instanceof TorrentRegistryError) {
+      switch (error.code) {
+        case 'CAPACITY_EXCEEDED':
+          return errorResult(operation, PUBLIC_ERRORS.capacityExceeded)
+        case 'DUPLICATE_INFO_HASH':
+          return errorResult(operation, PUBLIC_ERRORS.alreadyExists)
+        case 'INVALID_INPUT':
+          return errorResult(operation, PUBLIC_ERRORS.inputInvalid)
+        case 'NOT_FOUND':
+          return errorResult(operation, PUBLIC_ERRORS.torrentNotFound)
+        case 'STATE_CONFLICT':
+          return errorResult(operation, PUBLIC_ERRORS.torrentStateConflict)
+      }
+    }
+
+    if (error instanceof TorrentArchiveError) {
+      return errorResult(operation, PUBLIC_ERRORS.archiveUnavailable)
+    }
+
+    if (error instanceof PreparationStoreError) {
+      switch (error.code) {
+        case 'DUPLICATE_INFO_HASH':
+          return errorResult(operation, PUBLIC_ERRORS.alreadyExists)
+        case 'CAPACITY_EXCEEDED':
+          return errorResult(operation, PUBLIC_ERRORS.capacityExceeded)
+        case 'EXPIRED':
+        case 'NOT_FOUND':
+          return errorResult(operation, PUBLIC_ERRORS.preparationNotFound)
+        case 'INVALID_PAGE':
+        case 'INVALID_SELECTION':
+          return errorResult(operation, PUBLIC_ERRORS.inputInvalid)
+        case 'STATE_CONFLICT':
+          return errorResult(operation, PUBLIC_ERRORS.stateConflict)
+        case 'INVALID_WARNING':
+          return errorResult(operation, PUBLIC_ERRORS.internal)
+      }
+    }
+
+    return errorResult(operation, PUBLIC_ERRORS.internal)
+  }
+}
